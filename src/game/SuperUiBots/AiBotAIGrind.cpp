@@ -18,6 +18,7 @@
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
+#include <set>
 #include "Group.h"
 #include "CreatureAI.h"
 #include "Log.h"
@@ -331,39 +332,91 @@ void AiBotAI::DoGrindPatrol()
 }
 
 // ============================================================
-// §4: ScanApproachTarget — find the objective mob near the BOT
+// §4: ScanApproachTarget — engage ANY valid in-log quest mob on the way
+//     (COMPLETE METHOD REPLACEMENT — scatter "engage any valid mob" fix)
 //
-// Mirrors SelectGrindTarget's per-candidate filters (alive / hostile / untapped /
-// LOS) MINUS the "distance from area center <= radius" filter (filter #3). The
-// center of an enriched MOVE_TO is the deep loader coord, so applying it would
-// reject the very mouth mobs we want. We scan around the BOT and take the nearest
-// valid one — exactly what a player does walking up to a cave.
+// The enriched MOVE_TO carries ONE creatureEntry (the dispatched objective, or the
+// C#-resolved item-drop source). The OLD scan keyed ONLY to that entry AND required
+// LOS, so the bot ran right past mobs valid for a DIFFERENT in-log quest — or the SAME
+// entry in a closer, live cluster it couldn't quite see — to march to the dispatched
+// scatter coord. If another bot had already farmed that coord out, it dead-ended into
+// GRIND_BLOCKED / "un-continuable" beside perfectly good targets.
+//
+// Now it engages the nearest live mob valid for ANY unmet kill objective we hold. The
+// valid-kill UNION is built straight from the server-authoritative QuestStatusMap — no
+// new wire field, no new task member:
+//   • for every INCOMPLETE quest, each ReqCreatureOrGOId slot that is a CREATURE (>0)
+//     and still SHORT of its required count (a met slot's mob gives no quest credit), and
+//   • the dispatched creatureEntry itself — which is the ONLY known kill creature for a
+//     pure item-drop quest (the core quest row carries the item, not the creature; C#
+//     resolved the drop source into creatureEntry).
+//
+// One bot-centric unfriendly sweep (not a per-entry grid query), filtered by entry ∈
+// union. LOS is DROPPED to match the objective rescan in SelectGrindTarget — we PATH to
+// the mob, we don't need to see it. The tap gate (UNIT_DYNFLAG_TAPPED && !IsTappedBy) and
+// the combat-ignore set are honored exactly as the kill-credit path and the picker do.
+//
+// NOTE (kill-counting): the dispatched leg's killCount still only advances on
+// creatureEntry (UpdateAI). A mob engaged here for a DIFFERENT entry is credited to its
+// own quest SERVER-side (shared kill credit), seen on the next QUERY_QUEST_STATUS — the
+// bot makes real batch progress instead of stranding on a dead coord. Per-leg counting of
+// cross-entry kills is the follow-on that needs a first-class task-side union (header).
 // ============================================================
 Unit* AiBotAI::ScanApproachTarget()
 {
     if (m_currentTask.creatureEntry == 0)
         return nullptr;
 
-    float searchRadius = std::min(m_currentTask.radius, 50.0f);
-    if (searchRadius < 10.0f)
-        searchRadius = 50.0f;   // enriched MOVE_TO may not carry a radius
+    // ── Build the valid-kill union from our own quest log ──
+    std::set<uint32> validEntries;
+    validEntries.insert(m_currentTask.creatureEntry);   // always the dispatched objective / item-drop source
 
-    std::list<Creature*> creatures;
-    me->GetCreatureListWithEntryInGrid(creatures, m_currentTask.creatureEntry, searchRadius);
+    const auto& questMap = me->GetQuestStatusMap();
+    for (const auto& pair : questMap)
+    {
+        const auto& qData = pair.second;
+        if (qData.m_status != QUEST_STATUS_INCOMPLETE)
+            continue;   // COMPLETE = objectives met (no kills owed); NONE/UNAVAILABLE = not held
+        Quest const* pQuest = sObjectMgr.GetQuestTemplate(pair.first);
+        if (!pQuest)
+            continue;
+        for (int j = 0; j < QUEST_OBJECTIVES_COUNT; ++j)
+        {
+            int32 reqId = pQuest->ReqCreatureOrGOId[j];
+            if (reqId <= 0)
+                continue;   // 0 = empty slot; <0 = gameobject objective (not a kill)
+            if (qData.m_creatureOrGOcount[j] >= pQuest->ReqCreatureOrGOCount[j])
+                continue;   // this slot is already satisfied — its mob yields no quest credit
+            validEntries.insert((uint32)reqId);
+        }
+    }
+
+    // ── Bot-centric sweep for the nearest valid mob (no center-radius filter, no LOS) ──
+    float searchRadius = (m_currentTask.radius > 10.0f) ? std::min(m_currentTask.radius, 60.0f) : 60.0f;
+
+    std::list<Unit*> nearby;
+    MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(me, me, searchRadius);
+    MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(nearby, u_check);
+    Cell::VisitAllObjects(me, searcher, searchRadius);
 
     float bestDist = searchRadius;
-    Creature* best = nullptr;
-    for (Creature* c : creatures)
+    Unit* best = nullptr;
+    for (Unit* u : nearby)
     {
+        if (!u->IsCreature())
+            continue;
+        Creature* c = static_cast<Creature*>(u);
         if (!c->IsAlive())
             continue;
+        if (validEntries.find(c->GetEntry()) == validEntries.end())
+            continue;   // not valid for any unmet objective we hold
         if (!IsValidHostileTarget(c))
+            continue;
+        if (IsCombatIgnored(c->GetGUIDLow()))
             continue;
         if (c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !c->IsTappedBy(me))
             continue;
-        if (!me->IsWithinLOSInMap(c))
-            continue;
-        // NO center-radius filter — scan around the bot, not the deep loader coord (§4.2).
+        // NO center-radius filter, NO LOS — scan around the bot, path to it (§4.2).
         float d = me->GetDistance(c);
         if (d < bestDist)
         {

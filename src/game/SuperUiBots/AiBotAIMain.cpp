@@ -412,23 +412,21 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
 // ============================================================
 // MAIN UPDATE LOOP — COMPLETE-METHOD REPLACEMENT
 //
-// Drop-in replacement for AiBotAI::UpdateAI. Byte-for-byte identical to the
-// deployed overpull/§4 version EXCEPT the death block, which now carries the
-// [GRAVE-SELFREZ] handler — the firing half of the graveyard self-rez (2b).
+// Drop-in replacement for AiBotAI::UpdateAI in AiBotAIMain.cpp. Identical to the
+// deployed overpull/§4/[GRAVE-SELFREZ] version EXCEPT the TASK_GRIND post-freeze block,
+// which now SELF-UNSTICKS the objective grind instead of handing back GRIND_BLOCKED|
+// overpull_dwell (the kobold-camp livelock fix).
 //
-// The arming half (BridgeHandleResurrect setting m_pendingGraveyardRez + the
-// header state) was already in the binary; this handler is what was missing, so
-// a graveyard-ported bot armed the self-rez, stayed dead, and ignored every
-// later RESURRECT forever (permanent ghost at the graveyard). This rezzes it the
-// instant the ghost teleport has actually landed — never on a C# roundtrip — so
-// it can't rez back in the death pocket. Safety timeout rezzes anyway so a
-// teleport that never confirms can't ghost-stick.
-//
-// §4 edits vs the live version (unchanged here):
-//   1. m_approachScanTimer decrement.
-//   2. The OOC TASK_MOVE_TO resume block: approach scan -> GRIND in place.
-// [OVERPULL] edits (unchanged here): attacker sampler, DEATH attackers=N,
-//   OverpullGuard gates, HandleOverpullRetreat call.
+// Why: a dense field of QUEST mobs vetoed every pull (OverpullGuard: >AIBOT_OVERPULL_SOLO
+// within AIBOT_PULL_DENSITY_RADIUS). The objective grind then handed back overpull_dwell,
+// which C# always answered with a forced single-kill detour + re-issue of the SAME
+// objective → re-freeze on the SAME camp. One kill per ~3s roundtrip until the fail/
+// deadline machinery shelved the quest and the bot wandered off to easier work, beside an
+// ocean of valid mobs. Now BOTH grind modes self-unstick after AIBOT_GRIND_FREEZE_DWELL:
+// SelectGrindTarget already returns the LEAST-clustered candidate, HandleOverpullRetreat is
+// the in-combat backstop if too many pile on, and a genuinely unkillable field still trips
+// the C# 120s no-kill deadline → durable shelve. The no_target handback (truly empty field)
+// is UNCHANGED. Only the overpull_dwell objective handback is removed.
 // ============================================================
 
 void AiBotAI::UpdateAI(uint32 const diff)
@@ -582,11 +580,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
 
     // --- Death handling: ghost at corpse, wait for C# RESURRECT (or self-rez at a graveyard) ---
-    // On death the bot ghosts at its corpse, emits DEATH, and bare-returns each tick
-    // until C# drives a RESURRECT. EXCEPTION: once a graveyard port has armed the
-    // self-rez (m_pendingGraveyardRez — set in BridgeHandleResurrect's at_graveyard
-    // branch), we rez OURSELVES the instant the ghost teleport has landed. See
-    // [GRAVE-SELFREZ] below.
     if (me->IsDead())
     {
         if (!m_wasDead)
@@ -615,10 +608,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
             me->BuildPlayerRepop();
             // NO RepopAtGraveyard — ghost stays right here at the death position
 
-            // [OVERPULL] DEATH event now carries attackers=N (peak melee attackers in the
-            // combat that ended this life; 0 = died with no recent combat, e.g. an
-            // out-of-bounds / zone-0 fatigue loop). Lets the death-anatomy tool tell
-            // overpull (>=2) from environmental (0) without inference.
             char deathData[160];
             snprintf(deathData, sizeof(deathData),
                 "x=%.1f|y=%.1f|z=%.1f|map=%u|attackers=%u",
@@ -629,14 +618,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
         }
 
         // [GRAVE-SELFREZ] Graveyard self-rez — the firing half of the zone-0 escape.
-        // BridgeHandleResurrect's at_graveyard branch ported the *ghost* to a graveyard,
-        // armed m_pendingGraveyardRez, and stayed dead (it does NOT rez — that would race
-        // the deferred teleport and revive on the corpse, the old loop). We resurrect
-        // here the instant the teleport has actually applied: same map + within 25yd of
-        // the graveyard target. A safety timeout rezzes anyway if the teleport never
-        // confirms, so a stuck port can't leave the bot a ghost forever. While this is
-        // armed, BridgeHandleResurrect ignores any inbound RESURRECT (a stray plain rez
-        // from C# can't drop us mid-teleport back in the pocket).
         if (m_pendingGraveyardRez)
         {
             if (m_graveRezWaitMs > AIBOT_UPDATE_INTERVAL)
@@ -667,9 +648,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 return;
             }
 
-            // Teleport not applied yet — keep waiting (top-of-tick IsBeingTeleported()
-            // guard means we only get here on ticks where the port has settled or is
-            // mid-flight; the safety timer covers a port that never lands).
             return;
         }
 
@@ -687,8 +665,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
 
     // [OVERPULL] Peak melee attackers this combat — stamped on the DEATH event above.
-    // Resets to 0 whenever out of combat, so a death with no recent combat reports
-    // attackers=0 (environmental) rather than a stale count from an earlier fight.
     if (me->IsInCombat())
     {
         uint32 atk = (uint32)me->GetAttackers().size();
@@ -700,9 +676,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
 
     // --- TASK_TAXI: in-flight — skip ALL behavior until we land ---
-    // Must be checked early, before level-up/CC/eat/combat/wander logic.
-    // While on a taxi flight the server drives the movement spline;
-    // we just poll for completion and keep the bridge alive.
     if (m_currentTask.type == TASK_TAXI)
     {
         if (me->GetTaxi().empty() && !me->HasUnitState(UNIT_STATE_TAXI_FLIGHT))
@@ -791,10 +764,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
 
     // --- Out of combat: eat/drink ---
-    // Skip eating during active tasks (MOVE_TO, GRIND) unless HP is critically low.
-    // DrinkAndEat() calls StopMoving() which cancels pathfinding — the bot stops
-    // walking to eat at 98% HP, then has no movement generator to resume with.
-    // Real players don't stop mid-run to eat at 98%. They eat when idle or hurt bad.
     if (!me->IsInCombat())
     {
         bool hasActiveTask = (m_currentTask.type == TASK_MOVE_TO ||
@@ -908,13 +877,9 @@ void AiBotAI::UpdateAI(uint32 const diff)
         if (m_currentTask.type == TASK_GRIND)
         {
             // An entry==0 grind is "kill whatever's nearest": the indefinite filler (Goal.Grinding,
-            // killGoal==0) OR the C# unstick detour (killGoal==1). BOTH must be able to break a freeze
-            // on their own — a filler that vetoes forever in a dense field is the wedge-loop we saw, and
-            // the detour exists precisely to guarantee a kill. So for entry==0 we still HOLD briefly (an
-            // isolated pull is always preferable), but once frozen AIBOT_GRIND_FREEZE_DWELL ticks we take
-            // the pull anyway, bypassing the overpull veto. HandleOverpullRetreat stays armed in-combat.
-            // An objective grind (entry!=0) does NOT self-unstick — it hands back to C# so the brain can
-            // resync quest credit + re-derive; that path is unchanged.
+            // killGoal==0) OR the C# unstick detour (killGoal==1). It is logged distinctly below, but
+            // BOTH grind modes now self-unstick a dense field (see the freeze-escape block) — the
+            // objective grind no longer hands overpull_dwell back to C#.
             bool const fillerOrDetour = (m_currentTask.creatureEntry == 0);
 
             if (Unit* pGrindTarget = SelectGrindTarget())
@@ -927,34 +892,29 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         me->GetName(), m_grindFreezeStreak, AIBOT_GRIND_FREEZE_DWELL,
                         pGrindTarget->GetName(),
                         CountNearbyHostiles(pGrindTarget, AIBOT_PULL_DENSITY_RADIUS), AIBOT_OVERPULL_SOLO,
-                        fillerOrDetour ? " [will self-unstick]" : "");
+                        " [will self-unstick]");
 
                     if (m_grindFreezeStreak >= AIBOT_GRIND_FREEZE_DWELL)
                     {
                         m_grindFreezeStreak = 0;
 
-                        if (fillerOrDetour)
-                        {
-                            // Self-unstick: take the pull right here, no handback. The nearest mob is
-                            // usually the one we've been frozen beside. Guaranteed forward motion.
-                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                                "[AIBOT-OVERPULL] %s: freeze-escape — self-unstick pull of %s (entry==0, bypassing cap)",
-                                me->GetName(), pGrindTarget->GetName());
-                            AttackStart(pGrindTarget);
-                            return;
-                        }
-
-                        // Objective grind: hand back to C# (resync credit + re-derive / detour).
+                        // Self-unstick BOTH grind modes. The objective grind USED to hand back
+                        // GRIND_BLOCKED|overpull_dwell so C# could "resync + re-derive" — but the brain
+                        // ALWAYS answers overpull_dwell with a forced single-kill detour, then re-issues
+                        // the SAME objective, which re-freezes against the SAME dense field. Net effect:
+                        // a quest-mob camp gets ground one kill per ~3s C# roundtrip, and once the fail/
+                        // deadline machinery trips, the bot shelves the quest and wanders off to easier
+                        // work — beside an ocean of perfectly valid mobs (the kobold-camp livelock). A
+                        // dense field of QUEST mobs is exactly where we want to grind, so take the pull
+                        // right here, same as the filler/detour path already does: SelectGrindTarget
+                        // handed us the LEAST-clustered candidate (its density score), HandleOverpullRetreat
+                        // stays the in-combat backstop if too many pile on, and a field that genuinely
+                        // can't be killed still trips the C# 120s no-kill deadline → durable shelve.
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                            "[AIBOT-OVERPULL] %s: freeze-escape — objective field over cap, signaling GRIND_BLOCKED",
-                            me->GetName());
-                        char ev[160];
-                        snprintf(ev, sizeof(ev),
-                            "x=%.1f|y=%.1f|z=%.1f|entry=%u|reason=overpull_dwell",
-                            m_currentTask.x, m_currentTask.y, m_currentTask.z,
-                            m_currentTask.creatureEntry);
-                        BridgeSendEvent("GRIND_BLOCKED", ev);
-                        DoGrindPatrol();
+                            "[AIBOT-OVERPULL] %s: freeze-escape — self-unstick pull of %s (bypassing cap, %s)",
+                            me->GetName(), pGrindTarget->GetName(),
+                            fillerOrDetour ? "filler/detour" : "objective");
+                        AttackStart(pGrindTarget);
                         return;
                     }
 
@@ -993,16 +953,9 @@ void AiBotAI::UpdateAI(uint32 const diff)
         }
 
        // --- TASK_MOVE_TO: resume movement after interruption ---
-        // Session 25: uses stored chunked path if available, so the bot resumes
-        // along the navmesh instead of MovePoint(raw destination). Continuation:
-        // when a leg is exhausted short of the dest, re-query the next leg.
         if (m_currentTask.type == TASK_MOVE_TO)
         {
             // ── §4 approach scan ──
-            // An enriched (objective) MOVE_TO engages the first valid mob near the BOT
-            // during the walk and hands off to GRIND in place, re-centering on the bot —
-            // it never marches to the deep loader coord. Throttled ~2-3s; runs even
-            // while the bot is still walking (so it engages mid-approach like a player).
             if (m_currentTask.creatureEntry != 0 && m_approachScanTimer == 0)
             {
                 m_approachScanTimer = urand(2000, 3000);
@@ -1042,9 +995,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 else
                 {
                     // Current leg exhausted (or interrupted with no stored path) —
-                    // compute the next leg toward the true dest and walk it. This is
-                    // the UpdateAI context (not a motion callback), so the full
-                    // StopMoving()/recompute inside MoveToDestination is safe here.
+                    // compute the next leg toward the true dest and walk it.
                     MoveToDestination(m_currentTask.x, m_currentTask.y, m_currentTask.z);
                 }
             }
@@ -1084,15 +1035,11 @@ void AiBotAI::UpdateAI(uint32 const diff)
         return;
     }
 
-    // [ADDED] Combat stalemate breaker — runs only while in combat (we're past the
-    // !IsInCombat() block, so combat is guaranteed here). Nudges out of a no-damage
-    // deadlock, then force-disengages + ignores the unreachable guid. Returns true
-    // when it acted this tick, so the combat AI below doesn't stomp the nudge.
+    // [ADDED] Combat stalemate breaker — runs only while in combat.
     if (HandleCombatStalemate())
         return;
 
-    // [OVERPULL] Overpull retreat — bail out of a fight where more than the cap are on us
-    // (the solo dense-field death spiral). Runs only in combat; returns true when it acted.
+    // [OVERPULL] Overpull retreat — bail out of a fight where more than the cap are on us.
     if (HandleOverpullRetreat())
         return;
 
@@ -1104,21 +1051,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
 
     // --- Tap-respect: drop a mob the server says belongs to a non-group player ---
-    // Solo competing bots converge on the same nearest mob and both engage in the same
-    // tick — before the server sets the tap. Once the tap resolves to someone else, keep
-    // fighting it is wasted effort (the other bot gets credit; we get "tapped — skipping
-    // kill credit" on the corpse). The server already broke the tie: whoever tagged first
-    // owns it. So the instant our victim reads tapped-by-not-us, bail and let the picker
-    // grab the next UNTAPPED mob. This is the SAME predicate the kill-credit check and
-    // SelectGrindTarget already trust (UNIT_DYNFLAG_TAPPED + !IsTappedBy(me)) — we just
-    // honor it one beat earlier, at the fight instead of at the corpse.
-    //
-    // EXEMPTIONS (must not fire here):
-    //   - under a live combat directive: a grouped focus-fire bot is SUPPOSED to pile the
-    //     anchor's victim — never disengage what the coordinator told us to assist.
-    //   - tapped by a GROUPMATE: shared party tap-credit means it IS ours to help kill.
-    //     IsTappedBy(me) is true for our own group's tag on most cores, but we check group
-    //     membership explicitly so the rule is correct regardless of that core detail.
     if (pVictim && pVictim->IsCreature() && !m_combatDirective.IsActive())
     {
         Creature* pVicCre = static_cast<Creature*>(pVictim);
@@ -1145,8 +1077,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 me->ClearTarget();
 
                 // Short-ignore so Select*Target / SelectGrindTarget don't instantly re-acquire
-                // this same tapped mob from the hostile-ref list next tick. Reuses the existing
-                // combat-ignore set (the stalemate/overpull breakers use it the same way).
+                // this same tapped mob from the hostile-ref list next tick.
                 m_combatIgnore[pVicCre->GetGUIDLow()] = AIBOT_TAPPED_IGNORE_MS;
                 return;
             }
