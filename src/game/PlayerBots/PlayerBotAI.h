@@ -24,7 +24,7 @@ struct PlayerBotEntry;
 class WorldSession;
 class PlayerBotAI;
 
-PlayerBotAI* CreatePlayerBotAI(std::string ainame);
+PlayerBotAI* CreatePlayerBotAI(std::string ainame, uint8 race = 0, uint8 cls = 0, uint32 level = 1, uint32 mapId = 0, float x = 0, float y = 0, float z = 0, std::string name = "");
 
 class PlayerBotAI: public PlayerAI
 {

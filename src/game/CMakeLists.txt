@@ -192,6 +192,13 @@ set (game_SRCS
     PlayerBots/PartyBotAI.cpp
     PlayerBots/CombatBotBaseAI.cpp
     PlayerBots/BattleBotAI.cpp
+    SuperUiBots/AiBotAIMain.cpp
+    SuperUiBots/AiBotAICombat.cpp
+    SuperUiBots/AiBotAIMovement.cpp
+    SuperUiBots/AiBotAILoot.cpp
+    SuperUiBots/AiBotAIGrind.cpp
+    SuperUiBots/AiBotAIBridge.cpp
+    SuperUiBots/AiBotAITeamPlay.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp
@@ -440,6 +447,9 @@ set (game_SRCS
     PlayerBots/CombatBotBaseAI.h
     PlayerBots/PartyBotAI.h
     PlayerBots/BattleBotAI.h
+    SuperUiBots/AiBotAIMain.h
+    SuperUiBots/AiBotAI.h
+    SuperUiBots/AiBotAITeamPlay.h
     PlayerBots/BattleBotWaypoints.h
     PlayerBots/PlayerBotAI.h
     PlayerBots/PlayerBotMgr.h
@@ -557,6 +567,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/OutdoorPvP
   ${CMAKE_CURRENT_SOURCE_DIR}/PacketBroadcast
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerBots
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiBots
   ${CMAKE_CURRENT_SOURCE_DIR}/Server
   ${CMAKE_CURRENT_SOURCE_DIR}/Server/Protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/Spells

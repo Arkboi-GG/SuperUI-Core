@@ -1,0 +1,2543 @@
+/*
+ * AiBotAIBridge.cpp — the C# <-> C++ TCP bridge for the autonomous AI bot.
+ *
+ * Split from the monolithic AiBotAI.cpp. THIS TU holds the bridge domain:
+ *   - the non-blocking TCP transport (connect / disconnect / send / flush / recv)
+ *   - HELLO / STATE / EVENT senders
+ *   - the file-local minimal JSON extractors (JsonExtractFloat/Int/String)
+ *   - BridgeProcessLine dispatch + every BridgeHandle* command handler
+ *   - the C++→C# event senders (SendKillEvent / SendQuestUpdateEvent / SendLevelUpEvent /
+ *     SendChatRecvEvent)
+ *
+ * The JsonExtract* statics are defined before BridgeProcessLine and every handler that
+ * uses them (statics are file-local). All AiBotAI methods link across the sibling TUs;
+ * cross-TU members called from here (MoveToDestination / ReGroundZ / ClearStoredPath /
+ * StopMoving from Movement, ChooseQuestReward / TryAutoEquip(Bags) from Loot) are defined
+ * in those siblings.
+ */
+
+#include "AiBotAIMain.h"
+#include "Player.h"
+#include <cstring>
+#include <cstdio>
+#include "Group.h"
+#include "CreatureAI.h"
+#include "Log.h"
+#include "MotionMaster.h"
+#include "ObjectMgr.h"
+#include "PlayerBotMgr.h"
+#include "Opcodes.h"
+#include "WorldPacket.h"
+#include "World.h"
+#include "Spell.h"
+#include "SpellAuras.h"
+#include "Chat.h"
+#include "BattleGround.h"
+#include "TargetedMovementGenerator.h"
+#include "QuestDef.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
+#include "CellImpl.h"
+#include "Server/Packets/Channel.h"
+#include "ChannelMgr.h"
+#include "Bag.h"
+#include "PathFinder.h"
+#include "MoveMap.h"
+
+// ============================================================
+// TCP BRIDGE — Phase 2
+// ============================================================
+
+void AiBotAI::BridgeConnect()
+{
+    if (m_bridgeConnected)
+        return;
+ 
+    m_bridgeSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_bridgeSocket == BRIDGE_INVALID_SOCKET)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: socket() failed", me->GetName());
+        return;
+    }
+ 
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(BRIDGE_PORT);
+    inet_pton(AF_INET, BRIDGE_HOST, &addr.sin_addr);
+ 
+    if (connect(m_bridgeSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: connect failed (will retry in %ums)",
+            me->GetName(), m_bridgeReconnectDelay);
+        BRIDGE_CLOSE_SOCKET(m_bridgeSocket);
+        m_bridgeSocket = BRIDGE_INVALID_SOCKET;
+        m_bridgeReconnectTimer = m_bridgeReconnectDelay;
+        // Exponential backoff
+        m_bridgeReconnectDelay = std::min(m_bridgeReconnectDelay * 2, (uint32)BRIDGE_RECONNECT_MAX);
+        return;
+    }
+ 
+    // Set non-blocking
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(m_bridgeSocket, FIONBIO, &mode);
+#else
+    int flags = fcntl(m_bridgeSocket, F_GETFL, 0);
+    fcntl(m_bridgeSocket, F_SETFL, flags | O_NONBLOCK);
+#endif
+ 
+    m_bridgeConnected = true;
+    m_bridgeHelloSent = false;
+    m_bridgeReconnectDelay = BRIDGE_RECONNECT_BASE;
+    m_bridgeRecvLen = 0;
+    m_bridgeSendBuf.clear();   // Session 36: never carry a stale queue across connections
+ 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: connected to %s:%d",
+        me->GetName(), BRIDGE_HOST, BRIDGE_PORT);
+}
+
+
+void AiBotAI::BridgeDisconnect()
+{
+    if (m_bridgeSocket != BRIDGE_INVALID_SOCKET)
+    {
+        BRIDGE_CLOSE_SOCKET(m_bridgeSocket);
+        m_bridgeSocket = BRIDGE_INVALID_SOCKET;
+    }
+    m_bridgeConnected = false;
+    m_bridgeHelloSent = false;
+    m_bridgeRecvLen = 0;
+    m_bridgeSendBuf.clear();   // Session 36: drop queued bytes; they belong to the dead socket
+}
+
+void AiBotAI::BridgeSend(const char* json)
+{
+    if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
+        return;
+ 
+    size_t len = strlen(json);
+ 
+    // Safety valve: if C# stops reading, the kernel send buffer fills and our
+    // queue grows. Past the cap, drop the OLDEST data (resynced to a line
+    // boundary so we never resume mid-message) rather than grow unbounded.
+    if (m_bridgeSendBuf.size() + len + 1 > BRIDGE_SEND_BUF_MAX)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: send queue over %u bytes — dropping oldest (C# slow or down?)",
+            me->GetName(), (uint32)BRIDGE_SEND_BUF_MAX);
+        m_bridgeSendBuf.erase(0, m_bridgeSendBuf.size() / 2);
+        size_t nl = m_bridgeSendBuf.find('\n');
+        if (nl != std::string::npos)
+            m_bridgeSendBuf.erase(0, nl + 1);   // realign to the next whole line
+        else
+            m_bridgeSendBuf.clear();
+    }
+ 
+    // Queue the whole line. JSON-lines protocol → one '\n' terminator.
+    m_bridgeSendBuf.append(json, len);
+    m_bridgeSendBuf.push_back('\n');
+ 
+    // Common case: drain right away so event latency stays low.
+    BridgeFlush();
+}
+
+void AiBotAI::BridgeFlush()
+{
+    if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
+        return;
+ 
+    while (!m_bridgeSendBuf.empty())
+    {
+        ssize_t sent = send(m_bridgeSocket,
+                            m_bridgeSendBuf.data(),
+                            m_bridgeSendBuf.size(), 0);
+ 
+        if (sent > 0)
+        {
+            m_bridgeSendBuf.erase(0, (size_t)sent);
+            continue; // keep draining until empty or the socket pushes back
+        }
+ 
+        if (sent == 0)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-BRIDGE] %s: send returned 0 (peer closed), disconnecting", me->GetName());
+            BridgeDisconnect();
+            return;
+        }
+ 
+        // sent < 0
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK)
+            return; // kernel buffer full — keep remainder, retry next tick (NOT an error)
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return; // kernel buffer full — keep remainder, retry next tick (NOT an error)
+        if (errno == EINTR)
+            continue; // interrupted before any bytes sent — retry immediately
+#endif
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: send error, disconnecting", me->GetName());
+        BridgeDisconnect();
+        return;
+    }
+}
+
+void AiBotAI::BridgeSendHello()
+{
+    if (!m_bridgeConnected || m_bridgeHelloSent)
+        return;
+
+    char json[512];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"HELLO\",\"payload\":{"
+        "\"guid\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
+        "\"level\":%u,\"mapId\":%u,\"zoneId\":%u,"
+        "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+        me->GetGUIDLow(), me->GetName(), me->GetRace(), me->GetClass(),
+        me->GetLevel(), me->GetMapId(), me->GetZoneId(),
+        me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+
+    BridgeSend(json);
+
+    // Restore tracked quest from server quest log (restart recovery)
+    if (m_trackedQuestId == 0)
+    {
+        const auto& questMap = me->GetQuestStatusMap();
+        for (const auto& pair : questMap)
+        {
+            if (pair.second.m_status == QUEST_STATUS_INCOMPLETE ||
+                pair.second.m_status == QUEST_STATUS_COMPLETE)
+            {
+                m_trackedQuestId = pair.first;
+                break;  // take the first active quest
+            }
+        }
+    }
+
+    m_bridgeHelloSent = true;
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: HELLO sent (guid=%u)", me->GetName(), me->GetGUIDLow());
+}
+
+// ============================================================
+// BridgeSendState — Session 3 (Held-Objective build §4)
+//
+// REPLACES: the entire existing BridgeSendState() in AiBotAIBridge.cpp.
+//
+// Adds the held-task ECHO to the 5s STATE message — what C++ reports it is ACTUALLY
+// running — so the C# reconcile can confirm its held objective against ground truth
+// (and self-heal the group strand: m_currentTask IDLE while C# still holds Grind).
+//
+// Five NEW read-only fields, all derived from EXISTING state (no new members, no new
+// tracking, no header change — the whole change lives in this function):
+//   taskKind     the committed task kind, from m_currentTask.type. This is SEPARATE from
+//                the existing taskState display string ON PURPOSE: taskState conflates
+//                DEAD/COMBAT status with the task (a grinding bot reads "COMBAT" every
+//                pull), which would make the C# kind-match fail mid-fight. m_currentTask.type
+//                stays GRIND/MOVE_TO straight through combat — that is the kind the reconcile
+//                needs. taskState is left byte-for-byte unchanged so the fleet display is
+//                untouched.
+//   taskActivity within-objective headway (engaged/recovering/traveling/searching/idle) —
+//                the signal C# triages on instead of a wall clock. C# gates "echo known"
+//                on this being non-empty, so a pre-Session-3 binary (which sends neither
+//                new field) maps to HeldTaskEcho.Unknown and the reconcile stays a no-op.
+//   taskCreature / taskDestX/Y/Z / taskKills   the target + pushed kill progress, straight
+//                off m_currentTask.
+//
+// "blocked" is deliberately NOT emitted yet: there is no move-failure flag on this AI to
+// read it from, and the strand we're actually fixing surfaces as a KIND mismatch
+// (m_currentTask IDLE vs C# Grind), which the reconcile catches without it. A real
+// m_lastMoveFailedMs in the movement TU is the earned follow-on that lights "blocked" up.
+// ============================================================
+void AiBotAI::BridgeSendState()
+{
+    if (!m_bridgeConnected)
+        return;
+
+    const char* taskStr = "IDLE";
+    if (me->IsDead())
+        taskStr = "DEAD";
+    else if (me->IsInCombat())
+        taskStr = "COMBAT";
+    else if (m_currentTask.type == TASK_GRIND)
+        taskStr = "GRINDING";
+    else if (m_currentTask.type == TASK_TAXI)
+        taskStr = "FLYING";
+    else if (m_currentTask.type == TASK_MOVE_TO)
+        taskStr = "MOVING";
+    else if (me->IsMoving())
+        taskStr = "MOVING";
+
+    uint32 freeSlots = 0;
+    for (int fi = INVENTORY_SLOT_ITEM_START; fi < INVENTORY_SLOT_ITEM_END; ++fi)
+        if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
+            ++freeSlots;
+    for (int fi = INVENTORY_SLOT_BAG_START; fi < INVENTORY_SLOT_BAG_END; ++fi)
+        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
+            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
+                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj)
+                    if (!me->GetItemByPos(fi, fj))
+                        ++freeSlots;
+    uint32 totalSlots = (INVENTORY_SLOT_ITEM_END - INVENTORY_SLOT_ITEM_START);
+    for (int i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
+    {
+        if (Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i))
+            if (pBag->GetProto()->Class == ITEM_CLASS_CONTAINER &&
+                pBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
+                totalSlots += pBag->GetBagSize();
+    }
+
+    // --- Min equipped durability % (feeds the C# repair trigger) ---
+    // 100 = no damageable gear or all full. The lowest slot drives the decision;
+    // a single 0-durability weapon tanks damage output, so min (not average) is right.
+    // Mirrors the durability read in BridgeHandleRepairItems exactly.
+    uint32 minDurabilityPct = 100;
+    for (int i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i);
+        if (!item)
+            continue;
+        uint32 maxDur = item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY);
+        if (maxDur == 0)
+            continue;   // rings/trinkets/etc. have no durability
+        uint32 dur = item->GetUInt32Value(ITEM_FIELD_DURABILITY);
+        uint32 pct = (dur * 100) / maxDur;
+        if (pct < minDurabilityPct)
+            minDurabilityPct = pct;
+    }
+
+    // --- Active quest status from server (authoritative) ---
+    uint32 questStatus = 0;  // 0 = no tracked quest
+    if (m_trackedQuestId > 0)
+        questStatus = (uint32)me->GetQuestStatus(m_trackedQuestId);
+
+    // --- §4 held-task echo: the kind C++ is ACTUALLY running + within-objective activity ---
+    // Independent of taskStr above (display/status). The committed task KIND stays GRIND/MOVE_TO
+    // through a fight, which is exactly what the C# kind-match needs. All derived from existing
+    // state — no new members, no new tracking.
+    const char* taskKindStr;
+    switch (m_currentTask.type)
+    {
+        case TASK_GRIND:   taskKindStr = "GRIND";   break;
+        case TASK_MOVE_TO: taskKindStr = "MOVE_TO"; break;
+        case TASK_TAXI:    taskKindStr = "MOVE_TO"; break;   // in transit = a kind of travel
+        default:           taskKindStr = "IDLE";    break;
+    }
+
+    // Within-objective activity — the headway signal C# reacts to (not a wall clock). Order is a
+    // priority ladder: combat trumps everything; eating/drinking is a stationary recover; movement
+    // is travel; a stationary grind is "between targets" (searching). Anything else = idle.
+    const char* activityStr = "idle";
+    if (me->IsInCombat())
+        activityStr = "engaged";
+    else if (me->HasAura(AB_SPELL_FOOD) || me->HasAura(AB_SPELL_DRINK))
+        activityStr = "recovering";
+    else if (me->IsMoving())
+        activityStr = "traveling";
+    else if (m_currentTask.type == TASK_GRIND)
+        activityStr = "searching";   // committed to a grind, between targets — NOT a clock-based stall
+    // else: idle
+
+    char json[1536];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"STATE\",\"payload\":{"
+        "\"guid\":%u,\"health\":%u,\"maxHealth\":%u,"
+        "\"mana\":%u,\"maxMana\":%u,\"level\":%u,"
+        "\"mapId\":%u,\"zoneId\":%u,"
+        "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
+        "\"inCombat\":%s,\"isDead\":%s,"
+        "\"targetGuid\":%u,\"taskState\":\"%s\","
+        "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,"
+        "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
+        "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
+        "\"questId\":%u,\"questStatus\":%u}}",
+        me->GetGUIDLow(),
+        me->GetHealth(), me->GetMaxHealth(),
+        me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA),
+        me->GetLevel(),
+        me->GetMapId(), me->GetZoneId(),
+        me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+        me->IsInCombat() ? "true" : "false",
+        me->IsDead() ? "true" : "false",
+        me->GetTargetGuid().IsEmpty() ? 0 : me->GetTargetGuid().GetCounter(),
+        taskStr,
+        freeSlots, totalSlots, me->GetMoney(), minDurabilityPct,
+        taskKindStr, activityStr,
+        m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
+        m_trackedQuestId, questStatus);
+
+    BridgeSend(json);
+}
+
+void AiBotAI::BridgeSendEvent(const char* eventType, const char* data)
+{
+    if (!m_bridgeConnected)
+        return;
+
+    char json[512];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"EVENT\",\"payload\":{"
+        "\"guid\":%u,\"event\":\"%s\",\"data\":\"%s\"}}",
+        me->GetGUIDLow(), eventType, data);
+
+    BridgeSend(json);
+}
+
+void AiBotAI::BridgeRecv()
+{
+    if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
+        return;
+
+    // Read available data into buffer (non-blocking)
+    int space = BRIDGE_RECV_BUF_SIZE - m_bridgeRecvLen - 1;
+    if (space <= 0)
+    {
+        // Buffer full with no newline — discard
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: recv buffer overflow, clearing", me->GetName());
+        m_bridgeRecvLen = 0;
+        return;
+    }
+
+    ssize_t n = recv(m_bridgeSocket, m_bridgeRecvBuf + m_bridgeRecvLen, space, 0);
+    if (n > 0)
+    {
+        m_bridgeRecvLen += n;
+        m_bridgeRecvBuf[m_bridgeRecvLen] = '\0';
+
+        // Process complete lines
+        char* start = m_bridgeRecvBuf;
+        char* newline;
+        while ((newline = strchr(start, '\n')) != nullptr)
+        {
+            *newline = '\0';
+            if (newline > start) // skip empty lines
+                BridgeProcessLine(start);
+            start = newline + 1;
+        }
+
+        // Shift remaining partial data to front
+        int remaining = m_bridgeRecvLen - (int)(start - m_bridgeRecvBuf);
+        if (remaining > 0 && start != m_bridgeRecvBuf)
+            memmove(m_bridgeRecvBuf, start, remaining);
+        m_bridgeRecvLen = remaining;
+    }
+    else if (n == 0)
+    {
+        // Clean disconnect
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: server closed connection", me->GetName());
+        BridgeDisconnect();
+    }
+    else
+    {
+        // n < 0: check if it's just EAGAIN/EWOULDBLOCK (no data yet)
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK)
+#else
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+#endif
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: recv error, disconnecting", me->GetName());
+            BridgeDisconnect();
+        }
+    }
+}
+
+// Minimal JSON field extraction — no library needed.
+// Finds "key":value in a flat JSON object. Works for our simple payloads.
+static bool JsonExtractFloat(const char* json, const char* key, float& out)
+{
+    // Search for "key": pattern
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    while (*p == ' ') p++;
+    out = (float)atof(p);
+    return true;
+}
+
+static bool JsonExtractInt(const char* json, const char* key, int& out)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    while (*p == ' ') p++;
+    out = atoi(p);
+    return true;
+}
+
+static bool JsonExtractString(const char* json, const char* key, char* out, int maxLen)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    const char* end = strchr(p, '"');
+    if (!end) return false;
+    int len = std::min((int)(end - p), maxLen - 1);
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return true;
+}
+
+void AiBotAI::BridgeProcessLine(const char* line)
+{
+    // Extract "type" field
+    char msgType[32] = {0};
+    if (!JsonExtractString(line, "type", msgType, sizeof(msgType)))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: no 'type' in message", me->GetName());
+        return;
+    }
+
+    if (strcmp(msgType, "MOVE_TO") == 0)
+        BridgeHandleMoveTo(line);
+    else if (strcmp(msgType, "TELEPORT_TO") == 0)
+        BridgeHandleTeleport(line);
+    else if (strcmp(msgType, "SAY_TEXT") == 0)
+        BridgeHandleSayText(line);
+    else if (strcmp(msgType, "QUEST_INTERACT") == 0)
+        BridgeHandleQuestInteract(line);
+    else if (strcmp(msgType, "ABANDON_QUEST") == 0)
+        BridgeHandleAbandonQuest(line);
+    else if (strcmp(msgType, "LEARN_SPELL") == 0)
+        BridgeHandleLearnSpell(line);
+    else if (strcmp(msgType, "ATTACK_TARGET") == 0)
+        BridgeHandleAttackTarget(line);
+    else if (strcmp(msgType, "INTERACT_NPC") == 0)
+        BridgeHandleInteractNpc(line);
+    else if (strcmp(msgType, "SET_TASK") == 0)
+        BridgeHandleSetTask(line);
+    else if (strcmp(msgType, "COMBAT_DIRECTIVE") == 0)
+        BridgeHandleCombatDirective(line);
+     else if (strcmp(msgType, "TAKE_FLIGHT") == 0)
+        BridgeHandleTakeFlight(line);
+    else if (strcmp(msgType, "SELL_ITEMS") == 0)
+        BridgeHandleSellItems(line);
+    else if (strcmp(msgType, "REPAIR_AT_NPC") == 0)
+       BridgeHandleRepairItems(line);
+    else if (strcmp(msgType, "RESURRECT") == 0)
+        BridgeHandleResurrect(line);
+    else if (strcmp(msgType, "TRAIN_AT_NPC") == 0)
+        BridgeHandleTrain(line);
+    else if (strcmp(msgType, "USE_GAMEOBJECT") == 0)
+        BridgeHandleUseGameObject(line);
+    else if (strcmp(msgType, "FORM_GROUP") == 0)
+       BridgeHandleFormGroup(line);
+    else if (strcmp(msgType, "DISBAND_GROUP") == 0)
+       BridgeHandleDisbandGroup(line);
+    else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0)
+        BridgeHandleQueryQuestStatus(line);
+    else if (strcmp(msgType, "PING") == 0)
+        { /* do nothing, keepalive */ }
+    else
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: unknown command '%s'", me->GetName(), msgType);
+}
+
+// ============================================================
+// BridgeHandleTeleport — generic live-bot teleport primitive
+//
+// C# drives the teleport-assist: when a final-approach MOVE_TO to a trainer /
+// vendor / repair NPC no_path's twice while the bot is already in the vicinity
+// (a nav-dead pocket — building interior, bad mesh stitch at the NPC), C# saves
+// the bot's current on-mesh position as a return anchor and sends TELEPORT_TO the
+// NPC. The bot does its business at real proximity, then C# sends TELEPORT_TO the
+// saved anchor to put it back where it came from. All round-trip state lives in C#
+// (BotContext) — this handler is the dumb primitive: relocate a LIVE bot on the
+// same map and ack.
+//
+// Uses NearTeleportTo (same-map instant relocation) — NOT the cross-map far-port,
+// which defers behind a loading screen / IsBeingTeleported(). Cross-map is refused
+// (the assist is always same-map). An optional max_dist caps the hop as a safety
+// rail so a bad C# coord can't fling a live bot across the zone (the assist sends
+// max_dist≈50; 0/absent = no cap, for a future long-range hearth).
+//
+// PLACEMENT: after BridgeHandleMoveTo in AiBotAI.cpp
+// DISPATCH:  BridgeProcessLine → else if (strcmp(msgType,"TELEPORT_TO")==0) BridgeHandleTeleport(line);
+// HEADER:    void BridgeHandleTeleport(const char* json);
+// ============================================================
+void AiBotAI::BridgeHandleTeleport(const char* json)
+{
+    if (!me || !me->IsInWorld())
+        return;
+
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    int mapId = (int)me->GetMapId();   // default = current map (a missing mapId is same-map)
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float o = me->GetOrientation();    // default = keep facing
+    float maxDist = 0.0f;              // 0 = no cap
+
+    JsonExtractInt(payload, "mapId", mapId);
+    bool haveX = JsonExtractFloat(payload, "x", x);
+    bool haveY = JsonExtractFloat(payload, "y", y);
+    bool haveZ = JsonExtractFloat(payload, "z", z);
+    JsonExtractFloat(payload, "o", o);
+    JsonExtractFloat(payload, "max_dist", maxDist);
+
+    if (!haveX || !haveY || !haveZ)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-TELEPORT] %s: TELEPORT_TO bad payload (missing x/y/z)", me->GetName());
+        BridgeSendEvent("TELEPORT_FAIL", "reason=bad_payload");
+        return;
+    }
+
+    // Dead bots are owned by the death-recovery path (ghost-walk / graveyard port).
+    // A teleport-assist must never fire on a ghost.
+    if (me->IsDead() || me->GetDeathState() == DEAD)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TELEPORT] %s: TELEPORT_TO refused — bot is dead", me->GetName());
+        BridgeSendEvent("TELEPORT_FAIL", "reason=dead");
+        return;
+    }
+
+    // Same-map only. NearTeleportTo is a same-map relocation; cross-map is the deferred
+    // far-port (loading screen) and is out of scope for the assist.
+    if ((uint32)mapId != me->GetMapId())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TELEPORT] %s: TELEPORT_TO cross-map refused (current=%u target=%d)",
+            me->GetName(), me->GetMapId(), mapId);
+        BridgeSendEvent("TELEPORT_FAIL", "reason=cross_map");
+        return;
+    }
+
+    // Safety rail: refuse a hop beyond the caller's cap (assist sends ~50yd). 0 = no cap.
+    float dist = me->GetDistance2d(x, y);
+    if (maxDist > 0.0f && dist > maxDist)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TELEPORT] %s: TELEPORT_TO refused — %.1fyd > max_dist %.1f (to %.1f,%.1f,%.1f)",
+            me->GetName(), dist, maxDist, x, y, z);
+        char buf[160];
+        snprintf(buf, sizeof(buf), "reason=too_far|dist=%.1f|max_dist=%.1f", dist, maxDist);
+        BridgeSendEvent("TELEPORT_FAIL", buf);
+        return;
+    }
+
+    // [GROUND] Re-ground the C#-supplied Z. The assist sends NPC spawn coords (already
+    // grounded → no-op); the hearth sends homebind/hub coords — grounding here is what
+    // keeps a hearth from re-floating a bot at a new coord. x/y untouched, so the 15yd
+    // NPC-find at the assist target is unaffected.
+    ReGroundZ(x, y, z, "teleport");
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-TELEPORT] %s: TELEPORT_TO (%.1f,%.1f,%.1f) o=%.2f map=%d — %.1fyd hop",
+        me->GetName(), x, y, z, o, mapId, dist);
+
+    // Clean reset: stop the failed approach, drop the stored path + task, then relocate.
+    // The MOVE_TO that no_path'd is finished; nothing in-flight needs to survive (the
+    // interaction that follows — TRAIN/SELL/REPAIR — doesn't read m_currentTask).
+    StopMoving();
+    ClearStoredPath();
+    m_currentTask.Clear();
+
+    // Fresh journey state so the NEXT real MOVE_TO re-arms its one-shot recoveries from
+    // the new start poly.
+    m_didBoundaryExit = false;
+    m_didNavmeshSnap  = false;
+
+    // Suppress the idle wander for a few seconds so the bot holds at the NPC until C#
+    // fires the interaction (task is now IDLE; without this DoRandomWander could hop 15yd
+    // off the trainer before TRAIN_AT_NPC arrives — recoverable via its 50yd fallback, but
+    // cleaner to just stand still).
+    m_wanderTimer = 5000;
+
+    me->NearTeleportTo(x, y, z, o);
+
+    // Ack carries the (now grounded) REQUESTED target — C# updates ctx.Pos to it so the
+    // planner sees DistToTarget≈0 and fires the interaction next tick. Actual landed pos
+    // logged so a teleport that didn't take is visible on the first run.
+    char ack[160];
+    snprintf(ack, sizeof(ack), "x=%.1f|y=%.1f|z=%.1f|map=%u", x, y, z, me->GetMapId());
+    BridgeSendEvent("TELEPORT_ACK", ack);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-TELEPORT] %s: NearTeleportTo issued — requested (%.1f,%.1f,%.1f), now reads (%.1f,%.1f,%.1f) map=%u",
+        me->GetName(), x, y, z,
+        me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), me->GetMapId());
+}
+
+void AiBotAI::BridgeHandleMoveTo(const char* json)
+{
+    float x = 0, y = 0, z = 0;
+    int mapId = 0;
+
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    JsonExtractInt(payload, "mapId", mapId);
+    JsonExtractFloat(payload, "x", x);
+    JsonExtractFloat(payload, "y", y);
+    JsonExtractFloat(payload, "z", z);
+
+    // ── §4 optional objective enrichment ──
+    // A kill-objective MOVE_TO carries creature_entry / grind_radius / kill_count so
+    // C++ engages the mob during the approach (ScanApproachTarget) and hands off to
+    // GRIND in place — never marching to the deep loader coord. Absent → all stay 0 →
+    // a plain MOVE_TO (repositioning / travel / gather): arrives, emits TASK_COMPLETE.
+    int entry = 0, killCount = 0;
+    float grindRadius = 0.0f;
+    JsonExtractInt(payload, "creature_entry", entry);
+    JsonExtractInt(payload, "kill_count", killCount);
+    JsonExtractFloat(payload, "grind_radius", grindRadius);
+
+    if ((uint32)mapId != me->GetMapId())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: cross-map move not supported (current=%u, target=%d)",
+            me->GetName(), me->GetMapId(), mapId);
+        return;
+    }
+
+    // ── Arrival jitter (never path to the EXACT dest coord) ──
+    // Pathing precisely TO certain coords (NPC spawn points, loader coords) lands the bot on a
+    // bad poly / seam edge and trips the off-mesh strand (Ujekawab @ (-8933.5,-136.5): NOPATH
+    // from on top of the dest). So for a PLAIN travel MOVE_TO we resolve the request to a
+    // VALIDATED point 0.2–2.0yd off the real coord at a random angle: sample the ring, path-check
+    // each candidate, take the first that isn't NOPATH. This dodges the bad poly AND fans bots out
+    // so they don't stack on one pixel. Bounded tries → if the whole neighborhood is unmeshed we
+    // fall back to the exact coord and let MoveToDestination's no_path / off-mesh recovery own it.
+    //
+    // SKIPPED for an enriched-objective MOVE_TO (entry != 0): that coord is a grind hint that
+    // converts to grind-in-place at the mouth — it is never an exact-arrival target, so no jitter.
+    if (entry == 0 && !me->IsInCombat())
+    {
+        float jx = x, jy = y, jz = z;
+        bool found = false;
+        for (int t = 0; t < AIBOT_ARRIVE_JITTER_TRIES; ++t)
+        {
+            float ang  = frand(0.0f, 2.0f * M_PI_F);
+            float dist = frand(AIBOT_ARRIVE_JITTER_MIN, AIBOT_ARRIVE_JITTER_MAX);
+            float cx = x + dist * cosf(ang);
+            float cy = y + dist * sinf(ang);
+            float cz = z;
+            ReGroundZ(cx, cy, cz, "arrive-jitter");   // keep the candidate on the floor before path-checking
+
+            PathInfo probe(me);
+            probe.calculate(cx, cy, cz);
+            if (!(probe.getPathType() & PATHFIND_NOPATH))
+            {
+                jx = cx; jy = cy; jz = cz;
+                found = true;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-BRIDGE] %s: MOVE_TO jittered (%.1f,%.1f) -> (%.1f,%.1f) %.1fyd off (dodging exact-coord poly)",
+                me->GetName(), x, y, jx, jy, me->GetDistance2d(jx, jy) > 0 ? hypotf(jx - x, jy - y) : 0.0f);
+            x = jx; y = jy; z = jz;
+        }
+        else
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-BRIDGE] %s: MOVE_TO jitter found no pathable ring point in %d tries — using exact (%.1f,%.1f)",
+                me->GetName(), AIBOT_ARRIVE_JITTER_TRIES, x, y);
+        }
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: MOVE_TO map=%d (%.1f, %.1f, %.1f)%s",
+        me->GetName(), mapId, x, y, z, entry ? " [objective]" : "");
+
+    // Stash the objective hint on the task BEFORE MoveToDestination. MoveToDestination
+    // only writes type/x/y/z, so these persist through every continuation leg until the
+    // approach scan or an arrival hands off to GRIND (re-centering on the bot).
+    m_currentTask.creatureEntry = (uint32)entry;
+    m_currentTask.radius        = grindRadius;
+    m_currentTask.killGoal      = killCount;
+    m_currentTask.killCount     = 0;
+    m_approachScanTimer         = 0;   // scan on the first tick of this journey
+
+    // One MOVE_TO = one journey to (x,y,z). MoveToDestination walks the first leg;
+    // MovementInform / the UpdateAI resume block continue it past each partial-path
+    // horizon until arrival. Distance is no longer a failure mode.
+    m_didBoundaryExit = false;   // fresh journey — allow one outbound seam-cross
+    m_didNavmeshSnap  = false;   // fresh journey — allow one off-mesh-start snap
+    MoveToDestination(x, y, z);
+}
+ 
+
+void AiBotAI::BridgeHandleSayText(const char* json)
+{
+    char text[256] = {0};
+    char target[64] = {0};
+    char channel[64] = {0};
+    int chatType = 0;
+
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    JsonExtractString(payload, "text", text, sizeof(text));
+    JsonExtractInt(payload, "chatType", chatType);
+    JsonExtractString(payload, "target", target, sizeof(target));
+    JsonExtractString(payload, "channel", channel, sizeof(channel));
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: SAY_TEXT type=%d target=%s channel=%s: %s",
+        me->GetName(), chatType, target, channel, text);
+
+    if (strlen(text) == 0)
+        return;
+
+    if (chatType == 7 && strlen(target) > 0)
+    {
+        // WHISPER — build and send whisper packet directly to target player
+        // Player class doesn't have Whisper(); we use ChatHandler::BuildChatPacket
+        Player* pTarget = sObjectMgr.GetPlayer(target);
+        if (pTarget && pTarget->GetSession())
+        {
+            WorldPacket data;
+            ChatHandler::BuildChatPacket(data, CHAT_MSG_WHISPER, text, LANG_UNIVERSAL,
+                CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName(),
+                pTarget->GetObjectGuid());
+            pTarget->GetSession()->SendPacket(&data);
+
+            // Send WHISPER_INFORM back to self so bot's chat log shows it
+            WorldPacket data2;
+            ChatHandler::BuildChatPacket(data2, CHAT_MSG_WHISPER_INFORM, text, LANG_UNIVERSAL,
+                CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName(),
+                pTarget->GetObjectGuid());
+            if (me->GetSession())
+                me->GetSession()->SendPacket(&data2);
+        }
+        else
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: WHISPER target '%s' not found, falling back to SAY",
+                me->GetName(), target);
+            me->Say(text, LANG_UNIVERSAL);
+        }
+    }
+    else if (chatType == 14 && strlen(channel) > 0)
+    {
+        // CHANNEL — send to named channel via Channel::Say
+        if (ChannelMgr* cMgr = channelMgr(me->GetTeam()))
+        {
+            // GetJoinChannel returns existing or creates — channel should already exist
+            if (Channel* chn = cMgr->GetJoinChannel(std::string(channel)))
+            {
+                chn->Say(me->GetObjectGuid(), text, LANG_UNIVERSAL, true);
+            }
+            else
+            {
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: channel '%s' not found, falling back to SAY",
+                    me->GetName(), channel);
+                me->Say(text, LANG_UNIVERSAL);
+            }
+        }
+    }
+    else if (chatType == 6)
+    {
+        me->Yell(text, LANG_UNIVERSAL);
+    }
+    else
+    {
+        me->Say(text, LANG_UNIVERSAL);
+    }
+}
+
+// ============================================================
+// PHASE 2.5: Quest / Combat / Interaction bridge commands
+// ============================================================
+
+void AiBotAI::BridgeHandleQuestInteract(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    int questId = 0, npcEntry = 0;
+    char action[16] = {0};
+    JsonExtractInt(payload, "quest_id", questId);
+    JsonExtractInt(payload, "npc_entry", npcEntry);
+    JsonExtractString(payload, "action", action, sizeof(action));
+
+    if (questId <= 0 || npcEntry <= 0 || action[0] == '\0')
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-BRIDGE] %s: QUEST_INTERACT bad payload: action='%s' quest=%d npc=%d",
+            me->GetName(), action, questId, npcEntry);
+        return;
+    }
+
+    // ── Find the specific NPC by creature_template entry within 15 yards ──
+    Creature* pNpc = nullptr;
+    {
+        std::list<Creature*> creatureList;
+        me->GetCreatureListWithEntryInGrid(creatureList, (uint32)npcEntry, 15.0f);
+        float bestDist = 999.0f;
+        for (auto* pCreature : creatureList)
+        {
+            if (pCreature && pCreature->IsAlive())
+            {
+                float d = me->GetDistance(pCreature);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    pNpc = pCreature;
+                }
+            }
+        }
+    }
+
+    if (!pNpc)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-BRIDGE] %s: QUEST_INTERACT npc entry %d not found within 15yd",
+            me->GetName(), npcEntry);
+
+        char buf[128];
+        snprintf(buf, sizeof(buf), "npc_not_found|quest_id=%d|npc_entry=%d", questId, npcEntry);
+        BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+        return;
+    }
+
+    Quest const* pQuest = sObjectMgr.GetQuestTemplate((uint32)questId);
+    if (!pQuest)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-BRIDGE] %s: QUEST_INTERACT quest %d not found in quest_template",
+            me->GetName(), questId);
+
+        char buf[128];
+        snprintf(buf, sizeof(buf), "quest_not_found|quest_id=%d", questId);
+        BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+        return;
+    }
+
+    // ══════════════════════════════════════════════
+    //  ACCEPT
+    // ══════════════════════════════════════════════
+    if (strcmp(action, "accept") == 0)
+    {
+
+        // ── Idempotent accept (already-in-log) ──────────────────────────────────────
+        // The quest is ALREADY in our log — a reward-granted chain follow-up (e.g. #33
+        // handed over on the #5261 turn-in), or a re-pick after a C# batch rebuild that
+        // lost the Accepted flag. CanTakeQuest would fail SatisfyQuestStatus here and we'd
+        // emit "requirements_not_met" — which the brain (QuestPlanner line 606) mis-reads as
+        // "can't take", DeferPick-drops the quest from the batch (so an 8/8 follow-up never
+        // turns in) AND stamps a durable deferral that arms grind-lock. You cannot fail
+        // requirements for a quest you already hold: ACK it like a normal accept so the brain
+        // reconciles its batch entry to Accepted (QuestPlanner case "accept" sets it true on
+        // this ack) and proceeds to work / turn it in.
+        if (me->GetQuestStatus((uint32)questId) != QUEST_STATUS_NONE)
+        {
+            m_trackedQuestId = (uint32)questId;
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-BRIDGE] %s: accept quest %d already in log (status=%u) — idempotent ACK",
+                me->GetName(), questId, (uint32)me->GetQuestStatus((uint32)questId));
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%d", questId);
+            BridgeSendEvent("QUEST_ACCEPT_ACK", buf);
+            return;
+        }
+
+        if (!me->CanTakeQuest(pQuest, false))
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT-BRIDGE] %s: QUEST_INTERACT accept quest %d — CanTakeQuest failed",
+                me->GetName(), questId);
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT-DEBUG] %s: quest %d FAILED — "
+                "Status=%d ExclGrp=%d Class=%d Race=%d Level=%d Skill=%d "
+                "Cond=%d Rep=%d PrevQ=%d Timed=%d NextC=%d PrevC=%d "
+                "Bread=%d DepBread=%d Active=%d",
+                me->GetName(), questId,
+                me->SatisfyQuestStatus(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestExclusiveGroup(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestClass(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestRace(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestLevel(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestSkill(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestCondition(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestReputation(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestPreviousQuest(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestTimed(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestNextChain(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestPrevChain(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestBreadcrumbQuest(pQuest, false) ? 1 : 0,
+                me->SatisfyQuestDependentBreadcrumbQuests(pQuest, false) ? 1 : 0,
+                pQuest->IsActive() ? 1 : 0);
+
+            char buf[128];
+            snprintf(buf, sizeof(buf), "requirements_not_met|quest_id=%d", questId);
+            BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+            return;
+        }
+
+        if (!me->CanAddQuest(pQuest, true))
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT-BRIDGE] %s: QUEST_INTERACT accept quest %d — CanAddQuest failed (log full?)",
+                me->GetName(), questId);
+
+            char buf[128];
+            snprintf(buf, sizeof(buf), "quest_log_full|quest_id=%d", questId);
+            BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+            return;
+        }
+
+        me->AddQuest(pQuest, pNpc);
+        m_trackedQuestId = (uint32)questId;
+
+        // Session 27: zero-objective delivery/talk quests need explicit CompleteQuest so
+        // CanRewardQuest passes at turn-in.
+        if (pQuest->GetReqCreatureOrGOcount() == 0 && pQuest->GetReqItemsCount() == 0
+            && me->GetQuestStatus((uint32)questId) != QUEST_STATUS_COMPLETE)
+        {
+            me->CompleteQuest((uint32)questId);
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-BRIDGE] %s: quest %d has no objectives — marked COMPLETE for turn-in",
+                me->GetName(), questId);
+        }
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: accepted quest %d '%s' from %s (entry %d)",
+            me->GetName(), questId, pQuest->GetTitle().c_str(),
+            pNpc->GetName(), npcEntry);
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d", questId);
+        BridgeSendEvent("QUEST_ACCEPT_ACK", buf);
+        SendQuestUpdateEvent(questId, "accepted");
+    }
+    // ══════════════════════════════════════════════
+    //  COMPLETE (turn-in for reward)
+    // ══════════════════════════════════════════════
+    else if (strcmp(action, "complete") == 0)
+    {
+        QuestStatus status = me->GetQuestStatus((uint32)questId);
+        if (status == QUEST_STATUS_NONE)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT-BRIDGE] %s: QUEST_INTERACT complete quest %d — not in quest log",
+                me->GetName(), questId);
+
+            char buf[128];
+            snprintf(buf, sizeof(buf), "quest_not_in_log|quest_id=%d", questId);
+            BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+            return;
+        }
+
+        // Pick the best CHOICE reward (gear upgrade by score, else highest vendor value).
+        // Fixed rewards are granted regardless; this index only selects among "pick one" items.
+        uint32 rewardChoice = ChooseQuestReward(pQuest);
+
+        if (!me->CanRewardQuest(pQuest, rewardChoice, false))
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT-BRIDGE] %s: QUEST_INTERACT complete quest %d — CanRewardQuest failed (status=%u choice=%u)",
+                me->GetName(), questId, (uint32)status, rewardChoice);
+
+            char buf[128];
+            snprintf(buf, sizeof(buf), "cannot_reward|quest_id=%d", questId);
+            BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+            return;
+        }
+
+        // RewardQuest: canonical reward path (XP, money, rep, items, spell cast). The chosen
+        // index now reflects ScoreItem, not a blind 0.
+        me->RewardQuest(pQuest, rewardChoice, pNpc, true);
+        m_trackedQuestId = 0;
+        TryAutoEquipBags();
+        TryAutoEquip();
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: completed quest %d '%s' at %s (entry %d, rewardChoice=%u)",
+            me->GetName(), questId, pQuest->GetTitle().c_str(),
+            pNpc->GetName(), npcEntry, rewardChoice);
+
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d", questId);
+        BridgeSendEvent("QUEST_COMPLETE_ACK", buf);
+        SendQuestUpdateEvent(questId, "rewarded");
+    }
+    else
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-BRIDGE] %s: QUEST_INTERACT unknown action '%s'",
+            me->GetName(), action);
+    }
+}
+
+void AiBotAI::BridgeHandleAbandonQuest(const char* json)
+{
+    int questId = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "quest_id", questId);
+
+    if (questId <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ABANDON_QUEST missing quest_id", me->GetName());
+        return;
+    }
+
+    QuestStatus status = me->GetQuestStatus(questId);
+    if (status == QUEST_STATUS_NONE)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ABANDON_QUEST quest %d not in log", me->GetName(), questId);
+        return;
+    }
+
+    me->SetQuestStatus(questId, QUEST_STATUS_NONE);
+    if (m_trackedQuestId == (uint32)questId)  
+        m_trackedQuestId = 0;
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: abandoned quest %d", me->GetName(), questId);
+    SendQuestUpdateEvent(questId, "abandoned");
+}
+
+void AiBotAI::BridgeHandleLearnSpell(const char* json)
+{
+    int spellId = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "spell_id", spellId);
+
+    if (spellId <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: LEARN_SPELL missing spell_id", me->GetName());
+        return;
+    }
+
+    if (me->HasSpell(spellId))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: LEARN_SPELL already knows %d", me->GetName(), spellId);
+        return;
+    }
+
+    me->LearnSpell(spellId, false);
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: learned spell %d", me->GetName(), spellId);
+}
+
+void AiBotAI::BridgeHandleTrain(const char* json)
+{
+    int npcEntry = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "npc_entry", npcEntry);
+
+    if (npcEntry <= 0)
+    {
+        BridgeSendEvent("TRAIN_FAIL", "reason=missing_npc_entry");
+        return;
+    }
+
+    // Stop movement so we don't walk away between search and train
+    StopMoving();
+
+    // ── Diagnostic: search at 15yd first, then wider if not found ──
+    std::list<Creature*> creatureList;
+    me->GetCreatureListWithEntryInGrid(creatureList, (uint32)npcEntry, 15.0f);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-TRAIN] %s: searching for trainer entry %d — found %zu creatures within 15yd, bot at (%.1f, %.1f, %.1f)",
+        me->GetName(), npcEntry, creatureList.size(),
+        me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+
+    // Log every creature found (even if it fails the trainer check)
+    for (auto* c : creatureList)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRAIN] %s:   candidate: '%s' entry=%u guid=%u alive=%d npc_flags=0x%X dist=%.1f (%.1f,%.1f,%.1f)",
+            me->GetName(), c->GetName(), c->GetEntry(), c->GetGUIDLow(),
+            c->IsAlive() ? 1 : 0,
+            c->GetUInt32Value(UNIT_NPC_FLAGS),
+            me->GetDistance(c),
+            c->GetPositionX(), c->GetPositionY(), c->GetPositionZ());
+    }
+
+    Creature* pTrainer = nullptr;
+    float bestDist = 999.0f;
+    for (auto* c : creatureList)
+    {
+        if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_TRAINER))
+        {
+            float d = me->GetDistance(c);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                pTrainer = c;
+            }
+        }
+    }
+
+    // ── Fallback: wider search if narrow failed ──
+    if (!pTrainer)
+    {
+        std::list<Creature*> wideList;
+        me->GetCreatureListWithEntryInGrid(wideList, (uint32)npcEntry, 50.0f);
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRAIN] %s: 15yd search failed — wide search (50yd) found %zu creatures",
+            me->GetName(), wideList.size());
+
+        for (auto* c : wideList)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-TRAIN] %s:   wide: '%s' entry=%u alive=%d flags=0x%X dist3d=%.1f pos=(%.1f,%.1f,%.1f)",
+                me->GetName(), c->GetName(), c->GetEntry(), c->GetGUIDLow(),
+                c->IsAlive() ? 1 : 0,
+                c->GetUInt32Value(UNIT_NPC_FLAGS),
+                me->GetDistance(c),
+                c->GetPositionX(), c->GetPositionY(), c->GetPositionZ());
+
+            if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_TRAINER))
+            {
+                pTrainer = c;
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-TRAIN] %s: found trainer in wide search at dist=%.1f — using it",
+                    me->GetName(), me->GetDistance(c));
+                break;
+            }
+        }
+    }
+
+    if (!pTrainer)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRAIN] %s: trainer entry %d not found within 50yd",
+            me->GetName(), npcEntry);
+        BridgeSendEvent("TRAIN_FAIL", "reason=trainer_not_found");
+        return;
+    }
+
+    if (!pTrainer->IsTrainerOf(me, false))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRAIN] %s: NPC %d ('%s') is not a trainer for this class",
+            me->GetName(), npcEntry, pTrainer->GetName());
+        BridgeSendEvent("TRAIN_FAIL", "reason=wrong_class");
+        return;
+    }
+
+    TrainerSpellData const* cSpells = pTrainer->GetTrainerSpells();
+    TrainerSpellData const* tSpells = pTrainer->GetTrainerTemplateSpells();
+
+    if (!cSpells && !tSpells)
+    {
+        BridgeSendEvent("TRAIN_FAIL", "reason=no_spells");
+        return;
+    }
+
+    int totalLearned = 0;
+    uint32 totalCost = 0;
+    bool learnedAnything;
+
+    do
+    {
+        learnedAnything = false;
+
+        auto processSpellList = [&](TrainerSpellData const* spells)
+        {
+            if (!spells) return;
+            for (auto const& itr : spells->spellList)
+            {
+                TrainerSpell const* tSpell = &itr.second;
+                if (me->GetTrainerSpellState(tSpell) != TRAINER_SPELL_GREEN)
+                    continue;
+
+                SpellEntry const* spellEntry = sSpellMgr.GetSpellEntry(tSpell->spell);
+                if (!spellEntry) continue;
+
+                uint32 triggerSpell = spellEntry->EffectTriggerSpell[0];
+                if (!triggerSpell) continue;
+
+                if (sSpellMgr.IsPrimaryProfessionFirstRankSpell(triggerSpell))
+                    continue;
+
+                if (!me->IsSpellFitByClassAndRace(triggerSpell))
+                    continue;
+
+                uint32 spellCost = tSpell->spellCost;
+                if (me->GetMoney() < spellCost)
+                    continue;
+
+                me->ModifyMoney(-(int32)spellCost);
+                me->LearnSpell(triggerSpell, false);
+
+                totalCost += spellCost;
+                totalLearned++;
+                learnedAnything = true;
+
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-TRAIN] %s: learned spell %u (cost=%u copper)",
+                    me->GetName(), triggerSpell, spellCost);
+            }
+        };
+
+        processSpellList(cSpells);
+        processSpellList(tSpells);
+
+    } while (learnedAnything);
+
+    if (totalLearned > 0)
+    {
+        ResetSpellData();
+        PopulateSpellData();
+    }
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "learned=%d|cost=%u|gold=%u",
+        totalLearned, totalCost, me->GetMoney());
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-TRAIN] %s: complete — %d spells, %u copper spent, %u remaining",
+        me->GetName(), totalLearned, totalCost, me->GetMoney());
+
+    BridgeSendEvent("TRAIN_ACK", buf);
+}
+
+// ============================================================
+// SESSION 29: QUERY_QUEST_STATUS bridge command
+//
+// C# sends QUERY_QUEST_STATUS when entering Questing domain.
+// C++ responds with QUEST_STATUS_ALL event containing every
+// active quest in the player's log with status + progress.
+//
+// This is the authoritative source — straight from the C++
+// QuestStatusMap in memory. No DB timing gaps.
+//
+// PLACEMENT: Add this method after BridgeHandleTrain in AiBotAI.cpp
+// DISPATCH:  Add to BridgeProcessLine (see bottom of this file)
+// ============================================================
+
+void AiBotAI::BridgeHandleQueryQuestStatus(const char* json)
+{
+    // Iterate the player's quest status map — same map used by
+    // BridgeHandleSellItems for quest item protection.
+    const auto& questMap = me->GetQuestStatusMap();
+
+    // Build a compact pipe-delimited payload:
+    //   questId:status:mob1,mob2,mob3,mob4:item1,item2,item3,item4|questId:...
+    //
+    // status: 1=INCOMPLETE, 3=COMPLETE (VMaNGOS QUEST_STATUS enum)
+    // Only include non-rewarded quests (active log entries).
+
+    std::string payload;
+    int count = 0;
+
+    for (const auto& pair : questMap)
+    {
+        uint32 questId = pair.first;
+        const auto& qData = pair.second;
+
+        // Skip rewarded (turned-in) quests — we only want active log entries
+        if (qData.m_rewarded)
+            continue;
+
+        // Skip QUEST_STATUS_NONE (0) and QUEST_STATUS_UNAVAILABLE (2)
+        if (qData.m_status != QUEST_STATUS_INCOMPLETE &&
+            qData.m_status != QUEST_STATUS_COMPLETE)
+            continue;
+
+        if (!payload.empty())
+            payload += "|";
+
+        char entry[128];
+        snprintf(entry, sizeof(entry), "%u:%u:%u,%u,%u,%u:%u,%u,%u,%u",
+            questId,
+            (uint32)qData.m_status,
+            qData.m_creatureOrGOcount[0], qData.m_creatureOrGOcount[1],
+            qData.m_creatureOrGOcount[2], qData.m_creatureOrGOcount[3],
+            qData.m_itemcount[0], qData.m_itemcount[1],
+            qData.m_itemcount[2], qData.m_itemcount[3]);
+
+        payload += entry;
+        count++;
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-BRIDGE] %s: QUERY_QUEST_STATUS — %d active quests in log",
+        me->GetName(), count);
+
+    BridgeSendEvent("QUEST_STATUS_ALL", payload.c_str());
+}
+
+
+void AiBotAI::BridgeHandleAttackTarget(const char* json)
+{
+    int guidLow = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "guid", guidLow);
+
+    if (guidLow <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET missing guid", me->GetName());
+        return;
+    }
+
+    // Find the creature by guid counter in current map
+    Creature* pCreature = me->GetMap()->GetCreature(
+        ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
+
+    if (!pCreature)
+    {
+        // Try with full GUID construction — guid might be entry+counter encoded
+        // Search nearby creatures as fallback
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature guid %d not found on map", me->GetName(), guidLow);
+        return;
+    }
+
+    if (!IsValidHostileTarget(pCreature))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET guid %d not valid hostile target", me->GetName(), guidLow);
+        return;
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: attacking %s (guid %d)",
+        me->GetName(), pCreature->GetName(), guidLow);
+    AttackStart(pCreature);
+}
+
+void AiBotAI::BridgeHandleInteractNpc(const char* json)
+{
+    int guidLow = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "guid", guidLow);
+
+    if (guidLow <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC missing guid", me->GetName());
+        return;
+    }
+
+    Creature* pCreature = me->GetMap()->GetCreature(
+        ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
+
+    if (!pCreature)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC creature guid %d not found", me->GetName(), guidLow);
+        return;
+    }
+
+    float dist = me->GetDistance(pCreature);
+    if (dist > 10.0f)
+    {
+        // Too far — move closer first, then interact on arrival
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC moving to %s (dist=%.1f)",
+            me->GetName(), pCreature->GetName(), dist);
+        StopMoving();
+        float nx, ny, nz;
+        pCreature->GetContactPoint(me, nx, ny, nz);
+        MovePointRun(AIBOT_POINT_TASK_DEST, nx, ny, nz);
+        return;
+    }
+
+    // Face the NPC
+    me->SetFacingToObject(pCreature);
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: interacting with %s (guid %d)",
+        me->GetName(), pCreature->GetName(), guidLow);
+    BridgeSendEvent("NPC_INTERACT", pCreature->GetName());
+}
+
+void AiBotAI::BridgeHandleSetTask(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    char taskType[32] = {0};
+    JsonExtractString(payload, "task", taskType, sizeof(taskType));
+
+    if (strcmp(taskType, "GRIND") == 0)
+    {
+        m_currentTask.Clear();
+        m_currentTask.type = TASK_GRIND;
+        JsonExtractFloat(payload, "x", m_currentTask.x);
+        JsonExtractFloat(payload, "y", m_currentTask.y);
+        JsonExtractFloat(payload, "z", m_currentTask.z);
+        JsonExtractFloat(payload, "radius", m_currentTask.radius);
+
+        int entry = 0, goal = 0;
+        JsonExtractInt(payload, "creature_entry", entry);
+        JsonExtractInt(payload, "kill_count", goal);
+        m_currentTask.creatureEntry = (uint32)entry;
+        m_currentTask.killGoal = goal;
+        m_currentTask.killCount = 0;
+
+        if (m_currentTask.radius < 10.0f)
+            m_currentTask.radius = 40.0f;  // sane default
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: SET_TASK GRIND entry=%u goal=%d at (%.1f,%.1f,%.1f) r=%.0f",
+            me->GetName(), m_currentTask.creatureEntry,
+            m_currentTask.killGoal,
+            m_currentTask.x, m_currentTask.y, m_currentTask.z,
+            m_currentTask.radius);
+
+        // Immediately move to grind area if not already there
+        float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
+        if (dist > m_currentTask.radius)
+        {
+            StopMoving();
+            MovePointRun(AIBOT_POINT_GRIND_PATROL,
+                m_currentTask.x, m_currentTask.y, m_currentTask.z);
+        }
+    }
+    else if (strcmp(taskType, "IDLE") == 0)
+    {
+        m_currentTask.Clear();
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: SET_TASK IDLE (clearing task)", me->GetName());
+    }
+    else
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: SET_TASK unknown task type '%s'", me->GetName(), taskType);
+    }
+}
+
+// ============================================================
+// BridgeHandleCombatDirective — the per-member combat stamp (group focus-fire seam)
+//
+// The god-bot coordinator (C#) stamps each grouped member a combat directive each tick.
+// v1 carries ONE mode — assist — plus the anchor's low GUID:
+//   {"type":"COMBAT_DIRECTIVE","payload":{"mode":"assist","anchor_guid":123}}
+//   • mode=="assist" + anchor_guid>0 → focus-fire the anchor's live victim (resolved in
+//     TeamPlay::ResolveCombatTarget; the anchor itself — anchor_guid==self — falls through
+//     to normal selection, so the team assists IT).
+//   • mode=="none" / absent / anchor_guid<=0 → clear (revert to solo selection).
+//
+// FORWARD-TOLERANT BY CONSTRUCTION: parsed with JsonExtract*, the same idiom as every other
+// inbound command in this file. A later key (role / interrupt_guid / move_to_guid) from a
+// newer C# brain is simply not looked up here — a new key, never a contract break.
+//
+// No ack — a fire-and-forget stamp (like SET_TASK). Liveness IS the re-stamp cadence
+// (the coordinator re-stamps every brain tick, idempotent; ungroup/anchor-death → mode=none).
+// ============================================================
+void AiBotAI::BridgeHandleCombatDirective(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    char mode[16] = {0};
+    JsonExtractString(payload, "mode", mode, sizeof(mode));
+
+    int anchorGuid = 0;
+    JsonExtractInt(payload, "anchor_guid", anchorGuid);
+
+    if (strcmp(mode, "assist") == 0 && anchorGuid > 0)
+    {
+        m_combatDirective.mode          = COMBAT_MODE_ASSIST;
+        m_combatDirective.anchorGuidLow = (uint32)anchorGuid;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TEAMPLAY] %s: COMBAT_DIRECTIVE mode=assist anchor=%u%s",
+            me->GetName(), m_combatDirective.anchorGuidLow,
+            ((uint32)anchorGuid == me->GetGUIDLow()) ? " (self — I am the anchor)" : "");
+    }
+    else
+    {
+        m_combatDirective.Clear();
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TEAMPLAY] %s: COMBAT_DIRECTIVE cleared (mode='%s')",
+            me->GetName(), mode[0] ? mode : "none");
+    }
+}
+
+void AiBotAI::BridgeHandleTakeFlight(const char* json)
+{
+    int sourceNode = 0, destNode = 0;
+ 
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+ 
+    JsonExtractInt(payload, "sourceNode", sourceNode);
+    JsonExtractInt(payload, "destNode", destNode);
+ 
+    if (sourceNode <= 0 || destNode <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT missing sourceNode or destNode", me->GetName());
+        BridgeSendEvent("FLIGHT_FAILED", "missing sourceNode or destNode");
+        return;
+    }
+ 
+    if (me->IsDead())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,    
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT rejected — bot is dead", me->GetName());
+        BridgeSendEvent("FLIGHT_FAILED", "bot is dead");
+        return;
+    }
+ 
+    if (me->IsInCombat())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT rejected — bot is in combat", me->GetName());
+        BridgeSendEvent("FLIGHT_FAILED", "bot is in combat");
+        return;
+    }
+ 
+    // Validate source node exists
+    TaxiNodesEntry const* srcNode = sObjectMgr.GetTaxiNodeEntry((uint32)sourceNode);
+    if (!srcNode)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT invalid sourceNode %d", me->GetName(), sourceNode);
+        BridgeSendEvent("FLIGHT_FAILED", "invalid sourceNode");
+        return;
+    }
+ 
+    // Validate destination node exists
+    TaxiNodesEntry const* dstNode = sObjectMgr.GetTaxiNodeEntry((uint32)destNode);
+    if (!dstNode)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT invalid destNode %d", me->GetName(), destNode);
+        BridgeSendEvent("FLIGHT_FAILED", "invalid destNode");
+        return;
+    }
+ 
+    // Validate a path exists between source and dest
+    uint32 pathId = 0, pathCost = 0;
+    sObjectMgr.GetTaxiPath((uint32)sourceNode, (uint32)destNode, pathId, pathCost);
+    if (!pathId)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT no path from %d to %d", me->GetName(), sourceNode, destNode);
+        BridgeSendEvent("FLIGHT_FAILED", "no path between nodes");
+        return;
+    }
+ 
+    // Ensure bot knows both taxi nodes (unlock them)
+    me->GetTaxi().SetTaximaskNode((uint32)sourceNode);
+    me->GetTaxi().SetTaximaskNode((uint32)destNode);
+ 
+    // Check if bot can afford the flight
+    if (me->GetMoney() < pathCost)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT not enough money (have %u, need %u copper)",
+            me->GetName(), me->GetMoney(), pathCost);
+ 
+        char failJson[256];
+        snprintf(failJson, sizeof(failJson),
+            "{\"type\":\"EVENT\",\"payload\":{"
+            "\"guid\":%u,\"event\":\"FLIGHT_FAILED\","
+            "\"reason\":\"not_enough_money\","
+            "\"have\":%u,\"need\":%u,\"cost\":%u}}",
+            me->GetGUIDLow(), me->GetMoney(), pathCost, pathCost);
+        BridgeSend(failJson);
+        return;
+    }
+ 
+    // Must be on same map as source node
+    if (srcNode->map_id != me->GetMapId())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT source node %d is on map %u, bot is on map %u",
+            me->GetName(), sourceNode, srcNode->map_id, me->GetMapId());
+        BridgeSendEvent("FLIGHT_FAILED", "source node on different map");
+        return;
+    }
+ 
+    // Stop any current movement/combat
+    StopMoving();
+    if (me->IsMounted())
+        me->RemoveSpellsCausingAura(SPELL_AURA_MOUNTED);
+ 
+ 
+    // Set task state so UpdateAI doesn't interfere during flight
+    m_currentTask.Clear();
+    m_currentTask.type = TASK_TAXI;
+    m_currentTask.taxiSourceNode = (uint32)sourceNode;
+    m_currentTask.taxiDestNode = (uint32)destNode;
+ 
+    // Build the node vector and activate the flight path
+    // nocheck = true skips the "do you know this node" validation
+    std::vector<uint32> nodes;
+    nodes.push_back((uint32)sourceNode);
+    nodes.push_back((uint32)destNode);
+ 
+    bool success = me->ActivateTaxiPathTo(nodes, nullptr, 0, true);
+ 
+    if (success)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT activated path %u → %u (cost %u copper)",
+            me->GetName(), sourceNode, destNode, pathCost);
+        BridgeSendEvent("FLIGHT_STARTED", "");
+    }
+    else
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: TAKE_FLIGHT ActivateTaxiPathTo failed (%d → %d)",
+            me->GetName(), sourceNode, destNode);
+        m_currentTask.Clear();
+        BridgeSendEvent("FLIGHT_FAILED", "ActivateTaxiPathTo returned false");
+    }
+}
+
+// ============================================================
+// UPDATED BridgeHandleSellItems — v2 (Session 12)
+//
+// CHANGES from v1:
+//   1. Excess consumables are now vendorable. Keeps up to MAX_KEEP_PER_CONSUMABLE
+//      (40) of each consumable item ID. Sells the rest.
+//   2. Unequipped bags (containers sitting in inventory, not in bag equip slots)
+//      are now vendorable IF they aren't an upgrade over any equipped bag.
+//   3. Reports "nothing_to_sell" in SELL_ACK data when sold=0 AND freeSlots=0,
+//      so C# can set a vendoring cooldown and stop the critical trigger loop.
+//
+// REPLACES: The entire BridgeHandleSellItems method in AiBotAI.cpp
+// ============================================================
+
+void AiBotAI::BridgeHandleSellItems(const char* json)
+{
+    if (!me || !me->IsAlive() || !me->IsInWorld())
+        return;
+
+    int npcEntry = 0, keepQuality = 0;
+    JsonExtractInt(json, "npc_entry", npcEntry);
+    JsonExtractInt(json, "keep_quality", keepQuality);
+    if (npcEntry <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s: SELL_ITEMS missing npc_entry", me->GetName());
+        BridgeSendEvent("SELL_FAIL", "reason=missing_npc_entry");
+        return;
+    }
+    if (keepQuality <= 0) keepQuality = 2;
+
+    // --- Find vendor NPC ---
+    std::list<Creature*> creatureList;
+    me->GetCreatureListWithEntryInGrid(creatureList, (uint32)npcEntry, 15.0f);
+
+    Creature* pVendor = nullptr;
+    float bestDist = 999.0f;
+    for (Creature* c : creatureList)
+    {
+        if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_VENDOR))
+        {
+            float d = me->GetDistance(c);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                pVendor = c;
+            }
+        }
+    }
+    if (!pVendor)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s: no vendor with entry %d within 15yd", me->GetName(), npcEntry);
+        BridgeSendEvent("SELL_FAIL", "reason=vendor_not_found");
+        return;
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-SELL] %s: === BEGIN selling at %s (entry=%u) keepQuality=%d ===",
+        me->GetName(), pVendor->GetName(), pVendor->GetEntry(), keepQuality);
+
+    // --- Build set of quest-required item IDs ---
+    std::set<uint32> questItemIds;
+    const auto& questMap = me->GetQuestStatusMap();
+    for (const auto& pair : questMap)
+    {
+        if (pair.second.m_status != QUEST_STATUS_INCOMPLETE && pair.second.m_status != QUEST_STATUS_COMPLETE)
+            continue;
+        Quest const* pQuest = sObjectMgr.GetQuestTemplate(pair.first);
+        if (!pQuest) continue;
+        for (int j = 0; j < QUEST_OBJECTIVES_COUNT; ++j)
+        {
+            if (pQuest->ReqItemId[j] > 0)
+                questItemIds.insert(pQuest->ReqItemId[j]);
+        }
+        if (pQuest->GetSrcItemId() > 0)
+            questItemIds.insert(pQuest->GetSrcItemId());
+    }
+
+    // --- Pre-scan: count consumables by itemId so we can sell excess ---
+    // Also find the smallest equipped bag size for bag-selling logic.
+    static const uint32 MAX_KEEP_PER_CONSUMABLE = 40; // ~2 stacks of 20
+
+    std::map<uint32, uint32> consumableCounts; // itemId → total count across all bags
+    // First pass: count all consumables
+    auto countConsumable = [&](uint8 bag, uint8 slot)
+    {
+        Item* pItem = me->GetItemByPos(bag, slot);
+        if (!pItem) return;
+        ItemPrototype const* proto = pItem->GetProto();
+        if (!proto) return;
+        if (proto->Class == ITEM_CLASS_CONSUMABLE)
+            consumableCounts[proto->ItemId] += pItem->GetCount();
+    };
+    for (int i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+        countConsumable(INVENTORY_SLOT_BAG_0, (uint8)i);
+    for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
+    {
+        Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
+        if (!pBag || pBag->GetProto()->Class != ITEM_CLASS_CONTAINER) continue;
+        for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
+            countConsumable((uint8)b, (uint8)j);
+    }
+
+    // Track how many of each consumable we've kept so far during selling
+    std::map<uint32, uint32> consumableKept;
+
+    // Find the largest equipped bag size (for bag-selling: only sell bags
+    // that are NOT bigger than any equipped bag, i.e. not an upgrade)
+    uint32 largestEquippedBagSize = 0;
+    for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
+    {
+        Item* pBagItem = me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
+        if (!pBagItem) continue;
+        ItemPrototype const* bp = pBagItem->GetProto();
+        if (bp && bp->Class == ITEM_CLASS_CONTAINER && bp->SubClass == ITEM_SUBCLASS_CONTAINER)
+        {
+            if (bp->ContainerSlots > largestEquippedBagSize)
+                largestEquippedBagSize = bp->ContainerSlots;
+        }
+    }
+    // Also check if there are any empty bag equip slots (if so, ANY bag is an upgrade)
+    bool hasEmptyBagSlot = false;
+    for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
+    {
+        if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b))
+        {
+            hasEmptyBagSlot = true;
+            break;
+        }
+    }
+
+    uint32 totalCopper = 0;
+    uint32 soldCount = 0;
+
+    // --- Sell helper: checks one item, sells if appropriate ---
+    auto trySellItem = [&](uint8 bag, uint8 slot)
+    {
+        Item* pItem = me->GetItemByPos(bag, slot);
+        if (!pItem) return;
+
+        ItemPrototype const* proto = pItem->GetProto();
+        if (!proto) return;
+
+        // Keep: quality at or above threshold (green+ gear)
+        if (proto->Quality >= (uint32)keepQuality) return;
+        // Keep: no sell price (hearthstone, etc.)
+        if (proto->SellPrice == 0) return;
+        // Keep: quest-class items
+        if (proto->Class == ITEM_CLASS_QUEST) return;
+        if (proto->StartQuest > 0) return;
+        if (proto->Bonding == BIND_QUEST_ITEM || proto->Bonding == BIND_QUEST_ITEM1) return;
+        if (questItemIds.count(proto->ItemId) > 0) return;
+
+        // --- BAGS: sell unequipped bags that aren't upgrades ---
+        if (proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_QUIVER)
+        {
+            // If there's an empty bag equip slot, keep this bag (TryAutoEquipBags will use it)
+            if (hasEmptyBagSlot) return;
+            // If this bag is bigger than our largest equipped bag, it's a potential upgrade — keep it
+            if (proto->ContainerSlots > largestEquippedBagSize) return;
+            // Otherwise it's a duplicate/downgrade sitting in inventory — sell it
+            // (fall through to sell logic below)
+        }
+        // --- CONSUMABLES: keep up to MAX_KEEP_PER_CONSUMABLE, sell excess ---
+        else if (proto->Class == ITEM_CLASS_CONSUMABLE)
+        {
+            uint32 totalOfThis = consumableCounts[proto->ItemId];
+            if (totalOfThis <= MAX_KEEP_PER_CONSUMABLE) return; // total is fine, keep all
+
+            uint32 alreadyKept = consumableKept[proto->ItemId];
+            uint32 thisStack = pItem->GetCount();
+
+            if (alreadyKept < MAX_KEEP_PER_CONSUMABLE)
+            {
+                // We still need to keep some — this stack is a "keep" stack
+                consumableKept[proto->ItemId] += thisStack;
+                return;
+            }
+            // We've already kept enough of this item — sell this stack
+            // (fall through to sell logic below)
+        }
+        else
+        {
+            // Normal item (weapons, armor, misc, etc.) — original logic
+            // Already filtered by quality and quest protection above
+        }
+
+        uint32 money = proto->SellPrice * pItem->GetCount();
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s:   selling [%s] (id=%u q=%u x%u) for %uc",
+            me->GetName(), proto->Name1 ? proto->Name1 : "?",
+            proto->ItemId, proto->Quality, pItem->GetCount(), money);
+
+        // DestroyItem handles RemoveItem + RemoveFromUpdateQueueOf + SetState
+        // in the correct order. Must grab money BEFORE destroy invalidates pItem.
+        me->ModifyMoney((int32)money);
+        me->DestroyItem(bag, slot, true);
+
+        totalCopper += money;
+        soldCount++;
+    };
+
+    // --- Iterate backpack ---
+    for (int i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+        trySellItem(INVENTORY_SLOT_BAG_0, (uint8)i);
+
+    // --- Iterate extra bags ---
+    for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
+    {
+        Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
+        if (!pBag || pBag->GetProto()->Class != ITEM_CLASS_CONTAINER)
+            continue;
+        for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
+            trySellItem((uint8)b, (uint8)j);
+    }
+
+    uint32 freeSlots = 0;
+    for (int fi = INVENTORY_SLOT_ITEM_START; fi < INVENTORY_SLOT_ITEM_END; ++fi)
+        if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
+            ++freeSlots;
+    for (int fi = INVENTORY_SLOT_BAG_START; fi < INVENTORY_SLOT_BAG_END; ++fi)
+        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
+            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
+                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj)
+                    if (!me->GetItemByPos(fi, fj))
+                        ++freeSlots;
+
+    // Build SELL_ACK — include "nothing_to_sell" flag when bags are full but
+    // nothing was vendorable, so C# can set a cooldown and break the loop.
+    char eventData[196];
+    if (soldCount == 0 && freeSlots == 0)
+    {
+        snprintf(eventData, sizeof(eventData),
+            "sold=0|copper_earned=0|free_slots=0|copper_total=%u|nothing_to_sell=1",
+            me->GetMoney());
+    }
+    else
+    {
+        snprintf(eventData, sizeof(eventData),
+            "sold=%u|copper_earned=%u|free_slots=%u|copper_total=%u",
+            soldCount, totalCopper, freeSlots, me->GetMoney());
+    }
+
+    BridgeSendEvent("SELL_ACK", eventData);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-SELL] %s: === DONE === sold %u items for %uc, %u free slots",
+        me->GetName(), soldCount, totalCopper, freeSlots);
+}
+
+// ============================================================
+// BridgeHandleRepairItems — Session 32
+//
+// C# sends REPAIR_AT_NPC after SELL_ACK when the vendor has
+// UNIT_NPC_FLAG_REPAIR. Repairs all equipped gear + bags.
+//
+// Pattern mirrors BridgeHandleSellItems: find NPC by entry
+// within 15yd, validate flag, do work, emit ACK/FAIL.
+//
+// DISPATCH:  Add to BridgeProcessLine:
+//              else if (strcmp(msgType, "REPAIR_AT_NPC") == 0)
+//                  BridgeHandleRepairItems(line);
+// HEADER:    Add to AiBotAI.h:
+//              void BridgeHandleRepairItems(const char* json);
+// ============================================================
+ 
+void AiBotAI::BridgeHandleRepairItems(const char* json)
+{
+    if (!me || !me->IsAlive() || !me->IsInWorld())
+        return;
+ 
+    int npcEntry = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "npc_entry", npcEntry);
+ 
+    if (npcEntry <= 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-REPAIR] %s: REPAIR_AT_NPC missing npc_entry", me->GetName());
+        BridgeSendEvent("REPAIR_FAIL", "reason=missing_npc_entry");
+        return;
+    }
+ 
+    // --- Find repair NPC within 15yd ---
+    std::list<Creature*> creatureList;
+    me->GetCreatureListWithEntryInGrid(creatureList, (uint32)npcEntry, 15.0f);
+ 
+    Creature* pRepairNpc = nullptr;
+    float bestDist = 999.0f;
+    for (Creature* c : creatureList)
+    {
+        if (c && c->IsAlive() &&
+            (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_REPAIR))
+        {
+            float d = me->GetDistance(c);
+            if (d < bestDist)
+            {
+                bestDist = d;
+                pRepairNpc = c;
+            }
+        }
+    }
+ 
+    if (!pRepairNpc)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-REPAIR] %s: no repair NPC with entry %d within 15yd",
+            me->GetName(), npcEntry);
+        BridgeSendEvent("REPAIR_FAIL", "reason=npc_not_found");
+        return;
+    }
+ 
+    // --- Check if bot has any damaged gear before attempting repair ---
+    bool hasDamage = false;
+    for (int i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+    {
+        Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i);
+        if (item && item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY) > 0 &&
+            item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
+            item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
+        {
+            hasDamage = true;
+            break;
+        }
+    }
+ 
+    if (!hasDamage)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-REPAIR] %s: no damaged gear — nothing to repair", me->GetName());
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData), "cost=0|copper_total=%u", me->GetMoney());
+        BridgeSendEvent("REPAIR_ACK", eventData);
+        return;
+    }
+ 
+    // --- Repair all gear ---
+    // DurabilityRepairAll(bool cost, float discountMod) → returns total copper spent
+    //   cost=true: deduct gold from player
+    //   discountMod=1.0: no faction reputation discount
+    //   Returns 0 if can't afford any repairs
+    uint32 totalCost = me->DurabilityRepairAll(true, 1.0f);
+ 
+    if (totalCost == 0 && hasDamage)
+    {
+        // Gear is damaged but nothing was repaired — can't afford
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-REPAIR] %s: gear is damaged but can't afford repair (gold=%u)",
+            me->GetName(), me->GetMoney());
+        BridgeSendEvent("REPAIR_FAIL", "reason=not_enough_gold");
+        return;
+    }
+ 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-REPAIR] %s: repaired all gear at %s (entry=%u) — cost %uc, %uc remaining",
+        me->GetName(), pRepairNpc->GetName(), pRepairNpc->GetEntry(),
+        totalCost, me->GetMoney());
+ 
+    char eventData[128];
+    snprintf(eventData, sizeof(eventData), "cost=%u|copper_total=%u", totalCost, me->GetMoney());
+    BridgeSendEvent("REPAIR_ACK", eventData);
+}
+ 
+
+void AiBotAI::BridgeHandleUseGameObject(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    int goEntryInt = 0;
+    JsonExtractInt(payload, "go_entry", goEntryInt);
+    uint32 goEntry = (uint32)goEntryInt;
+
+    if (!goEntry)
+    {
+        BridgeSendEvent("USE_GO_FAIL", "reason=bad_payload");
+        return;
+    }
+
+    // Find nearest spawned GO of this entry within 15yd
+    std::list<GameObject*> goList;
+    me->GetGameObjectListWithEntryInGrid(goList, goEntry, 15.0f);
+
+    GameObject* obj = nullptr;
+    float closestDist = 999.0f;
+    for (auto* go : goList)
+    {
+        if (!go->isSpawned()) continue;
+        if (go->getLootState() != GO_READY) continue;
+        float dist = me->GetDistance(go);
+        if (dist < closestDist)
+        {
+            closestDist = dist;
+            obj = go;
+        }
+    }
+
+    if (!obj)
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "reason=not_found|go_entry=%u", goEntry);
+        BridgeSendEvent("USE_GO_FAIL", buf);
+        return;
+    }
+
+    if (closestDist > 10.0f)
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "reason=too_far|go_entry=%u|dist=%d", goEntry, (int)closestDist);
+        BridgeSendEvent("USE_GO_FAIL", buf);
+        return;
+    }
+
+    // Get loot template ID from GO info
+    uint32 lootId = obj->GetGOInfo()->GetLootId();
+    if (!lootId)
+    {
+        // No loot — still a valid use (some GOs give quest credit on interact)
+        obj->SetLootState(GO_JUST_DEACTIVATED);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "go_entry=%u|items=", goEntry);
+        BridgeSendEvent("USE_GO_ACK", buf);
+        return;
+    }
+
+    // Generate loot from gameobject_loot_template
+    Loot& loot = obj->loot;
+    loot.clear();
+    loot.FillLoot(lootId, LootTemplates_Gameobject, me, false);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-GO] %s: USE_GAMEOBJECT entry=%u lootId=%u → %zu items, %u copper",
+        me->GetName(), goEntry, lootId, loot.items.size(), loot.gold);
+
+    // Take gold
+    uint32 gold = loot.gold;
+    if (gold > 0)
+    {
+        me->ModifyMoney((int32)gold);
+        me->LootMoney((int32)gold, &loot);
+        loot.gold = 0;
+    }
+
+    // Take items — same pattern as DoAutoLoot
+    me->AutoStoreLoot(loot);
+
+    // Build loot summary for bridge events
+    std::string itemStr;
+    uint32 itemsLooted = 0;
+    for (size_t i = 0; i < loot.items.size(); ++i)
+    {
+        LootItem& item = loot.items[i];
+        if (item.is_looted)
+        {
+            itemsLooted++;
+            if (!itemStr.empty()) itemStr += ",";
+            itemStr += std::to_string(item.itemid) + ":" + std::to_string(item.count);
+        }
+    }
+
+    // Despawn — GO will respawn on its timer
+    loot.clear();
+    obj->SetLootState(GO_JUST_DEACTIVATED);
+
+    // Auto-equip bags first, then gear
+    TryAutoEquipBags();
+    TryAutoEquip();
+
+    // Emit LOOT event — same format as DoAutoLoot so C# quest item tracking works unchanged
+    std::string lootData = "gold=" + std::to_string(gold);
+    if (!itemStr.empty())
+        lootData += "|items=" + itemStr;
+    BridgeSendEvent("LOOT", lootData.c_str());
+
+    // Emit USE_GO_ACK so C# QuestingDomain knows the interaction succeeded
+    std::string ackData = "go_entry=" + std::to_string(goEntry) + "|items=" + itemStr;
+    BridgeSendEvent("USE_GO_ACK", ackData.c_str());
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-GO] %s: === DONE === %u items stored, %u copper, GO despawned",
+        me->GetName(), itemsLooted, gold);
+}
+
+// ============================================================
+// METHOD 2: BridgeHandleFormGroup — NEW METHOD
+//
+// Add after BridgeHandleUseGameObject in AiBotAI.cpp.
+// Creates a WoW Group with this bot as leader, adds followers.
+// Uses NEED_BEFORE_GREED so only eligible players see roll windows.
+// ============================================================
+ 
+void AiBotAI::BridgeHandleFormGroup(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+ 
+    // Parse member_guids array: "member_guids":[5,8,12]
+    const char* arrStart = strstr(payload, "\"member_guids\"");
+    if (!arrStart)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-GROUP] %s: FORM_GROUP missing member_guids", me->GetName());
+        BridgeSendEvent("FORM_GROUP_FAIL", "missing member_guids");
+        return;
+    }
+ 
+    arrStart = strchr(arrStart, '[');
+    if (!arrStart)
+    {
+        BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
+        return;
+    }
+    arrStart++; // skip '['
+ 
+    const char* arrEnd = strchr(arrStart, ']');
+    if (!arrEnd)
+    {
+        BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
+        return;
+    }
+ 
+    // Extract GUIDs from comma-separated list
+    std::vector<uint32> memberGuids;
+    const char* p = arrStart;
+    while (p < arrEnd)
+    {
+        while (p < arrEnd && (*p == ' ' || *p == ',')) p++;
+        if (p >= arrEnd) break;
+        uint32 guid = (uint32)atoi(p);
+        if (guid > 0)
+            memberGuids.push_back(guid);
+        while (p < arrEnd && *p != ',') p++;
+    }
+ 
+    if (memberGuids.empty())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-GROUP] %s: FORM_GROUP no valid member GUIDs", me->GetName());
+        BridgeSendEvent("FORM_GROUP_FAIL", "no valid guids");
+        return;
+    }
+ 
+    // If already in a group, leave it first
+    if (Group* oldGroup = me->GetGroup())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-GROUP] %s: already in a group, leaving first", me->GetName());
+        oldGroup->RemoveMember(me->GetObjectGuid(), 0);
+    }
+ 
+    // Create a new Group with this bot as leader
+    Group* group = new Group;
+    if (!group->Create(me->GetObjectGuid(), me->GetName()))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-GROUP] %s: Group::Create failed", me->GetName());
+        delete group;
+        BridgeSendEvent("FORM_GROUP_FAIL", "create_failed");
+        return;
+    }
+ 
+    // NEED_BEFORE_GREED: only eligible players see the roll window.
+    // StartLootRoll checks CanUseItem — priests won't roll on plate, etc.
+    group->SetLootMethod(NEED_BEFORE_GREED);
+ 
+    uint32 added = 0;
+    for (uint32 memberGuid : memberGuids)
+    {
+        Player* pMember = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, memberGuid));
+        if (!pMember)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-GROUP] %s: FORM_GROUP member GUID %u not found online",
+                me->GetName(), memberGuid);
+            continue;
+        }
+ 
+        // If member is already in a group, remove them first
+        if (Group* memberOldGroup = pMember->GetGroup())
+        {
+            memberOldGroup->RemoveMember(pMember->GetObjectGuid(), 0);
+        }
+ 
+        if (!group->AddMember(pMember->GetObjectGuid(), pMember->GetName()))
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-GROUP] %s: FORM_GROUP AddMember failed for %s (GUID %u)",
+                me->GetName(), pMember->GetName(), memberGuid);
+            continue;
+        }
+ 
+        added++;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-GROUP] %s: added %s (GUID %u) to group",
+            me->GetName(), pMember->GetName(), memberGuid);
+    }
+ 
+    if (added == 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[AIBOT-GROUP] %s: FORM_GROUP no members added, disbanding", me->GetName());
+        group->Disband();
+        BridgeSendEvent("FORM_GROUP_FAIL", "no_members_added");
+        return;
+    }
+ 
+    char eventData[128];
+    snprintf(eventData, sizeof(eventData), "members=%u|leader=%u", added + 1, me->GetGUIDLow());
+    BridgeSendEvent("FORM_GROUP_ACK", eventData);
+ 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-GROUP] %s: group formed — %u members, loot=NEED_BEFORE_GREED",
+        me->GetName(), added + 1);
+}
+
+// ============================================================
+// METHOD 3: BridgeHandleDisbandGroup — NEW METHOD
+//
+// Add after BridgeHandleFormGroup.
+// ============================================================
+ 
+void AiBotAI::BridgeHandleDisbandGroup(const char* json)
+{
+    Group* group = me->GetGroup();
+    if (!group)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-GROUP] %s: DISBAND_GROUP but not in a group", me->GetName());
+        BridgeSendEvent("GROUP_DISBANDED", "was_not_grouped");
+        return;
+    }
+ 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-GROUP] %s: disbanding group", me->GetName());
+ 
+    group->Disband();
+    BridgeSendEvent("GROUP_DISBANDED", "");
+}
+
+void AiBotAI::BridgeHandleResurrect(const char* json)
+{
+    if (!me)
+        return;
+
+    // A graveyard self-rez is already in flight: we've teleported the ghost and will rez it
+    // ourselves once the teleport lands (see UpdateAI). Ignore ANY rez command until then —
+    // a stray plain RESURRECT here would rez us mid-teleport, back in the death pocket (the loop).
+    if (m_pendingGraveyardRez)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT] %s: RESURRECT ignored — graveyard self-rez in flight", me->GetName());
+        return;
+    }
+
+    if (!me->IsDead() && me->GetDeathState() != DEAD)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: RESURRECT but bot is not dead, ignoring", me->GetName());
+        BridgeSendEvent("RESPAWN", "");  // tell C# we're alive anyway
+        return;
+    }
+
+    int atGraveyard = 0;
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+    JsonExtractInt(payload, "at_graveyard", atGraveyard);
+
+    // ── Death-loop / death-march escape: GHOST PORT, then SELF-rez once it lands ──
+    // We port the *ghost* (non-combatable — zero aggro) with NearTeleportTo, stay dead, arm
+    // m_pendingGraveyardRez, and emit GRAVEYARD_PORT (tells C# the port was accepted so it
+    // stops its deadline). UpdateAI then resurrects us the moment the teleport has actually
+    // applied — NOT on a C# roundtrip — so we can never rez in the kill pocket before moving.
+    if (atGraveyard)
+    {
+        float dx = me->GetPositionX(), dy = me->GetPositionY(), dz = me->GetPositionZ();
+        uint32 mapId = me->GetMapId();
+
+        // Primary: zone-linked nearest graveyard for the death position.
+        WorldSafeLocsEntry const* grave = sObjectMgr.GetClosestGraveYard(dx, dy, dz, mapId, me->GetTeam());
+
+        // Fallback: the death pos resolves to a zone with NO graveyard link (areaId 0 /
+        // out-of-bounds pocket — the Odugi/Haxixaw 200+ death loop). GetClosestGraveYard
+        // returns null there, and the OLD code rez'd in place => infinite re-death. Probe
+        // outward in rings; a probe point that lands in a REAL adjacent zone makes
+        // GetClosestGraveYard return that zone's nearest valid, same-faction, level-
+        // appropriate graveyard. Keep the hit closest to the actual death position.
+        if (!grave)
+        {
+            static const float kRings[] = { 150.0f, 350.0f, 600.0f, 1000.0f };
+            float bestSq = 0.0f;
+            for (float r : kRings)
+            {
+                for (int a = 0; a < 8; ++a)
+                {
+                    float ang = (float)a * (M_PI_F / 4.0f);
+                    float px = dx + r * cosf(ang);
+                    float py = dy + r * sinf(ang);
+                    WorldSafeLocsEntry const* g =
+                        sObjectMgr.GetClosestGraveYard(px, py, dz, mapId, me->GetTeam());
+                    if (!g)
+                        continue;
+                    float gdx = g->x - dx, gdy = g->y - dy;
+                    float dsq = gdx * gdx + gdy * gdy;
+                    if (!grave || dsq < bestSq) { grave = g; bestSq = dsq; }
+                }
+                if (grave)
+                    break;   // nearest ring with any hit wins
+            }
+            if (grave)
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT] %s graveyard port: death pos in dead zone (areaId 0?) — "
+                    "probe found valid graveyard %.0fyd away", me->GetName(), sqrtf(bestSq));
+        }
+
+        // Last resort: still nothing AND spawn point is on this map — port to spawn
+        // (always a valid, level-appropriate starter loc). Never rez-in-place into the pocket.
+        if (!grave && m_spawnMapId == mapId)
+        {
+            // [GROUND] Spawn coords are authored, but ground them anyway so a bad spawn row
+            // can't float the ghost. Local copy → snap → stash the grounded value so the
+            // UpdateAI landed-check measures against the real target.
+            float sx = m_spawnX, sy = m_spawnY, sz = m_spawnZ;
+            ReGroundZ(sx, sy, sz, "rez-spawn");
+
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT] %s graveyard port: no graveyard near death pos — porting ghost to spawn (%.1f,%.1f,%.1f)",
+                me->GetName(), sx, sy, sz);
+            me->NearTeleportTo(sx, sy, sz, m_spawnO);
+            m_pendingGraveyardRez = true;
+            m_graveRezX = sx; m_graveRezY = sy; m_graveRezZ = sz;
+            m_graveRezMap = mapId; m_graveRezWaitMs = 8000;
+            BridgeSendEvent("GRAVEYARD_PORT", "");
+            return;
+        }
+
+        if (!grave)
+        {
+            // Genuinely nowhere on this map (cross-map spawn + no graveyard) — degrade to the
+            // old in-place rez, but log loudly so this rare case is visible if it ever bites.
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "[AIBOT] %s graveyard port: NO valid destination on map %u — rez in place (STUCK RISK)",
+                me->GetName(), mapId);
+            me->ResurrectPlayer(0.5f);
+            me->CombatStop(true);
+            me->SpawnCorpseBones();
+            BridgeSendEvent("RESPAWN", "");
+            BridgeSendState();
+            return;
+        }
+
+        // [GROUND] Graveyard rows are authored on the ground (no-op in the normal case), but
+        // snapping catches a bad/edge graveyard entry. const grave → local copy.
+        float gx = grave->x, gy = grave->y, gz = grave->z;
+        ReGroundZ(gx, gy, gz, "rez-grave");
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT] %s graveyard port (ghost): (%.1f, %.1f, %.1f) -> (%.1f, %.1f, %.1f) map=%u",
+            me->GetName(), dx, dy, dz, gx, gy, gz, mapId);
+
+        me->NearTeleportTo(gx, gy, gz, me->GetOrientation());
+
+        // Ghost stays DEAD on purpose; the teleport applies next tick. Arm the self-rez:
+        // UpdateAI resurrects us once we've actually arrived at the graveyard. GRAVEYARD_PORT
+        // just tells C# the port was accepted (stop its deadline) — the RESPAWN follows from us.
+        m_pendingGraveyardRez = true;
+        m_graveRezX = gx; m_graveRezY = gy; m_graveRezZ = gz;
+        m_graveRezMap = mapId; m_graveRezWaitMs = 8000;
+        BridgeSendEvent("GRAVEYARD_PORT", "");
+        return;
+    }
+
+    // ── Plain rez (at the bot's current pos — which, post-port, IS the graveyard) ──
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT] %s resurrecting at (%.1f, %.1f, %.1f)",
+        me->GetName(), me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+
+    me->ResurrectPlayer(0.5f);
+    me->CombatStop(true);   // insurance: death cleared combat; never resume rez in-combat
+    me->SpawnCorpseBones();
+
+    BridgeSendEvent("RESPAWN", "");
+    BridgeSendState();
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT] %s resurrected at 50%% HP", me->GetName());
+}
+
+
+// ============================================================
+// EVENT SENDERS — C++ → C# notifications
+// ============================================================
+
+void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow)
+{
+    if (!m_bridgeConnected)
+        return;
+
+    char json[256];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"EVENT\",\"payload\":{"
+        "\"guid\":%u,\"event\":\"KILL\","
+        "\"creature_entry\":%u,\"creature_guid\":%u}}",
+        me->GetGUIDLow(), creatureEntry, creatureGuidLow);
+    BridgeSend(json);
+}
+
+void AiBotAI::SendQuestUpdateEvent(uint32 questId, const char* status)
+{
+    if (!m_bridgeConnected)
+        return;
+
+    char json[256];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"EVENT\",\"payload\":{"
+        "\"guid\":%u,\"event\":\"QUEST_UPDATE\","
+        "\"quest_id\":%u,\"status\":\"%s\"}}",
+        me->GetGUIDLow(), questId, status);
+    BridgeSend(json);
+}
+
+void AiBotAI::SendLevelUpEvent(uint32 newLevel)
+{
+    if (!m_bridgeConnected)
+        return;
+
+    char json[128];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"EVENT\",\"payload\":{"
+        "\"guid\":%u,\"event\":\"LEVEL_UP\",\"new_level\":%u}}",
+        me->GetGUIDLow(), newLevel);
+    BridgeSend(json);
+}
+
+void AiBotAI::SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName)
+{
+    if (!m_bridgeConnected)
+        return;
+
+    char json[512];
+    if (channelName && channelName[0] != '\0')
+    {
+        snprintf(json, sizeof(json),
+            "{\"type\":\"EVENT\",\"payload\":{"
+            "\"guid\":%u,\"event\":\"CHAT_RECV\","
+            "\"sender\":\"%s\",\"message\":\"%s\",\"chat_type\":\"%s\",\"channel_name\":\"%s\"}}",
+            me->GetGUIDLow(), senderName, message, chatType, channelName);
+    }
+    else
+    {
+        snprintf(json, sizeof(json),
+            "{\"type\":\"EVENT\",\"payload\":{"
+            "\"guid\":%u,\"event\":\"CHAT_RECV\","
+            "\"sender\":\"%s\",\"message\":\"%s\",\"chat_type\":\"%s\"}}",
+            me->GetGUIDLow(), senderName, message, chatType);
+    }
+    BridgeSend(json);
+}

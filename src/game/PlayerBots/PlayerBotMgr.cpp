@@ -17,6 +17,7 @@
 #include "MapManager.h"
 #include "Language.h"
 #include "Spell.h"
+#include "AiBotAI.h" 
 
 INSTANTIATE_SINGLETON_1(PlayerBotMgr);
 
@@ -88,7 +89,7 @@ void PlayerBotMgr::Load()
     // 4- LoadFromDB
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> [PlayerBotMgr] Loading Bots ...");
     result = CharacterDatabase.PQuery(
-                 "SELECT char_guid, chance, ai"
+                 "SELECT char_guid, chance, ai, race, class, level, map, position_x, position_y, position_z, name"
                  " FROM playerbot");
     if (!result)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Table `playerbot` is empty.");
@@ -102,7 +103,17 @@ void PlayerBotMgr::Load()
             uint32 chance = fields[1].GetUInt32();
 
             std::shared_ptr<PlayerBotEntry> entry = std::make_shared<PlayerBotEntry>(guid, acc, chance);
-            entry->ai.reset(CreatePlayerBotAI(fields[2].GetCppString()));
+           uint8  pbRace  = fields[3].GetUInt8();
+            uint8  pbClass = fields[4].GetUInt8();
+            uint32 pbLevel = fields[5].GetUInt32();
+            uint32 pbMap   = fields[6].GetUInt32();
+            float  pbX     = fields[7].GetFloat();
+            float  pbY     = fields[8].GetFloat();
+            float  pbZ     = fields[9].GetFloat();
+            std::string pbName = fields[10].GetCppString();
+            entry->ai.reset(CreatePlayerBotAI(fields[2].GetCppString(), pbRace, pbClass, pbLevel, pbMap, pbX, pbY, pbZ, pbName));
+              if (fields[2].GetCppString() == "AiBotAI")
+                entry->customBot = true;
             entry->ai->botEntry = entry.get();
             if (!sObjectMgr.GetPlayerNameByGUID(guid, entry->name))
                 entry->name = "<Unknown>";
@@ -112,6 +123,7 @@ void PlayerBotMgr::Load()
         }
         while (result->NextRow());
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "%u bots loaded", m_bots.size());
+
     }
 
     // 5- Check config/DB
@@ -658,6 +670,43 @@ bool ChatHandler::HandleBotReloadCommand(char * args)
 {
     sPlayerBotMgr.Load();
     SendSysMessage("PlayerBot system reloaded");
+    return true;
+}
+
+bool ChatHandler::HandleBotAddAiCommand(char* args)
+{
+    uint8 botClass = CLASS_WARRIOR;
+    uint8 botRace = RACE_HUMAN;
+
+    if (char* arg1 = strtok((char*)args, " "))
+    {
+        std::string option = arg1;
+        if (option == "warrior") { botClass = CLASS_WARRIOR; botRace = RACE_HUMAN; }
+        else if (option == "mage") { botClass = CLASS_MAGE; botRace = RACE_GNOME; }
+        else if (option == "priest") { botClass = CLASS_PRIEST; botRace = RACE_HUMAN; }
+        else if (option == "hunter") { botClass = CLASS_HUNTER; botRace = RACE_NIGHTELF; }
+        else if (option == "rogue") { botClass = CLASS_ROGUE; botRace = RACE_HUMAN; }
+        else if (option == "warlock") { botClass = CLASS_WARLOCK; botRace = RACE_HUMAN; }
+        else if (option == "druid") { botClass = CLASS_DRUID; botRace = RACE_NIGHTELF; }
+        else if (option == "paladin") { botClass = CLASS_PALADIN; botRace = RACE_HUMAN; }
+        else if (option == "shaman") { botClass = CLASS_SHAMAN; botRace = RACE_ORC; }
+    }
+
+    // Northshire Abbey
+    float x = -8949.95f, y = -132.493f, z = 83.5312f, o = 0.0f;
+    uint32 mapId = 0;
+    uint32 instanceId = sMapMgr.GetContinentInstanceId(mapId, x, y);
+
+    AiBotAI* ai = new AiBotAI(botRace, botClass, 1, mapId, instanceId, x, y, z, o);
+    if (sPlayerBotMgr.AddBot(ai))
+        PSendSysMessage("[AiBot] Spawned %s at Northshire Abbey.", args && *args ? args : "warrior");
+    else
+    {
+        delete ai;
+        SendSysMessage("[AiBot] Error spawning bot.");
+        SetSentErrorMessage(true);
+        return false;
+    }
     return true;
 }
 

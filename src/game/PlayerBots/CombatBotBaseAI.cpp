@@ -3093,6 +3093,20 @@ bool CombatBotBaseAI::UseItemEffect(Item* pItem, bool onlyToBreakCC)
                     if (onlyToBreakCC && !pSpellEntry->HasAttribute(SPELL_ATTR_EX_IMMUNITY_PURGES_EFFECT))
                         continue;
 
+                    // Skip transform/shapeshift visual effects (ogre costumes, noggenfogger, etc.)
+                    bool isTransform = false;
+                    for (int i = 0; i < MAX_EFFECT_INDEX; ++i)
+                    {
+                        if (pSpellEntry->EffectApplyAuraName[i] == SPELL_AURA_TRANSFORM ||
+                            pSpellEntry->EffectApplyAuraName[i] == SPELL_AURA_MOD_SHAPESHIFT)
+                        {
+                            isTransform = true;
+                            break;
+                        }
+                    }
+                    if (isTransform)
+                        continue;
+
                     if (pSpellEntry->IsPositiveSpell())
                         return me->CastSpell(me, pSpellEntry, false, pItem) == SPELL_CAST_OK;
                     else if (me->GetVictim())

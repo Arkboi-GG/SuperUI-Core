@@ -1009,6 +1009,8 @@ class ObjectMgr
             return &*itr;
         }
 
+        CreatureDataMap const& GetCreatureDataMap() const { return m_CreatureDataMap; }
+
         CreatureData const* GetCreatureData(uint32 guid) const
         {
             CreatureDataPair const* dataPair = GetCreatureDataPair(guid);

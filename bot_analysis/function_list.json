@@ -1,0 +1,1970 @@
+[
+  {
+    "name": "AiBotAI::GetMountSpellId",
+    "class": "AiBotAI",
+    "method": "GetMountSpellId",
+    "file": "AiBotAI.cpp",
+    "line": 69,
+    "line_count": 43
+  },
+  {
+    "name": "AiBotAI::UseMount",
+    "class": "AiBotAI",
+    "method": "UseMount",
+    "file": "AiBotAI.cpp",
+    "line": 113,
+    "line_count": 26
+  },
+  {
+    "name": "AiBotAI::DrinkAndEat",
+    "class": "AiBotAI",
+    "method": "DrinkAndEat",
+    "file": "AiBotAI.cpp",
+    "line": 140,
+    "line_count": 50
+  },
+  {
+    "name": "AiBotAI::GetMaxAggroDistanceForMap",
+    "class": "AiBotAI",
+    "method": "GetMaxAggroDistanceForMap",
+    "file": "AiBotAI.cpp",
+    "line": 191,
+    "line_count": 4
+  },
+  {
+    "name": "AiBotAI::AttackStart",
+    "class": "AiBotAI",
+    "method": "AttackStart",
+    "file": "AiBotAI.cpp",
+    "line": 196,
+    "line_count": 23
+  },
+  {
+    "name": "AiBotAI::SelectAttackTarget",
+    "class": "AiBotAI",
+    "method": "SelectAttackTarget",
+    "file": "AiBotAI.cpp",
+    "line": 220,
+    "line_count": 64
+  },
+  {
+    "name": "AiBotAI::StopMoving",
+    "class": "AiBotAI",
+    "method": "StopMoving",
+    "file": "AiBotAI.cpp",
+    "line": 285,
+    "line_count": 6
+  },
+  {
+    "name": "AiBotAI::CheckForUnreachableTarget",
+    "class": "AiBotAI",
+    "method": "CheckForUnreachableTarget",
+    "file": "AiBotAI.cpp",
+    "line": 292,
+    "line_count": 35
+  },
+  {
+    "name": "AiBotAI::DoRandomWander",
+    "class": "AiBotAI",
+    "method": "DoRandomWander",
+    "file": "AiBotAI.cpp",
+    "line": 332,
+    "line_count": 18
+  },
+  {
+    "name": "AiBotAI::OnPlayerLogin",
+    "class": "AiBotAI",
+    "method": "OnPlayerLogin",
+    "file": "AiBotAI.cpp",
+    "line": 355,
+    "line_count": 6
+  },
+  {
+    "name": "AiBotAI::OnPacketReceived",
+    "class": "AiBotAI",
+    "method": "OnPacketReceived",
+    "file": "AiBotAI.cpp",
+    "line": 362,
+    "line_count": 6
+  },
+  {
+    "name": "AiBotAI::MovementInform",
+    "class": "AiBotAI",
+    "method": "MovementInform",
+    "file": "AiBotAI.cpp",
+    "line": 369,
+    "line_count": 15
+  },
+  {
+    "name": "AiBotAI::UpdateAI",
+    "class": "AiBotAI",
+    "method": "UpdateAI",
+    "file": "AiBotAI.cpp",
+    "line": 389,
+    "line_count": 213
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI",
+    "file": "AiBotAI.cpp",
+    "line": 609,
+    "line_count": 33
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI",
+    "file": "AiBotAI.cpp",
+    "line": 643,
+    "line_count": 36
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Paladin",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Paladin",
+    "file": "AiBotAI.cpp",
+    "line": 680,
+    "line_count": 33
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Paladin",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Paladin",
+    "file": "AiBotAI.cpp",
+    "line": 714,
+    "line_count": 132
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Shaman",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Shaman",
+    "file": "AiBotAI.cpp",
+    "line": 847,
+    "line_count": 35
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Shaman",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Shaman",
+    "file": "AiBotAI.cpp",
+    "line": 883,
+    "line_count": 99
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Hunter",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Hunter",
+    "file": "AiBotAI.cpp",
+    "line": 983,
+    "line_count": 31
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Hunter",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Hunter",
+    "file": "AiBotAI.cpp",
+    "line": 1015,
+    "line_count": 125
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Mage",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Mage",
+    "file": "AiBotAI.cpp",
+    "line": 1141,
+    "line_count": 36
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Mage",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Mage",
+    "file": "AiBotAI.cpp",
+    "line": 1178,
+    "line_count": 190
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Priest",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Priest",
+    "file": "AiBotAI.cpp",
+    "line": 1369,
+    "line_count": 95
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Priest",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Priest",
+    "file": "AiBotAI.cpp",
+    "line": 1465,
+    "line_count": 165
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Warlock",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Warlock",
+    "file": "AiBotAI.cpp",
+    "line": 1631,
+    "line_count": 54
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Warlock",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Warlock",
+    "file": "AiBotAI.cpp",
+    "line": 1686,
+    "line_count": 149
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Warrior",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Warrior",
+    "file": "AiBotAI.cpp",
+    "line": 1836,
+    "line_count": 32
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Warrior",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Warrior",
+    "file": "AiBotAI.cpp",
+    "line": 1869,
+    "line_count": 234
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Rogue",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Rogue",
+    "file": "AiBotAI.cpp",
+    "line": 2104,
+    "line_count": 28
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Rogue",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Rogue",
+    "file": "AiBotAI.cpp",
+    "line": 2133,
+    "line_count": 190
+  },
+  {
+    "name": "AiBotAI::UpdateOutOfCombatAI_Druid",
+    "class": "AiBotAI",
+    "method": "UpdateOutOfCombatAI_Druid",
+    "file": "AiBotAI.cpp",
+    "line": 2324,
+    "line_count": 134
+  },
+  {
+    "name": "AiBotAI::UpdateInCombatAI_Druid",
+    "class": "AiBotAI",
+    "method": "UpdateInCombatAI_Druid",
+    "file": "AiBotAI.cpp",
+    "line": 2459,
+    "line_count": 346
+  },
+  {
+    "name": "BattleBotAI::GetMountSpellId",
+    "class": "BattleBotAI",
+    "method": "GetMountSpellId",
+    "file": "BattleBotAI.cpp",
+    "line": 77,
+    "line_count": 59
+  },
+  {
+    "name": "BattleBotAI::UseMount",
+    "class": "BattleBotAI",
+    "method": "UseMount",
+    "file": "BattleBotAI.cpp",
+    "line": 137,
+    "line_count": 34
+  },
+  {
+    "name": "BattleBotAI::DrinkAndEat",
+    "class": "BattleBotAI",
+    "method": "DrinkAndEat",
+    "file": "BattleBotAI.cpp",
+    "line": 172,
+    "line_count": 58
+  },
+  {
+    "name": "BattleBotAI::GetMaxAggroDistanceForMap",
+    "class": "BattleBotAI",
+    "method": "GetMaxAggroDistanceForMap",
+    "file": "BattleBotAI.cpp",
+    "line": 231,
+    "line_count": 8
+  },
+  {
+    "name": "BattleBotAI::AttackStart",
+    "class": "BattleBotAI",
+    "method": "AttackStart",
+    "file": "BattleBotAI.cpp",
+    "line": 240,
+    "line_count": 25
+  },
+  {
+    "name": "BattleBotAI::ShouldIgnoreCombat",
+    "class": "BattleBotAI",
+    "method": "ShouldIgnoreCombat",
+    "file": "BattleBotAI.cpp",
+    "line": 266,
+    "line_count": 7
+  },
+  {
+    "name": "BattleBotAI::SelectAttackTarget",
+    "class": "BattleBotAI",
+    "method": "SelectAttackTarget",
+    "file": "BattleBotAI.cpp",
+    "line": 274,
+    "line_count": 112
+  },
+  {
+    "name": "BattleBotAI::SelectFollowTarget",
+    "class": "BattleBotAI",
+    "method": "SelectFollowTarget",
+    "file": "BattleBotAI.cpp",
+    "line": 387,
+    "line_count": 43
+  },
+  {
+    "name": "BattleBotAI::DoGraveyardJump",
+    "class": "BattleBotAI",
+    "method": "DoGraveyardJump",
+    "file": "BattleBotAI.cpp",
+    "line": 431,
+    "line_count": 30
+  },
+  {
+    "name": "BattleBotAI::StopMoving",
+    "class": "BattleBotAI",
+    "method": "StopMoving",
+    "file": "BattleBotAI.cpp",
+    "line": 462,
+    "line_count": 6
+  },
+  {
+    "name": "BattleBotAI::OnPacketReceived",
+    "class": "BattleBotAI",
+    "method": "OnPacketReceived",
+    "file": "BattleBotAI.cpp",
+    "line": 469,
+    "line_count": 31
+  },
+  {
+    "name": "BattleBotAI::OnPlayerLogin",
+    "class": "BattleBotAI",
+    "method": "OnPlayerLogin",
+    "file": "BattleBotAI.cpp",
+    "line": 501,
+    "line_count": 5
+  },
+  {
+    "name": "BattleBotAI::UpdateWaypointMovement",
+    "class": "BattleBotAI",
+    "method": "UpdateWaypointMovement",
+    "file": "BattleBotAI.cpp",
+    "line": 507,
+    "line_count": 37
+  },
+  {
+    "name": "BattleBotAI::OnJustDied",
+    "class": "BattleBotAI",
+    "method": "OnJustDied",
+    "file": "BattleBotAI.cpp",
+    "line": 545,
+    "line_count": 6
+  },
+  {
+    "name": "BattleBotAI::OnJustRevived",
+    "class": "BattleBotAI",
+    "method": "OnJustRevived",
+    "file": "BattleBotAI.cpp",
+    "line": 552,
+    "line_count": 6
+  },
+  {
+    "name": "BattleBotAI::OnEnterBattleGround",
+    "class": "BattleBotAI",
+    "method": "OnEnterBattleGround",
+    "file": "BattleBotAI.cpp",
+    "line": 559,
+    "line_count": 44
+  },
+  {
+    "name": "BattleBotAI::OnLeaveBattleGround",
+    "class": "BattleBotAI",
+    "method": "OnLeaveBattleGround",
+    "file": "BattleBotAI.cpp",
+    "line": 604,
+    "line_count": 10
+  },
+  {
+    "name": "BattleBotAI::CheckForUnreachableTarget",
+    "class": "BattleBotAI",
+    "method": "CheckForUnreachableTarget",
+    "file": "BattleBotAI.cpp",
+    "line": 615,
+    "line_count": 35
+  },
+  {
+    "name": "BattleBotAI::UpdateAI",
+    "class": "BattleBotAI",
+    "method": "UpdateAI",
+    "file": "BattleBotAI.cpp",
+    "line": 651,
+    "line_count": 317
+  },
+  {
+    "name": "BattleBotAI::UpdateBattleGroundAI",
+    "class": "BattleBotAI",
+    "method": "UpdateBattleGroundAI",
+    "file": "BattleBotAI.cpp",
+    "line": 969,
+    "line_count": 31
+  },
+  {
+    "name": "BattleBotAI::UpdateFlagCarrierAI",
+    "class": "BattleBotAI",
+    "method": "UpdateFlagCarrierAI",
+    "file": "BattleBotAI.cpp",
+    "line": 1001,
+    "line_count": 212
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI",
+    "file": "BattleBotAI.cpp",
+    "line": 1214,
+    "line_count": 33
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI",
+    "file": "BattleBotAI.cpp",
+    "line": 1248,
+    "line_count": 36
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Paladin",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Paladin",
+    "file": "BattleBotAI.cpp",
+    "line": 1285,
+    "line_count": 33
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Paladin",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Paladin",
+    "file": "BattleBotAI.cpp",
+    "line": 1319,
+    "line_count": 132
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Shaman",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Shaman",
+    "file": "BattleBotAI.cpp",
+    "line": 1452,
+    "line_count": 35
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Shaman",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Shaman",
+    "file": "BattleBotAI.cpp",
+    "line": 1488,
+    "line_count": 99
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Hunter",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Hunter",
+    "file": "BattleBotAI.cpp",
+    "line": 1588,
+    "line_count": 31
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Hunter",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Hunter",
+    "file": "BattleBotAI.cpp",
+    "line": 1620,
+    "line_count": 125
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Mage",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Mage",
+    "file": "BattleBotAI.cpp",
+    "line": 1746,
+    "line_count": 36
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Mage",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Mage",
+    "file": "BattleBotAI.cpp",
+    "line": 1783,
+    "line_count": 190
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Priest",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Priest",
+    "file": "BattleBotAI.cpp",
+    "line": 1974,
+    "line_count": 95
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Priest",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Priest",
+    "file": "BattleBotAI.cpp",
+    "line": 2070,
+    "line_count": 165
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Warlock",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Warlock",
+    "file": "BattleBotAI.cpp",
+    "line": 2236,
+    "line_count": 54
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Warlock",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Warlock",
+    "file": "BattleBotAI.cpp",
+    "line": 2291,
+    "line_count": 149
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Warrior",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Warrior",
+    "file": "BattleBotAI.cpp",
+    "line": 2441,
+    "line_count": 32
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Warrior",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Warrior",
+    "file": "BattleBotAI.cpp",
+    "line": 2474,
+    "line_count": 234
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Rogue",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Rogue",
+    "file": "BattleBotAI.cpp",
+    "line": 2709,
+    "line_count": 28
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Rogue",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Rogue",
+    "file": "BattleBotAI.cpp",
+    "line": 2738,
+    "line_count": 190
+  },
+  {
+    "name": "BattleBotAI::UpdateOutOfCombatAI_Druid",
+    "class": "BattleBotAI",
+    "method": "UpdateOutOfCombatAI_Druid",
+    "file": "BattleBotAI.cpp",
+    "line": 2929,
+    "line_count": 134
+  },
+  {
+    "name": "BattleBotAI::UpdateInCombatAI_Druid",
+    "class": "BattleBotAI",
+    "method": "UpdateInCombatAI_Druid",
+    "file": "BattleBotAI.cpp",
+    "line": 3064,
+    "line_count": 346
+  },
+  {
+    "name": "BattleBotAI::MovementInform",
+    "class": "BattleBotAI",
+    "method": "MovementInform",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 1750,
+    "line_count": 12
+  },
+  {
+    "name": "BattleBotAI::MoveToNextPoint",
+    "class": "BattleBotAI",
+    "method": "MoveToNextPoint",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 1763,
+    "line_count": 24
+  },
+  {
+    "name": "BattleBotAI::StartNewPathFromBeginning",
+    "class": "BattleBotAI",
+    "method": "StartNewPathFromBeginning",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 1788,
+    "line_count": 57
+  },
+  {
+    "name": "BattleBotAI::StartNewPathFromAnywhere",
+    "class": "BattleBotAI",
+    "method": "StartNewPathFromAnywhere",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 1846,
+    "line_count": 51
+  },
+  {
+    "name": "BattleBotAI::StartNewPathToPosition",
+    "class": "BattleBotAI",
+    "method": "StartNewPathToPosition",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 1898,
+    "line_count": 82
+  },
+  {
+    "name": "BattleBotAI::StartNewPathToObjective",
+    "class": "BattleBotAI",
+    "method": "StartNewPathToObjective",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 2025,
+    "line_count": 158
+  },
+  {
+    "name": "BattleBotAI::ClearPath",
+    "class": "BattleBotAI",
+    "method": "ClearPath",
+    "file": "BattleBotWaypoints.cpp",
+    "line": 2184,
+    "line_count": 6
+  },
+  {
+    "name": "CombatBotBaseAI::AutoAssignRole",
+    "class": "CombatBotBaseAI",
+    "method": "AutoAssignRole",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 56,
+    "line_count": 66
+  },
+  {
+    "name": "CombatBotBaseAI::ResetSpellData",
+    "class": "CombatBotBaseAI",
+    "method": "ResetSpellData",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 123,
+    "line_count": 10
+  },
+  {
+    "name": "CombatBotBaseAI::PopulateSpellData",
+    "class": "CombatBotBaseAI",
+    "method": "PopulateSpellData",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 134,
+    "line_count": 1690
+  },
+  {
+    "name": "CombatBotBaseAI::AddAllSpellReagents",
+    "class": "CombatBotBaseAI",
+    "method": "AddAllSpellReagents",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1825,
+    "line_count": 19
+  },
+  {
+    "name": "CombatBotBaseAI::AreOthersOnSameTarget",
+    "class": "CombatBotBaseAI",
+    "method": "AreOthersOnSameTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1845,
+    "line_count": 27
+  },
+  {
+    "name": "CombatBotBaseAI::FindAndHealInjuredAlly",
+    "class": "CombatBotBaseAI",
+    "method": "FindAndHealInjuredAlly",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1873,
+    "line_count": 8
+  },
+  {
+    "name": "CombatBotBaseAI::SelectMostEfficientHealingSpell",
+    "class": "CombatBotBaseAI",
+    "method": "SelectMostEfficientHealingSpell",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1882,
+    "line_count": 43
+  },
+  {
+    "name": "CombatBotBaseAI::SelectMostEfficientHealingSpell",
+    "class": "CombatBotBaseAI",
+    "method": "SelectMostEfficientHealingSpell",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1888,
+    "line_count": 43
+  },
+  {
+    "name": "CombatBotBaseAI::GetIncomingdamage",
+    "class": "CombatBotBaseAI",
+    "method": "GetIncomingdamage",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1932,
+    "line_count": 8
+  },
+  {
+    "name": "CombatBotBaseAI::HealInjuredTarget",
+    "class": "CombatBotBaseAI",
+    "method": "HealInjuredTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1941,
+    "line_count": 15
+  },
+  {
+    "name": "CombatBotBaseAI::HealInjuredTargetPeriodic",
+    "class": "CombatBotBaseAI",
+    "method": "HealInjuredTargetPeriodic",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1957,
+    "line_count": 13
+  },
+  {
+    "name": "CombatBotBaseAI::HealInjuredTargetDirect",
+    "class": "CombatBotBaseAI",
+    "method": "HealInjuredTargetDirect",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1971,
+    "line_count": 8
+  },
+  {
+    "name": "CombatBotBaseAI::IsValidHealTarget",
+    "class": "CombatBotBaseAI",
+    "method": "IsValidHealTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1980,
+    "line_count": 7
+  },
+  {
+    "name": "CombatBotBaseAI::SelectHealTarget",
+    "class": "CombatBotBaseAI",
+    "method": "SelectHealTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 1988,
+    "line_count": 44
+  },
+  {
+    "name": "CombatBotBaseAI::SelectPeriodicHealTarget",
+    "class": "CombatBotBaseAI",
+    "method": "SelectPeriodicHealTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2033,
+    "line_count": 29
+  },
+  {
+    "name": "CombatBotBaseAI::FindAndPreHealTarget",
+    "class": "CombatBotBaseAI",
+    "method": "FindAndPreHealTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2063,
+    "line_count": 56
+  },
+  {
+    "name": "CombatBotBaseAI::IsValidHostileTarget",
+    "class": "CombatBotBaseAI",
+    "method": "IsValidHostileTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2120,
+    "line_count": 8
+  },
+  {
+    "name": "CombatBotBaseAI::IsValidDispelTarget",
+    "class": "CombatBotBaseAI",
+    "method": "IsValidDispelTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2129,
+    "line_count": 58
+  },
+  {
+    "name": "CombatBotBaseAI::GetAttackersInRangeCount",
+    "class": "CombatBotBaseAI",
+    "method": "GetAttackersInRangeCount",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2188,
+    "line_count": 11
+  },
+  {
+    "name": "CombatBotBaseAI::SelectAttackerDifferentFrom",
+    "class": "CombatBotBaseAI",
+    "method": "SelectAttackerDifferentFrom",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2200,
+    "line_count": 10
+  },
+  {
+    "name": "CombatBotBaseAI::IsValidBuffTarget",
+    "class": "CombatBotBaseAI",
+    "method": "IsValidBuffTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2211,
+    "line_count": 20
+  },
+  {
+    "name": "CombatBotBaseAI::SelectBuffTarget",
+    "class": "CombatBotBaseAI",
+    "method": "SelectBuffTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2232,
+    "line_count": 54
+  },
+  {
+    "name": "CombatBotBaseAI::SelectBuffTarget",
+    "class": "CombatBotBaseAI",
+    "method": "SelectBuffTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2254,
+    "line_count": 54
+  },
+  {
+    "name": "CombatBotBaseAI::SelectDispelTarget",
+    "class": "CombatBotBaseAI",
+    "method": "SelectDispelTarget",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2309,
+    "line_count": 21
+  },
+  {
+    "name": "CombatBotBaseAI::SummonPetIfNeeded",
+    "class": "CombatBotBaseAI",
+    "method": "SummonPetIfNeeded",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2331,
+    "line_count": 52
+  },
+  {
+    "name": "CombatBotBaseAI::LearnArmorProficiencies",
+    "class": "CombatBotBaseAI",
+    "method": "LearnArmorProficiencies",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2384,
+    "line_count": 20
+  },
+  {
+    "name": "CombatBotBaseAI::LearnPremadeSpecForClass",
+    "class": "CombatBotBaseAI",
+    "method": "LearnPremadeSpecForClass",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2405,
+    "line_count": 49
+  },
+  {
+    "name": "CombatBotBaseAI::LearnRandomTalents",
+    "class": "CombatBotBaseAI",
+    "method": "LearnRandomTalents",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2455,
+    "line_count": 60
+  },
+  {
+    "name": "CombatBotBaseAI::EquipPremadeGearTemplate",
+    "class": "CombatBotBaseAI",
+    "method": "EquipPremadeGearTemplate",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2516,
+    "line_count": 42
+  },
+  {
+    "name": "CombatBotBaseAI::EquipRandomGearInEmptySlots",
+    "class": "CombatBotBaseAI",
+    "method": "EquipRandomGearInEmptySlots",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2591,
+    "line_count": 193
+  },
+  {
+    "name": "CombatBotBaseAI::AutoEquipGear",
+    "class": "CombatBotBaseAI",
+    "method": "AutoEquipGear",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2785,
+    "line_count": 17
+  },
+  {
+    "name": "CombatBotBaseAI::CanTryToCastSpell",
+    "class": "CombatBotBaseAI",
+    "method": "CanTryToCastSpell",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2803,
+    "line_count": 54
+  },
+  {
+    "name": "CombatBotBaseAI::DoCastSpell",
+    "class": "CombatBotBaseAI",
+    "method": "DoCastSpell",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2858,
+    "line_count": 34
+  },
+  {
+    "name": "CombatBotBaseAI::AddItemToInventory",
+    "class": "CombatBotBaseAI",
+    "method": "AddItemToInventory",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2893,
+    "line_count": 10
+  },
+  {
+    "name": "CombatBotBaseAI::AddHunterAmmo",
+    "class": "CombatBotBaseAI",
+    "method": "AddHunterAmmo",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2904,
+    "line_count": 49
+  },
+  {
+    "name": "CombatBotBaseAI::EquipOrUseNewItem",
+    "class": "CombatBotBaseAI",
+    "method": "EquipOrUseNewItem",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2954,
+    "line_count": 39
+  },
+  {
+    "name": "CombatBotBaseAI::GetHighestHonorRankFromEquippedItems",
+    "class": "CombatBotBaseAI",
+    "method": "GetHighestHonorRankFromEquippedItems",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 2994,
+    "line_count": 13
+  },
+  {
+    "name": "CombatBotBaseAI::UpdateVisualHonorRankBasedOnItems",
+    "class": "CombatBotBaseAI",
+    "method": "UpdateVisualHonorRankBasedOnItems",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3008,
+    "line_count": 10
+  },
+  {
+    "name": "CombatBotBaseAI::SummonShamanTotems",
+    "class": "CombatBotBaseAI",
+    "method": "SummonShamanTotems",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3019,
+    "line_count": 36
+  },
+  {
+    "name": "CombatBotBaseAI::CastWeaponBuff",
+    "class": "CombatBotBaseAI",
+    "method": "CastWeaponBuff",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3056,
+    "line_count": 13
+  },
+  {
+    "name": "CombatBotBaseAI::UseTrinketEffects",
+    "class": "CombatBotBaseAI",
+    "method": "UseTrinketEffects",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3070,
+    "line_count": 11
+  },
+  {
+    "name": "CombatBotBaseAI::UseItemEffect",
+    "class": "CombatBotBaseAI",
+    "method": "UseItemEffect",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3082,
+    "line_count": 24
+  },
+  {
+    "name": "CombatBotBaseAI::BreakCrowdControlEffects",
+    "class": "CombatBotBaseAI",
+    "method": "BreakCrowdControlEffects",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3107,
+    "line_count": 101
+  },
+  {
+    "name": "CombatBotBaseAI::IsWearingShield",
+    "class": "CombatBotBaseAI",
+    "method": "IsWearingShield",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3209,
+    "line_count": 11
+  },
+  {
+    "name": "CombatBotBaseAI::IsInDuel",
+    "class": "CombatBotBaseAI",
+    "method": "IsInDuel",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3221,
+    "line_count": 4
+  },
+  {
+    "name": "CombatBotBaseAI::GetRole",
+    "class": "CombatBotBaseAI",
+    "method": "GetRole",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3226,
+    "line_count": 12
+  },
+  {
+    "name": "CombatBotBaseAI::SendBattlefieldPortPacket",
+    "class": "CombatBotBaseAI",
+    "method": "SendBattlefieldPortPacket",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3239,
+    "line_count": 16
+  },
+  {
+    "name": "CombatBotBaseAI::SendBattlemasterJoinPacket",
+    "class": "CombatBotBaseAI",
+    "method": "SendBattlemasterJoinPacket",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3256,
+    "line_count": 23
+  },
+  {
+    "name": "CombatBotBaseAI::SendAreaTriggerPacket",
+    "class": "CombatBotBaseAI",
+    "method": "SendAreaTriggerPacket",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3280,
+    "line_count": 6
+  },
+  {
+    "name": "CombatBotBaseAI::ActivateNearbyAreaTrigger",
+    "class": "CombatBotBaseAI",
+    "method": "ActivateNearbyAreaTrigger",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3287,
+    "line_count": 15
+  },
+  {
+    "name": "CombatBotBaseAI::OnPacketReceived",
+    "class": "CombatBotBaseAI",
+    "method": "OnPacketReceived",
+    "file": "CombatBotBaseAI.cpp",
+    "line": 3303,
+    "line_count": 108
+  },
+  {
+    "name": "PartyBotAI::OnSessionLoaded",
+    "class": "PartyBotAI",
+    "method": "OnSessionLoaded",
+    "file": "PartyBotAI.cpp",
+    "line": 46,
+    "line_count": 10
+  },
+  {
+    "name": "PartyBotAI::CloneFromPlayer",
+    "class": "PartyBotAI",
+    "method": "CloneFromPlayer",
+    "file": "PartyBotAI.cpp",
+    "line": 57,
+    "line_count": 47
+  },
+  {
+    "name": "PartyBotAI::GetPartyLeader",
+    "class": "PartyBotAI",
+    "method": "GetPartyLeader",
+    "file": "PartyBotAI.cpp",
+    "line": 105,
+    "line_count": 24
+  },
+  {
+    "name": "PartyBotAI::IsValidDistancingTarget",
+    "class": "PartyBotAI",
+    "method": "IsValidDistancingTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 130,
+    "line_count": 13
+  },
+  {
+    "name": "PartyBotAI::GetDistancingTarget",
+    "class": "PartyBotAI",
+    "method": "GetDistancingTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 144,
+    "line_count": 27
+  },
+  {
+    "name": "PartyBotAI::RunAwayFromTarget",
+    "class": "PartyBotAI",
+    "method": "RunAwayFromTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 172,
+    "line_count": 10
+  },
+  {
+    "name": "PartyBotAI::DrinkAndEat",
+    "class": "PartyBotAI",
+    "method": "DrinkAndEat",
+    "file": "PartyBotAI.cpp",
+    "line": 183,
+    "line_count": 51
+  },
+  {
+    "name": "PartyBotAI::ShouldAutoRevive",
+    "class": "PartyBotAI",
+    "method": "ShouldAutoRevive",
+    "file": "PartyBotAI.cpp",
+    "line": 235,
+    "line_count": 30
+  },
+  {
+    "name": "PartyBotAI::CanTryToCastSpell",
+    "class": "PartyBotAI",
+    "method": "CanTryToCastSpell",
+    "file": "PartyBotAI.cpp",
+    "line": 266,
+    "line_count": 46
+  },
+  {
+    "name": "PartyBotAI::CanUseCrowdControl",
+    "class": "PartyBotAI",
+    "method": "CanUseCrowdControl",
+    "file": "PartyBotAI.cpp",
+    "line": 313,
+    "line_count": 18
+  },
+  {
+    "name": "PartyBotAI::AttackStart",
+    "class": "PartyBotAI",
+    "method": "AttackStart",
+    "file": "PartyBotAI.cpp",
+    "line": 332,
+    "line_count": 22
+  },
+  {
+    "name": "PartyBotAI::GetMarkedTarget",
+    "class": "PartyBotAI",
+    "method": "GetMarkedTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 355,
+    "line_count": 8
+  },
+  {
+    "name": "PartyBotAI::SelectAttackTarget",
+    "class": "PartyBotAI",
+    "method": "SelectAttackTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 364,
+    "line_count": 54
+  },
+  {
+    "name": "PartyBotAI::SelectPartyAttackTarget",
+    "class": "PartyBotAI",
+    "method": "SelectPartyAttackTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 419,
+    "line_count": 22
+  },
+  {
+    "name": "PartyBotAI::SelectResurrectionTarget",
+    "class": "PartyBotAI",
+    "method": "SelectResurrectionTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 442,
+    "line_count": 27
+  },
+  {
+    "name": "PartyBotAI::SelectShieldTarget",
+    "class": "PartyBotAI",
+    "method": "SelectShieldTarget",
+    "file": "PartyBotAI.cpp",
+    "line": 470,
+    "line_count": 23
+  },
+  {
+    "name": "PartyBotAI::CrowdControlMarkedTargets",
+    "class": "PartyBotAI",
+    "method": "CrowdControlMarkedTargets",
+    "file": "PartyBotAI.cpp",
+    "line": 494,
+    "line_count": 26
+  },
+  {
+    "name": "PartyBotAI::AddToPlayerGroup",
+    "class": "PartyBotAI",
+    "method": "AddToPlayerGroup",
+    "file": "PartyBotAI.cpp",
+    "line": 521,
+    "line_count": 27
+  },
+  {
+    "name": "PartyBotAI::OnPacketReceived",
+    "class": "PartyBotAI",
+    "method": "OnPacketReceived",
+    "file": "PartyBotAI.cpp",
+    "line": 549,
+    "line_count": 24
+  },
+  {
+    "name": "PartyBotAI::OnPlayerLogin",
+    "class": "PartyBotAI",
+    "method": "OnPlayerLogin",
+    "file": "PartyBotAI.cpp",
+    "line": 574,
+    "line_count": 5
+  },
+  {
+    "name": "PartyBotAI::UpdateAI",
+    "class": "PartyBotAI",
+    "method": "UpdateAI",
+    "file": "PartyBotAI.cpp",
+    "line": 580,
+    "line_count": 309
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI",
+    "file": "PartyBotAI.cpp",
+    "line": 891,
+    "line_count": 48
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI",
+    "file": "PartyBotAI.cpp",
+    "line": 940,
+    "line_count": 72
+  },
+  {
+    "name": "PartyBotAI::CheckForDispelTargets",
+    "class": "PartyBotAI",
+    "method": "CheckForDispelTargets",
+    "file": "PartyBotAI.cpp",
+    "line": 1013,
+    "line_count": 125
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Paladin",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Paladin",
+    "file": "PartyBotAI.cpp",
+    "line": 1139,
+    "line_count": 44
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Paladin",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Paladin",
+    "file": "PartyBotAI.cpp",
+    "line": 1184,
+    "line_count": 180
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Shaman",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Shaman",
+    "file": "PartyBotAI.cpp",
+    "line": 1365,
+    "line_count": 28
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Shaman",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Shaman",
+    "file": "PartyBotAI.cpp",
+    "line": 1394,
+    "line_count": 91
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Hunter",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Hunter",
+    "file": "PartyBotAI.cpp",
+    "line": 1486,
+    "line_count": 32
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Hunter",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Hunter",
+    "file": "PartyBotAI.cpp",
+    "line": 1519,
+    "line_count": 147
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Mage",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Mage",
+    "file": "PartyBotAI.cpp",
+    "line": 1667,
+    "line_count": 48
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Mage",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Mage",
+    "file": "PartyBotAI.cpp",
+    "line": 1716,
+    "line_count": 195
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Priest",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Priest",
+    "file": "PartyBotAI.cpp",
+    "line": 1912,
+    "line_count": 67
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Priest",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Priest",
+    "file": "PartyBotAI.cpp",
+    "line": 1980,
+    "line_count": 167
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Warlock",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Warlock",
+    "file": "PartyBotAI.cpp",
+    "line": 2148,
+    "line_count": 52
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Warlock",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Warlock",
+    "file": "PartyBotAI.cpp",
+    "line": 2201,
+    "line_count": 150
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Warrior",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Warrior",
+    "file": "PartyBotAI.cpp",
+    "line": 2352,
+    "line_count": 32
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Warrior",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Warrior",
+    "file": "PartyBotAI.cpp",
+    "line": 2385,
+    "line_count": 259
+  },
+  {
+    "name": "PartyBotAI::ShouldEnterStealth",
+    "class": "PartyBotAI",
+    "method": "ShouldEnterStealth",
+    "file": "PartyBotAI.cpp",
+    "line": 2645,
+    "line_count": 21
+  },
+  {
+    "name": "PartyBotAI::EnterStealthIfNeeded",
+    "class": "PartyBotAI",
+    "method": "EnterStealthIfNeeded",
+    "file": "PartyBotAI.cpp",
+    "line": 2667,
+    "line_count": 22
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Rogue",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Rogue",
+    "file": "PartyBotAI.cpp",
+    "line": 2690,
+    "line_count": 22
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Rogue",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Rogue",
+    "file": "PartyBotAI.cpp",
+    "line": 2713,
+    "line_count": 199
+  },
+  {
+    "name": "PartyBotAI::EnterCombatDruidForm",
+    "class": "PartyBotAI",
+    "method": "EnterCombatDruidForm",
+    "file": "PartyBotAI.cpp",
+    "line": 2913,
+    "line_count": 28
+  },
+  {
+    "name": "PartyBotAI::UpdateOutOfCombatAI_Druid",
+    "class": "PartyBotAI",
+    "method": "UpdateOutOfCombatAI_Druid",
+    "file": "PartyBotAI.cpp",
+    "line": 2942,
+    "line_count": 72
+  },
+  {
+    "name": "PartyBotAI::UpdateInCombatAI_Druid",
+    "class": "PartyBotAI",
+    "method": "UpdateInCombatAI_Druid",
+    "file": "PartyBotAI.cpp",
+    "line": 3015,
+    "line_count": 315
+  },
+  {
+    "name": "PlayerBotAI::OnSessionLoaded",
+    "class": "PlayerBotAI",
+    "method": "OnSessionLoaded",
+    "file": "PlayerBotAI.cpp",
+    "line": 30,
+    "line_count": 5
+  },
+  {
+    "name": "PlayerBotAI::UpdateAI",
+    "class": "PlayerBotAI",
+    "method": "UpdateAI",
+    "file": "PlayerBotAI.cpp",
+    "line": 36,
+    "line_count": 15
+  },
+  {
+    "name": "PlayerBotAI::Remove",
+    "class": "PlayerBotAI",
+    "method": "Remove",
+    "file": "PlayerBotAI.cpp",
+    "line": 52,
+    "line_count": 9
+  },
+  {
+    "name": "PlayerBotFleeingAI::OnPlayerLogin",
+    "class": "PlayerBotFleeingAI",
+    "method": "OnPlayerLogin",
+    "file": "PlayerBotAI.cpp",
+    "line": 62,
+    "line_count": 5
+  },
+  {
+    "name": "PlayerBotAI::SpawnNewPlayer",
+    "class": "PlayerBotAI",
+    "method": "SpawnNewPlayer",
+    "file": "PlayerBotAI.cpp",
+    "line": 77,
+    "line_count": 76
+  },
+  {
+    "name": "MageOrgrimmarAttackerAI::OnSessionLoaded",
+    "class": "MageOrgrimmarAttackerAI",
+    "method": "OnSessionLoaded",
+    "file": "PlayerBotAI.cpp",
+    "line": 153,
+    "line_count": 4
+  },
+  {
+    "name": "MageOrgrimmarAttackerAI::UpdateAI",
+    "class": "MageOrgrimmarAttackerAI",
+    "method": "UpdateAI",
+    "file": "PlayerBotAI.cpp",
+    "line": 158,
+    "line_count": 180
+  },
+  {
+    "name": "PopulateAreaBotAI::BeforeAddToMap",
+    "class": "PopulateAreaBotAI",
+    "method": "BeforeAddToMap",
+    "file": "PlayerBotAI.cpp",
+    "line": 339,
+    "line_count": 15
+  },
+  {
+    "name": "PopulateAreaBotAI::OnPlayerLogin",
+    "class": "PopulateAreaBotAI",
+    "method": "OnPlayerLogin",
+    "file": "PlayerBotAI.cpp",
+    "line": 355,
+    "line_count": 5
+  },
+  {
+    "name": "PlayerBotMgr::LoadConfig",
+    "class": "PlayerBotMgr",
+    "method": "LoadConfig",
+    "file": "PlayerBotMgr.cpp",
+    "line": 50,
+    "line_count": 14
+  },
+  {
+    "name": "PlayerBotMgr::Load",
+    "class": "PlayerBotMgr",
+    "method": "Load",
+    "file": "PlayerBotMgr.cpp",
+    "line": 65,
+    "line_count": 81
+  },
+  {
+    "name": "PlayerBotMgr::DeleteAll",
+    "class": "PlayerBotMgr",
+    "method": "DeleteAll",
+    "file": "PlayerBotMgr.cpp",
+    "line": 147,
+    "line_count": 18
+  },
+  {
+    "name": "PlayerBotMgr::OnBotLogin",
+    "class": "PlayerBotMgr",
+    "method": "OnBotLogin",
+    "file": "PlayerBotMgr.cpp",
+    "line": 166,
+    "line_count": 6
+  },
+  {
+    "name": "PlayerBotMgr::OnBotLogout",
+    "class": "PlayerBotMgr",
+    "method": "OnBotLogout",
+    "file": "PlayerBotMgr.cpp",
+    "line": 172,
+    "line_count": 6
+  },
+  {
+    "name": "PlayerBotMgr::OnPlayerInWorld",
+    "class": "PlayerBotMgr",
+    "method": "OnPlayerInWorld",
+    "file": "PlayerBotMgr.cpp",
+    "line": 179,
+    "line_count": 9
+  },
+  {
+    "name": "PlayerBotMgr::Update",
+    "class": "PlayerBotMgr",
+    "method": "Update",
+    "file": "PlayerBotMgr.cpp",
+    "line": 189,
+    "line_count": 178
+  },
+  {
+    "name": "PlayerBotMgr::AddOrRemoveBot",
+    "class": "PlayerBotMgr",
+    "method": "AddOrRemoveBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 371,
+    "line_count": 14
+  },
+  {
+    "name": "PlayerBotMgr::AddBot",
+    "class": "PlayerBotMgr",
+    "method": "AddBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 386,
+    "line_count": 65
+  },
+  {
+    "name": "PlayerBotMgr::AddBot",
+    "class": "PlayerBotMgr",
+    "method": "AddBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 399,
+    "line_count": 65
+  },
+  {
+    "name": "PlayerBotMgr::AddRandomBot",
+    "class": "PlayerBotMgr",
+    "method": "AddRandomBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 465,
+    "line_count": 21
+  },
+  {
+    "name": "PlayerBotMgr::AddTempBot",
+    "class": "PlayerBotMgr",
+    "method": "AddTempBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 487,
+    "line_count": 4
+  },
+  {
+    "name": "PlayerBotMgr::RefreshTempBot",
+    "class": "PlayerBotMgr",
+    "method": "RefreshTempBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 492,
+    "line_count": 9
+  },
+  {
+    "name": "PlayerBotMgr::DeleteBot",
+    "class": "PlayerBotMgr",
+    "method": "DeleteBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 502,
+    "line_count": 10
+  },
+  {
+    "name": "PlayerBotMgr::DeleteBot",
+    "class": "PlayerBotMgr",
+    "method": "DeleteBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 511,
+    "line_count": 10
+  },
+  {
+    "name": "PlayerBotMgr::DeleteRandomBot",
+    "class": "PlayerBotMgr",
+    "method": "DeleteRandomBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 522,
+    "line_count": 22
+  },
+  {
+    "name": "PlayerBotMgr::AddBattleBot",
+    "class": "PlayerBotMgr",
+    "method": "AddBattleBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 571,
+    "line_count": 45
+  },
+  {
+    "name": "PlayerBotMgr::DeleteBattleBots",
+    "class": "PlayerBotMgr",
+    "method": "DeleteBattleBots",
+    "file": "PlayerBotMgr.cpp",
+    "line": 617,
+    "line_count": 9
+  },
+  {
+    "name": "PlayerBotMgr::ForceAccountConnection",
+    "class": "PlayerBotMgr",
+    "method": "ForceAccountConnection",
+    "file": "PlayerBotMgr.cpp",
+    "line": 627,
+    "line_count": 8
+  },
+  {
+    "name": "PlayerBotMgr::IsPermanentBot",
+    "class": "PlayerBotMgr",
+    "method": "IsPermanentBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 636,
+    "line_count": 5
+  },
+  {
+    "name": "PlayerBotMgr::IsChatBot",
+    "class": "PlayerBotMgr",
+    "method": "IsChatBot",
+    "file": "PlayerBotMgr.cpp",
+    "line": 642,
+    "line_count": 5
+  },
+  {
+    "name": "PlayerBotMgr::AddAllBots",
+    "class": "PlayerBotMgr",
+    "method": "AddAllBots",
+    "file": "PlayerBotMgr.cpp",
+    "line": 648,
+    "line_count": 8
+  },
+  {
+    "name": "ChatHandler::HandleBotReloadCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotReloadCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 657,
+    "line_count": 6
+  },
+  {
+    "name": "ChatHandler::HandleBotAddRandomCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotAddRandomCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 664,
+    "line_count": 11
+  },
+  {
+    "name": "ChatHandler::HandleBotStopCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotStopCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 676,
+    "line_count": 6
+  },
+  {
+    "name": "ChatHandler::HandleBotAddAllCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotAddAllCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 683,
+    "line_count": 6
+  },
+  {
+    "name": "ChatHandler::HandleBotAddCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotAddCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 690,
+    "line_count": 26
+  },
+  {
+    "name": "ChatHandler::HandleBotDeleteCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotDeleteCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 717,
+    "line_count": 29
+  },
+  {
+    "name": "ChatHandler::HandleBotInfoCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotInfoCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 747,
+    "line_count": 12
+  },
+  {
+    "name": "ChatHandler::HandleBotStartCommand",
+    "class": "ChatHandler",
+    "method": "HandleBotStartCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 760,
+    "line_count": 5
+  },
+  {
+    "name": "ChatHandler::PartyBotAddRequirementCheck",
+    "class": "ChatHandler",
+    "method": "PartyBotAddRequirementCheck",
+    "file": "PlayerBotMgr.cpp",
+    "line": 766,
+    "line_count": 84
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotAddCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotAddCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 851,
+    "line_count": 101
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotCloneCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotCloneCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 953,
+    "line_count": 39
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotLoadCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotLoadCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 993,
+    "line_count": 45
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotSetRoleCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotSetRoleCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1039,
+    "line_count": 46
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotAttackStartCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotAttackStartCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1086,
+    "line_count": 40
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotAttackStopCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotAttackStopCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1139,
+    "line_count": 40
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotAoECommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotAoECommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1180,
+    "line_count": 52
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotStartCastingCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotStartCastingCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1233,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotStopCastingCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotStopCastingCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1238,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotToggleCastingCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotToggleCastingCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1243,
+    "line_count": 70
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotControlMarkCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotControlMarkCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1326,
+    "line_count": 58
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotFocusMarkCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotFocusMarkCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1385,
+    "line_count": 69
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotClearMarksCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotClearMarksCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1455,
+    "line_count": 51
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotComeToMeCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotComeToMeCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1528,
+    "line_count": 40
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotUseGObjectCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotUseGObjectCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1586,
+    "line_count": 41
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotPauseHelper",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotPauseHelper",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1649,
+    "line_count": 79
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotPauseCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotPauseCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1729,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotUnpauseCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotUnpauseCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1734,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotPullCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotPullCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1739,
+    "line_count": 52
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotUnequipCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotUnequipCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1792,
+    "line_count": 39
+  },
+  {
+    "name": "ChatHandler::HandlePartyBotRemoveCommand",
+    "class": "ChatHandler",
+    "method": "HandlePartyBotRemoveCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1832,
+    "line_count": 23
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotAddAlteracCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotAddAlteracCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1856,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotAddArathiCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotAddArathiCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1861,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotAddWarsongCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotAddWarsongCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1866,
+    "line_count": 4
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotAddCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotAddCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1871,
+    "line_count": 41
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotRemoveCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotRemoveCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1913,
+    "line_count": 23
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotRemoveAllCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotRemoveAllCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1937,
+    "line_count": 6
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotShowPathCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotShowPathCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1962,
+    "line_count": 27
+  },
+  {
+    "name": "ChatHandler::HandleBattleBotShowAllPathsCommand",
+    "class": "ChatHandler",
+    "method": "HandleBattleBotShowAllPathsCommand",
+    "file": "PlayerBotMgr.cpp",
+    "line": 1990,
+    "line_count": 42
+  }
+]

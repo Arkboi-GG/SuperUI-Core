@@ -16,6 +16,7 @@
 
 #include "PlayerBotMgr.h"
 #include "PlayerBotAI.h"
+#include "AiBotAI.h"
 #include "Player.h"
 #include "Log.h"
 #include "SocialMgr.h"
@@ -357,7 +358,7 @@ void PopulateAreaBotAI::OnPlayerLogin()
         me->GetMotionMaster()->MoveConfused();
 }
 
-PlayerBotAI* CreatePlayerBotAI(std::string ainame)
+PlayerBotAI* CreatePlayerBotAI(std::string ainame, uint8 race, uint8 cls, uint32 level, uint32 mapId, float x, float y, float z, std::string name)
 {
     if (ainame == "MageOrgrimmarAttackerAI")
         return new MageOrgrimmarAttackerAI();
@@ -369,5 +370,26 @@ PlayerBotAI* CreatePlayerBotAI(std::string ainame)
         return new PopulateAreaBotAI(1, 1568, -4405.87f, 8.13f, HORDE, 150.0f);
     if (ainame == "PlayerBotFleeingAI")
         return new PlayerBotFleeingAI();
+    if (ainame == "AiBotAI")
+    {
+        // Use DB values if present, otherwise default to Human Warrior at Northshire
+        uint8  useRace  = race  ? race  : RACE_HUMAN;
+        uint8  useClass = cls   ? cls   : CLASS_WARRIOR;
+        uint32 useLevel = level ? level : 1;
+        float  useX = (x != 0 || y != 0) ? x : -8949.95f;
+        float  useY = (x != 0 || y != 0) ? y : -132.493f;
+        float  useZ = (x != 0 || y != 0) ? z : 83.5312f;
+        uint32 useMap = (x != 0 || y != 0) ? mapId : 0;
+        uint32 instanceId = sMapMgr.GetContinentInstanceId(useMap, useX, useY);
+
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT] Factory creating AiBotAI: race=%u class=%u level=%u map=%u (%.1f,%.1f,%.1f) name='%s'",
+            useRace, useClass, useLevel, useMap, useX, useY, useZ, name.c_str());
+
+        AiBotAI* ai = new AiBotAI(useRace, useClass, useLevel, useMap, instanceId,
+            useX, useY, useZ, 0.0f);
+        ai->m_spawnName = name;
+        return ai;
+    }
     return new PlayerBotAI();
 }
