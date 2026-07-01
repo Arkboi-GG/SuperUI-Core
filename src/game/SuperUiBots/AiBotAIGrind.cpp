@@ -97,10 +97,14 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
 
 
 // ============================================================================
-// SelectGrindTarget — COMPLETE METHOD REPLACEMENT (2026-06-22)
-//
-// Only Priority 2b changed (the indefinite kill-anything grind, creatureEntry==0).
-// Priority 1 (already-aggroed) and Priority 2a (objective rescan) are VERBATIM.
+// SelectGrindTarget — COMPLETE METHOD REPLACEMENT
+//   (2026-06-22 — Priority 2b indefinite-grind rework)
+//   (2026-06-30 — wolf-meat fix: Priority 1's aggro match and Priority 2a's ring scan
+//    now match m_currentTask.MatchesObjectiveEntry(...) — the primary dispatched entry
+//    OR any tied item-drop alternate — instead of exact-equality on creatureEntry alone.
+//    Priority 2a's ring scan also queries every non-zero alternate entry per rung, not
+//    just the primary, merging results before picking. Priority 2b is untouched by this
+//    pass — it's already entry-agnostic (creatureEntry==0, kill anything hostile).)
 //
 // 2b directive: find the NEAREST mob that is a real XP kill, and kill it; rescan; repeat.
 //   - skip CREATURE_TYPE_CRITTER (8)  → no more chicken / sheep / cow farms (0 XP)
@@ -129,8 +133,8 @@ Unit* AiBotAI::SelectGrindTarget() const
     // [TEAMPLAY] Group focus-fire seam (grind-path entry). A grouped escort's grind target is
     // overridden to the anchor's victim when an assist directive is live, so the team piles one
     // mob instead of each escort fanning to its own nearest. Inactive → null → the existing
-    // priority scan below runs byte-for-byte. (Kill-counting is unaffected — UpdateAI still
-    // only credits the objective when victim entry == creatureEntry.)
+    // priority scan below runs byte-for-byte. (Kill-counting still goes through UpdateAI's
+    // MatchesObjectiveEntry check — primary or any tied alternate, wolf-meat fix 2026-06-30.)
     if (m_combatDirective.IsActive())
         if (Unit* t = TeamPlay::ResolveCombatTarget(*this))
             return t;
@@ -156,7 +160,7 @@ Unit* AiBotAI::SelectGrindTarget() const
                 {
                     if (m_currentTask.creatureEntry == 0 ||
                         (pTarget->IsCreature() &&
-                         static_cast<Creature*>(pTarget)->GetEntry() == m_currentTask.creatureEntry))
+                         m_currentTask.MatchesObjectiveEntry(static_cast<Creature*>(pTarget)->GetEntry())))
                     {
                         float d = me->GetDistance(pTarget);
                         if (d < bestDist)
@@ -217,26 +221,38 @@ Unit* AiBotAI::SelectGrindTarget() const
     // the kill-anything grind below keeps its tight 50y leash (no drift, Issue 4).
     if (m_currentTask.creatureEntry != 0)
     {
+        // Scan entries: the primary dispatched objective + any tied item-drop alternates
+        // (wolf-meat fix, 2026-06-30). Most legs carry only the primary (alts all 0, skipped).
+        uint32 scanEntries[1 + AiBotTaskData::MAX_ALT_ENTRIES] = { m_currentTask.creatureEntry };
+        int scanEntryCount = 1;
+        for (int i = 0; i < AiBotTaskData::MAX_ALT_ENTRIES; ++i)
+            if (m_currentTask.altCreatureEntries[i] != 0)
+                scanEntries[scanEntryCount++] = m_currentTask.altCreatureEntries[i];
+
         static float const kRungs[] = { 50.0f, 100.0f, 150.0f, 200.0f };
         for (float rung : kRungs)
         {
             std::list<Creature*> creatures;
-            const_cast<Player*>(me)->GetCreatureListWithEntryInGrid(
-                creatures, m_currentTask.creatureEntry, rung);
+            for (int i = 0; i < scanEntryCount; ++i)
+                const_cast<Player*>(me)->GetCreatureListWithEntryInGrid(
+                    creatures, scanEntries[i], rung);
 
             if (Unit* pick = pickBest(creatures, rung, /*requireLos*/ false))
             {
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-GRIND] %s: objective rescan hit entry=%u at %.0fyd (ring=%.0f)",
-                    me->GetName(), m_currentTask.creatureEntry, me->GetDistance(pick), rung);
+                    "[AIBOT-GRIND] %s: objective rescan hit entry=%u at %.0fyd (ring=%.0f, %d entries scanned)",
+                    me->GetName(), static_cast<Creature*>(pick)->GetEntry(), me->GetDistance(pick), rung, scanEntryCount);
                 return pick;
             }
         }
 
         // Quest mob dry within 200y → opportunistic filler within 50y. Keeps the
         // bot killing (XP/loot) AND the filler KILL resets the C# 120s objective
-        // deadline (confirmed-working — do NOT drop). Kill-counting is unaffected:
-        // UpdateAI only credits the objective when victim entry == creatureEntry.
+        // deadline (confirmed-working — do NOT drop). This filler scan is intentionally
+        // NOT entry-filtered (any hostile within 50y) — UpdateAI's kill-credit check
+        // (MatchesObjectiveEntry) only advances killCount/killGoal for the primary or a
+        // tied alternate, so an off-objective filler kill still resets the deadline but
+        // never falsely advances this leg's count.
         std::list<Unit*> fillers;
         MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(me, me, 50.0f);
         MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(fillers, u_check);
@@ -333,34 +349,42 @@ void AiBotAI::DoGrindPatrol()
 
 // ============================================================
 // §4: ScanApproachTarget — engage ANY valid in-log quest mob on the way
-//     (COMPLETE METHOD REPLACEMENT — scatter "engage any valid mob" fix)
+//     (COMPLETE METHOD REPLACEMENT — scatter "engage any valid mob" fix,
+//      extended 2026-06-30 for tied item-drop alternates — the wolf-meat fix)
 //
-// The enriched MOVE_TO carries ONE creatureEntry (the dispatched objective, or the
-// C#-resolved item-drop source). The OLD scan keyed ONLY to that entry AND required
-// LOS, so the bot ran right past mobs valid for a DIFFERENT in-log quest — or the SAME
-// entry in a closer, live cluster it couldn't quite see — to march to the dispatched
-// scatter coord. If another bot had already farmed that coord out, it dead-ended into
-// GRIND_BLOCKED / "un-continuable" beside perfectly good targets.
+// The enriched MOVE_TO carries ONE primary creatureEntry (the dispatched objective, or
+// the C#-resolved item-drop source) plus up to 3 tied alternates (altCreatureEntries —
+// e.g. Young Wolf AND Timber Wolf both dropping Tough Wolf Meat at the same chance; C#
+// has no real basis to prefer one, so it ships both rather than picking arbitrarily).
+// The OLD scan keyed ONLY to the single dispatched entry AND required LOS, so the bot ran
+// right past mobs valid for a DIFFERENT in-log quest, the SAME entry in a closer cluster
+// it couldn't quite see, or a TIED alternate standing in the very field it was walking
+// through — to march to one dispatched scatter coord. If another bot had already farmed
+// that coord out, it dead-ended into GRIND_BLOCKED / "un-continuable" beside perfectly
+// good targets.
 //
 // Now it engages the nearest live mob valid for ANY unmet kill objective we hold. The
-// valid-kill UNION is built straight from the server-authoritative QuestStatusMap — no
-// new wire field, no new task member:
-//   • for every INCOMPLETE quest, each ReqCreatureOrGOId slot that is a CREATURE (>0)
-//     and still SHORT of its required count (a met slot's mob gives no quest credit), and
-//   • the dispatched creatureEntry itself — which is the ONLY known kill creature for a
-//     pure item-drop quest (the core quest row carries the item, not the creature; C#
-//     resolved the drop source into creatureEntry).
+// valid-kill UNION is built from three sources:
+//   • the dispatched creatureEntry itself — the ONLY known kill creature for a pure
+//     item-drop quest (the core quest row carries the item, not the creature; C#
+//     resolved the drop source into creatureEntry),
+//   • this leg's tied alternates (altCreatureEntries, 0 = unused slot), and
+//   • for every INCOMPLETE quest in our own log, each ReqCreatureOrGOId slot that is a
+//     CREATURE (>0) and still SHORT of its required count (a met slot's mob gives no
+//     quest credit) — server-authoritative, no new wire field needed for this part.
 //
 // One bot-centric unfriendly sweep (not a per-entry grid query), filtered by entry ∈
 // union. LOS is DROPPED to match the objective rescan in SelectGrindTarget — we PATH to
 // the mob, we don't need to see it. The tap gate (UNIT_DYNFLAG_TAPPED && !IsTappedBy) and
 // the combat-ignore set are honored exactly as the kill-credit path and the picker do.
 //
-// NOTE (kill-counting): the dispatched leg's killCount still only advances on
-// creatureEntry (UpdateAI). A mob engaged here for a DIFFERENT entry is credited to its
-// own quest SERVER-side (shared kill credit), seen on the next QUERY_QUEST_STATUS — the
-// bot makes real batch progress instead of stranding on a dead coord. Per-leg counting of
-// cross-entry kills is the follow-on that needs a first-class task-side union (header).
+// NOTE (kill-counting): UpdateAI's kill-credit check now matches
+// m_currentTask.MatchesObjectiveEntry(victimEntry) — the primary OR a tied alternate —
+// so engaging an alternate here correctly advances THIS leg's killCount/killGoal, not
+// just a different quest's server-side credit. A mob engaged here for a DIFFERENT
+// in-log quest's entry (not this leg's primary or alternates) is still credited to that
+// OTHER quest server-side (shared kill credit), seen on the next STATE — the bot makes
+// real batch progress instead of stranding on a dead coord.
 // ============================================================
 Unit* AiBotAI::ScanApproachTarget()
 {
@@ -370,6 +394,12 @@ Unit* AiBotAI::ScanApproachTarget()
     // ── Build the valid-kill union from our own quest log ──
     std::set<uint32> validEntries;
     validEntries.insert(m_currentTask.creatureEntry);   // always the dispatched objective / item-drop source
+
+    // Tied item-drop alternates for THIS leg (wolf-meat fix, 2026-06-30) — e.g. Young Wolf
+    // and Timber Wolf both dropping Tough Wolf Meat at the same chance. 0 = unused slot.
+    for (int i = 0; i < AiBotTaskData::MAX_ALT_ENTRIES; ++i)
+        if (m_currentTask.altCreatureEntries[i] != 0)
+            validEntries.insert(m_currentTask.altCreatureEntries[i]);
 
     const auto& questMap = me->GetQuestStatusMap();
     for (const auto& pair : questMap)

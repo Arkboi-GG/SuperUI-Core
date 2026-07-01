@@ -192,13 +192,44 @@ struct AiBotTaskData
     uint32 npcGuid       = 0;
 
     // TASK_GRIND fields
-    uint32 creatureEntry = 0;      // 0 = kill anything hostile
+    uint32 creatureEntry = 0;      // 0 = kill anything hostile. The PRIMARY objective entry —
+                                    // this alone still drives the dispatch coordinate (where the
+                                    // bot walks / the grind-in-place center / the Held-objective
+                                    // stamp for the 1c reconcile). Nothing about navigation changes.
     int32  killGoal      = 0;      // total kills needed (0 = indefinite)
     int32  killCount     = 0;      // kills so far
+
+    // Alternate entries that satisfy the SAME objective as creatureEntry — for ITEM-DROP
+    // objectives only, where multiple creature species genuinely tie on drop odds for the
+    // required item (e.g. Young Wolf + Timber Wolf both drop Tough Wolf Meat at the same
+    // chance). C# resolves the tie and ships the alternates here on MOVE_TO/SET_TASK
+    // (alt_entry1/2/3). Deliberately NOT used for kill objectives — a kill quest names one
+    // specific creature and the server only credits kills of that exact entry, so widening
+    // match there would let the bot "believe" it's progressing on kills the server never
+    // credits. 0 = unused slot. Always 0 unless C# explicitly ships a real tie.
+    static const int MAX_ALT_ENTRIES = 3;
+    uint32 altCreatureEntries[MAX_ALT_ENTRIES] = { 0, 0, 0 };
 
     // TASK_TAXI fields
     uint32 taxiSourceNode = 0;
     uint32 taxiDestNode   = 0;
+
+    // True if `entry` is a valid kill for the CURRENT objective — creatureEntry itself, or
+    // any non-zero altCreatureEntries slot. Used everywhere the old code checked
+    // `entry == creatureEntry`: ScanApproachTarget's valid-kill union, SelectGrindTarget's
+    // aggro match + objective ring-scan, and the kill-credit check in UpdateAI. entry==0 is
+    // never a match (0 means "no entry / not a creature kill" at every call site).
+    bool MatchesObjectiveEntry(uint32 entry) const
+    {
+        if (entry == 0)
+            return false;
+        if (entry == creatureEntry)
+            return true;
+        for (int i = 0; i < MAX_ALT_ENTRIES; ++i)
+            if (altCreatureEntries[i] == entry)
+                return true;
+        return false;
+    }
 
     void Clear()
     {
@@ -209,6 +240,8 @@ struct AiBotTaskData
         creatureEntry = 0;
         killGoal = 0;
         killCount = 0;
+        for (int i = 0; i < MAX_ALT_ENTRIES; ++i)
+            altCreatureEntries[i] = 0;
         taxiSourceNode = 0;
         taxiDestNode = 0;
     }

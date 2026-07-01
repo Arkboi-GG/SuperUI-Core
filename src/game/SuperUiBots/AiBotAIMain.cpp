@@ -108,8 +108,7 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
         me->SetName(m_spawnName);
         sObjectMgr.InsertPlayerInCache(me);
         entry->name = m_spawnName;
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT] Renamed %s -> %s (GUID=%u)",
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] Renamed %s -> %s (GUID=%u)",
             oldName.c_str(), m_spawnName.c_str(), me->GetGUIDLow());
     }
 
@@ -117,8 +116,7 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
     {
         me->GiveLevel(m_spawnLevel);
         me->SetUInt32Value(PLAYER_XP, 0);
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT] Set level %u for %s (GUID=%u)",
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] Set level %u for %s (GUID=%u)",
             m_spawnLevel, me->GetName(), me->GetGUIDLow());
     }
 
@@ -844,8 +842,13 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (m_currentTask.type == TASK_GRIND)
             {
+                // wolf-meat fix (2026-06-30): MatchesObjectiveEntry checks the primary
+                // dispatched creatureEntry OR any tied item-drop alternate, not exact
+                // equality alone — so a kill on a tied local sibling (e.g. Timber Wolf
+                // when the dispatched entry was Young Wolf) still advances THIS leg's
+                // killCount instead of silently not counting toward the objective.
                 bool matches = (m_currentTask.creatureEntry == 0 ||
-                                m_lastVictimEntry == m_currentTask.creatureEntry);
+                                m_currentTask.MatchesObjectiveEntry(m_lastVictimEntry));
                 if (matches)
                 {
                     m_currentTask.killCount++;
@@ -1123,8 +1126,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (m_currentTask.type == TASK_GRIND)
             {
+                // wolf-meat fix (2026-06-30): same MatchesObjectiveEntry widening as the
+                // OOC kill-detect path above — primary or any tied alternate counts.
                 bool matches = (m_currentTask.creatureEntry == 0 ||
-                                killedEntry == m_currentTask.creatureEntry);
+                                m_currentTask.MatchesObjectiveEntry(killedEntry));
                 if (matches)
                 {
                     m_currentTask.killCount++;

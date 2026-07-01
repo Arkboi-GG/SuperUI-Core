@@ -222,34 +222,31 @@ void AiBotAI::BridgeSendHello()
 }
 
 // ============================================================
-// BridgeSendState — Session 3 (Held-Objective build §4)
+// BridgeSendState — REPLACEMENT (retire-the-pull build)
 //
-// REPLACES: the entire existing BridgeSendState() in AiBotAIBridge.cpp.
+// REPLACES: the entire existing AiBotAI::BridgeSendState() in AiBotAIBridge.cpp.
 //
-// Adds the held-task ECHO to the 5s STATE message — what C++ reports it is ACTUALLY
-// running — so the C# reconcile can confirm its held objective against ground truth
-// (and self-heal the group strand: m_currentTask IDLE while C# still holds Grind).
+// WHAT CHANGED vs the previous version (three things, all inside this one method —
+// no header change, no new members):
+//   1. Builds the FULL quest-log snapshot (every non-rewarded active log entry, with
+//      status + mob/item counts) into a bounded std::string `questBlob` — the exact
+//      same loop and pipe format BridgeHandleQueryQuestStatus used for QUEST_STATUS_ALL.
+//   2. Emits it as a new STATE field  "quests":"<blob>"  so C# ctx.QuestLog becomes a
+//      continuously-maintained mirror of the player's quest log on the 5s heartbeat —
+//      no QUERY_QUEST_STATUS round-trip, no request/reply cache to go stale/partial/empty.
+//   3. Bumps the STATE buffer  char json[1536] -> char json[4096]  to fit the blob.
+//      The blob is JSON-safe by construction (only digits, ':', ',', '|'), so it needs
+//      no escaping inside the STATE string, and the 20-slot quest-log cap keeps it well
+//      under the buffer.
 //
-// Five NEW read-only fields, all derived from EXISTING state (no new members, no new
-// tracking, no header change — the whole change lives in this function):
-//   taskKind     the committed task kind, from m_currentTask.type. This is SEPARATE from
-//                the existing taskState display string ON PURPOSE: taskState conflates
-//                DEAD/COMBAT status with the task (a grinding bot reads "COMBAT" every
-//                pull), which would make the C# kind-match fail mid-fight. m_currentTask.type
-//                stays GRIND/MOVE_TO straight through combat — that is the kind the reconcile
-//                needs. taskState is left byte-for-byte unchanged so the fleet display is
-//                untouched.
-//   taskActivity within-objective headway (engaged/recovering/traveling/searching/idle) —
-//                the signal C# triages on instead of a wall clock. C# gates "echo known"
-//                on this being non-empty, so a pre-Session-3 binary (which sends neither
-//                new field) maps to HeldTaskEcho.Unknown and the reconcile stays a no-op.
-//   taskCreature / taskDestX/Y/Z / taskKills   the target + pushed kill progress, straight
-//                off m_currentTask.
+// The held-task echo fields (taskKind/taskActivity/taskCreature/taskDest*/taskKills) and
+// every other STATE field are byte-for-byte unchanged.
 //
-// "blocked" is deliberately NOT emitted yet: there is no move-failure flag on this AI to
-// read it from, and the strand we're actually fixing surfaces as a KIND mismatch
-// (m_currentTask IDLE vs C# Grind), which the reconcile catches without it. A real
-// m_lastMoveFailedMs in the movement TU is the earned follow-on that lights "blocked" up.
+// FOLLOW-ON (optional, not required for the fix): QUERY_QUEST_STATUS /
+// BridgeHandleQueryQuestStatus / SendBridgeEvent("QUEST_STATUS_ALL") are now dead on the
+// solo path. They can be left in place as harmless dead code (the C# solo path no longer
+// sends QUERY and no longer has a QUEST_STATUS_ALL handler), or removed later. Leaving the
+// C++ handler in keeps the group path functional if grouping is ever flipped on.
 // ============================================================
 void AiBotAI::BridgeSendState()
 {
@@ -340,7 +337,44 @@ void AiBotAI::BridgeSendState()
         activityStr = "searching";   // committed to a grind, between targets — NOT a clock-based stall
     // else: idle
 
-    char json[1536];
+    // --- Full quest-log snapshot (RETIRES the QUERY_QUEST_STATUS pull) ---
+    // Pushed on EVERY STATE so C# ctx.QuestLog is a continuously-maintained mirror of the player's
+    // quest log — never a request/reply cache that can go stale, partial, or empty. Same pipe format
+    // the old QUEST_STATUS_ALL used, so the C# parser is reused verbatim:
+    //   questId:status:mob0,mob1,mob2,mob3:item0,item1,item2,item3 | questId:...
+    // status: 1=COMPLETE, 3=INCOMPLETE (VMaNGOS enum). Only non-rewarded active log entries are
+    // included (rewarded/turned-in are excluded — that is how a turn-in legitimately drops out). The
+    // blob is built as a bounded std::string (the 20-slot log fits well under the buffer) and its
+    // characters are JSON-safe (digits, ':', ',', '|'), so it needs no escaping inside the STATE string.
+    std::string questBlob;
+    {
+        const auto& qMap = me->GetQuestStatusMap();
+        for (const auto& pair : qMap)
+        {
+            const auto& qData = pair.second;
+
+            if (qData.m_rewarded)
+                continue;   // turned in — not an active log entry
+            if (qData.m_status != QUEST_STATUS_INCOMPLETE &&
+                qData.m_status != QUEST_STATUS_COMPLETE)
+                continue;   // skip QUEST_STATUS_NONE / UNAVAILABLE
+
+            if (!questBlob.empty())
+                questBlob += "|";
+
+            char qEntry[128];
+            snprintf(qEntry, sizeof(qEntry), "%u:%u:%u,%u,%u,%u:%u,%u,%u,%u",
+                pair.first,
+                (uint32)qData.m_status,
+                qData.m_creatureOrGOcount[0], qData.m_creatureOrGOcount[1],
+                qData.m_creatureOrGOcount[2], qData.m_creatureOrGOcount[3],
+                qData.m_itemcount[0], qData.m_itemcount[1],
+                qData.m_itemcount[2], qData.m_itemcount[3]);
+            questBlob += qEntry;
+        }
+    }
+
+    char json[4096];
     snprintf(json, sizeof(json),
         "{\"type\":\"STATE\",\"payload\":{"
         "\"guid\":%u,\"health\":%u,\"maxHealth\":%u,"
@@ -352,6 +386,7 @@ void AiBotAI::BridgeSendState()
         "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,"
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
+        "\"quests\":\"%s\","
         "\"questId\":%u,\"questStatus\":%u}}",
         me->GetGUIDLow(),
         me->GetHealth(), me->GetMaxHealth(),
@@ -366,6 +401,7 @@ void AiBotAI::BridgeSendState()
         freeSlots, totalSlots, me->GetMoney(), minDurabilityPct,
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
+        questBlob.c_str(),
         m_trackedQuestId, questStatus);
 
     BridgeSend(json);
@@ -668,6 +704,34 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
         me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), me->GetMapId());
 }
 
+// ============================================================
+// BridgeHandleMoveTo — REPLACEMENT (wolf-meat fix, 2026-06-30)
+//
+// REPLACES: the entire existing AiBotAI::BridgeHandleMoveTo(const char* json) in
+// AiBotAIBridge.cpp.
+//
+// ONLY CHANGE vs the previous version: three new optional fields parsed from the
+// payload — alt_entry1/2/3 — stashed onto m_currentTask.altCreatureEntries[0..2].
+// Everything else (mapId/x/y/z, the existing creature_entry/kill_count/grind_radius
+// enrichment, the arrival-jitter block, the cross-map guard, the journey-state resets,
+// the call into MoveToDestination) is byte-for-byte unchanged.
+//
+// WHY: an item-drop objective can have more than one creature that satisfies it with
+// no real priority between them (Young Wolf + Timber Wolf both drop Tough Wolf Meat at
+// the same drop chance, both spawning in the same field near the giver). C# now ships
+// up to 3 tied alternates alongside the primary creature_entry. They do NOT change
+// where the bot walks (the dispatch coordinate is still creature_entry's resolved
+// point) — they widen what counts as a valid hit once the bot is out there:
+// ScanApproachTarget's valid-kill union, SelectGrindTarget's match checks, and the
+// kill-credit check in UpdateAI all now match m_currentTask.MatchesObjectiveEntry(...)
+// instead of `entry == m_currentTask.creatureEntry`. Absent fields parse as 0 (JsonExtractInt's
+// untouched-on-miss behavior) — a pre-this-fix C# brain or a kill-objective leg that never
+// sends these keys leaves altCreatureEntries all 0, which MatchesObjectiveEntry treats as
+// "no alternates" — today's exact behavior, byte-for-byte.
+//
+// REQUIRES: AiBotTaskData::altCreatureEntries[MAX_ALT_ENTRIES] + MatchesObjectiveEntry()
+// added to AiBotAIMain.h (struct AiBotTaskData) — see that header's 2026-06-30 edit.
+// ============================================================
 void AiBotAI::BridgeHandleMoveTo(const char* json)
 {
     float x = 0, y = 0, z = 0;
@@ -691,6 +755,14 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     JsonExtractInt(payload, "creature_entry", entry);
     JsonExtractInt(payload, "kill_count", killCount);
     JsonExtractFloat(payload, "grind_radius", grindRadius);
+
+    // ── wolf-meat fix: tied item-drop alternates (2026-06-30) ──
+    // Absent on a plain MOVE_TO and on every kill-objective leg — stays 0, meaning
+    // "no alternate" (AiBotTaskData::MatchesObjectiveEntry only matches a non-zero slot).
+    int altEntry1 = 0, altEntry2 = 0, altEntry3 = 0;
+    JsonExtractInt(payload, "alt_entry1", altEntry1);
+    JsonExtractInt(payload, "alt_entry2", altEntry2);
+    JsonExtractInt(payload, "alt_entry3", altEntry3);
 
     if ((uint32)mapId != me->GetMapId())
     {
@@ -758,6 +830,9 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     m_currentTask.radius        = grindRadius;
     m_currentTask.killGoal      = killCount;
     m_currentTask.killCount     = 0;
+    m_currentTask.altCreatureEntries[0] = (uint32)altEntry1;
+    m_currentTask.altCreatureEntries[1] = (uint32)altEntry2;
+    m_currentTask.altCreatureEntries[2] = (uint32)altEntry3;
     m_approachScanTimer         = 0;   // scan on the first tick of this journey
 
     // One MOVE_TO = one journey to (x,y,z). MoveToDestination walks the first leg;
@@ -920,22 +995,39 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
     if (strcmp(action, "accept") == 0)
     {
 
-        // ── Idempotent accept (already-in-log) ──────────────────────────────────────
-        // The quest is ALREADY in our log — a reward-granted chain follow-up (e.g. #33
-        // handed over on the #5261 turn-in), or a re-pick after a C# batch rebuild that
-        // lost the Accepted flag. CanTakeQuest would fail SatisfyQuestStatus here and we'd
-        // emit "requirements_not_met" — which the brain (QuestPlanner line 606) mis-reads as
-        // "can't take", DeferPick-drops the quest from the batch (so an 8/8 follow-up never
-        // turns in) AND stamps a durable deferral that arms grind-lock. You cannot fail
-        // requirements for a quest you already hold: ACK it like a normal accept so the brain
-        // reconciles its batch entry to Accepted (QuestPlanner case "accept" sets it true on
-        // this ack) and proceeds to work / turn it in.
-        if (me->GetQuestStatus((uint32)questId) != QUEST_STATUS_NONE)
+       // ── Idempotent accept (already-in-log) — REVISED 2026-06-30 ──────────────
+        // GetQuestStatus() alone can't tell "still actively held" from "rewarded an
+        // hour ago" — VMaNGOS sticks a turned-in quest's status at COMPLETE forever;
+        // m_rewarded is the bit that actually means done (BridgeSendState's quest
+        // blob already gates on it). Without this check, a stray re-ACCEPT for an
+        // already-rewarded quest fell into the "idempotent ACK" branch below, told
+        // C# the accept succeeded, and let it dispatch a brand-new objective for a
+        // quest that will never again be turn-in-able — the no-op double-grind bug.
+        QuestStatus existingStatus = me->GetQuestStatus((uint32)questId);
+        if (existingStatus != QUEST_STATUS_NONE)
         {
+            const auto& qMap = me->GetQuestStatusMap();
+            auto it = qMap.find((uint32)questId);
+            bool alreadyRewarded = (it != qMap.end()) && it->second.m_rewarded;
+
+            if (alreadyRewarded)
+            {
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "[AIBOT-BRIDGE] %s: accept quest %d refused — already rewarded (turned in)",
+                    me->GetName(), questId);
+                char buf[64];
+                snprintf(buf, sizeof(buf), "already_rewarded|quest_id=%d", questId);
+                BridgeSendEvent("QUEST_INTERACT_FAIL", buf);
+                return;
+            }
+
+            // Genuinely still held (the case this guard was originally built for) —
+            // a reward-granted chain follow-up or a re-pick that lost the Accepted
+            // flag. ACK it like a normal accept so C# reconciles the batch.
             m_trackedQuestId = (uint32)questId;
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-BRIDGE] %s: accept quest %d already in log (status=%u) — idempotent ACK",
-                me->GetName(), questId, (uint32)me->GetQuestStatus((uint32)questId));
+                me->GetName(), questId, (uint32)existingStatus);
             char buf[64];
             snprintf(buf, sizeof(buf), "%d", questId);
             BridgeSendEvent("QUEST_ACCEPT_ACK", buf);
