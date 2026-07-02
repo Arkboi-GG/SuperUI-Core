@@ -45,6 +45,7 @@
 #include "CombatBotBaseAI.h"
 #include "Timer.h"
 #include "Log.h"
+#include "PathFinder.h"   // Vector3, PointsArray — needed for SmoothPathCorners' signature
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -95,6 +96,14 @@
 #define AIBOT_OFFMESH_EPSILON  2.0f      // bot within this of a navmesh poly = ON mesh; beyond = off-mesh ALARM → re-tare
 #define AIBOT_BOUNDARY_SCOPE  60.0f      // a recorded seam helps escape from anywhere within this of its inner point
 #define AIBOT_NAVMESH_SNAP_SEARCH 40.0f  // how far out to look for a navmesh poly to snap an off-mesh bot onto
+
+//Organic movement
+#define AIBOT_FILLET_VALIDATE_SEARCH_YARDS 5.0f
+#define AIBOT_FILLET_VALIDATE_EPSILON      1.0f
+#define AIBOT_JOURNEY_DEST_EPSILON         1.0f
+#define AIBOT_FILLET_MIN_TURN_EPSILON_DEG 5.0f   // below this a vertex is "basically straight" — doesn't start or continue a merge run
+#define AIBOT_FILLET_MAX_WINDOW_POINTS    8       // cap on how many consecutive vertices one run can merge (~40yd at this fork's ~5yd spacing) — generous for a real corner, bounded so a long gentle bend can't get swallowed whole
+
 
 // Combat-stalemate breaker (in-combat, neither side dealing damage — navmesh seam / unreachable mob)
 #define AIBOT_STALEMATE_NUDGE_MS      3000   // no-damage-in-combat time before each nudge
@@ -421,6 +430,9 @@ public:
     void BridgeHandleTeleport(const char* json);   // generic live-bot teleport (assist + future hearth)
     void MoveToDestination(float destX, float destY, float destZ, bool stopCurrentMovement = true);
     bool FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, float searchYards) const;
+    bool FindNearestNavmeshPointNear(float queryX, float queryY, float queryZ, float& outX, float& outY, float& outZ, float searchYards) const;
+    PointsArray SmoothPathCorners(PointsArray const& raw);
+    bool ValidateWideBowCandidate(Vector3 const& anchorStart, Vector3 const& anchorEnd, PointsArray& candidate);
     // [GROUND] Snap a teleport/snap destination Z DOWN onto real terrain (the float-maroon
     // fix). Called before EVERY NearTeleportTo so a bot can't be planted on a floating
     // navmesh poly (Recast lays the walkable surface ABOVE the collision hull on steep
@@ -554,6 +566,9 @@ public:
     std::vector<NavBoundary> m_navBoundaries;   // learned at runtime
     bool m_didBoundaryExit = false;             // one outbound seam-cross per MOVE_TO journey
     bool m_didNavmeshSnap = false;   // one off-mesh-start snap attempt per MOVE_TO journey
+    float m_lastDispatchedDestX, m_lastDispatchedDestY, m_lastDispatchedDestZ;
+    bool m_hasDispatchedDest;
+    uint32 m_pathJourneySeed;
 
     // --- Bridge state ---
     BridgeSocket m_bridgeSocket;

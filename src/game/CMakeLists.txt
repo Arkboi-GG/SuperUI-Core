@@ -199,6 +199,8 @@ set (game_SRCS
     SuperUiBots/AiBotAIGrind.cpp
     SuperUiBots/AiBotAIBridge.cpp
     SuperUiBots/AiBotAITeamPlay.cpp
+    SuperUiBots/Movement/AiBotMovementGenerators.cpp
+    SuperUiBots/Movement/AiBotPathSmoothing.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp
@@ -450,6 +452,8 @@ set (game_SRCS
     SuperUiBots/AiBotAIMain.h
     SuperUiBots/AiBotAI.h
     SuperUiBots/AiBotAITeamPlay.h
+    SuperUiBots/Movement/AiBotMovementGenerators.h
+    SuperUiBots/Movement/AiBotPathSmoothing.h
     PlayerBots/BattleBotWaypoints.h
     PlayerBots/PlayerBotAI.h
     PlayerBots/PlayerBotMgr.h

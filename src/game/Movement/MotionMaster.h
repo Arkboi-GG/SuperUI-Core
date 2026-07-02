@@ -163,6 +163,12 @@ class MotionMaster : std::stack<MovementGenerator *>
 
         bool NeedsAsyncUpdate() const { return m_needsAsyncUpdate; }
         void SetNeedAsyncUpdate() { m_needsAsyncUpdate = true; }
+
+
+        // SuperUiBots: the one friend permitted to push a custom MovementGenerator (bot smoothed-
+        // path movement) without widening Mutate to every caller. See SuperUiBots/Movement/.
+        friend class AiBotMovementIssuer;
+
     private:
         void Mutate(MovementGenerator* m);                  // use Move* functions instead
 

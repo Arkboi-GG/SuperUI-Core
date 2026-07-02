@@ -8,12 +8,27 @@
  *   - MoveToDestination (seam-cross / nudge / ring / off-mesh snap / chunk dispatch)
  *   - FindNearestNavmeshPoint (Detour findNearestPoly) + ReGroundZ (the float-maroon fix)
  *   - RecordNavBoundary / FindNavBoundaryNear (learned cave-portal seams)
+ *   - Corner-smoothing pass (SmoothPathCorners) — 2026-07-01, see Movement/AiBotPathSmoothing.h
+ *     for the tight-fillet geometry design and Movement/AiBotMovementGenerators.h for how a
+ *     smoothed point sequence reaches the spline (MotionMaster::Mutate is private;
+ *     AiBotMovementIssuer is the one friended caller that can push a custom generator).
+ *     NOTE (2026-07-01, same day): a wide-bow technique was tried alongside the tight fillet and
+ *     rolled back after it produced bots pathing through walls/floors live — the on-mesh validation
+ *     it depended on only checked X/Y distance to the matched navmesh point, never Z, so a bow
+ *     candidate near a building could validate against a polygon on the wrong floor entirely. The
+ *     tight fillet alone doesn't have this exposure (every point is geometrically bounded inside a
+ *     small triangle anchored at Detour's own already-validated vertex — it cannot reach off-mesh
+ *     terrain the way an open-ended bow can), which is why this file only uses that technique now.
+ *     The wide-bow code still exists, inert, in AiBotPathSmoothing.h/.cpp if it's worth revisiting
+ *     later with a real 3D validation pass.
  *
  * All members of AiBotAI; cross-TU calls (BridgeSendEvent, RecordNavBoundary's peers,
  * ConvertMoveToGrindInPlace) resolve against the Bridge / Grind sibling TUs at link time.
  */
 
 #include "AiBotAIMain.h"
+#include "Movement/AiBotMovementGenerators.h"
+#include "Movement/AiBotPathSmoothing.h"
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -256,24 +271,23 @@ void AiBotAI::ClearStoredPath()
 }
 
 // ============================================================
-// NEW METHOD 2: StartNextPathChunk
-// Place after ClearStoredPath() in AiBotAI.cpp
+// StartNextPathChunk
 //
-// Walks forward through m_pathWaypoints starting at m_pathIndex,
-// accumulating distance between consecutive waypoints. When the
-// accumulated distance reaches AIBOT_PATH_CHUNK_DIST (~200yd) or
-// we hit the end of the path, calls MovePoint to that waypoint.
-//
-// Returns true if MovePoint was issued (more path to walk).
-// Returns false if path is complete (m_pathIndex already at end).
+// Walks forward through m_pathWaypoints starting at m_pathIndex, accumulating distance
+// between consecutive waypoints, until AIBOT_PATH_CHUNK_DIST (~200yd) or the end of the
+// path. The entire chunk's point sequence is handed to AiBotMovementIssuer::IssueSmoothedPath,
+// which splines through it directly (Movement::MoveSplineInit::MovebyPath) rather than
+// collapsing to a single MovePoint target that would trigger PointMovementGenerator's own
+// internal re-pathfind and discard the smoothed points m_pathWaypoints already holds.
 // ============================================================
- 
+
 bool AiBotAI::StartNextPathChunk()
 {
     if (m_pathWaypoints.empty() || m_pathIndex >= (uint32)m_pathWaypoints.size())
         return false;
 
     float accumulated = 0.0f;
+    uint32 startIdx = m_pathIndex;
     uint32 targetIdx = m_pathIndex;
 
     for (uint32 i = m_pathIndex; i + 1 < (uint32)m_pathWaypoints.size(); ++i)
@@ -289,22 +303,14 @@ bool AiBotAI::StartNextPathChunk()
             break;
     }
 
-    // targetIdx is now either ~200yd ahead or the final waypoint
     Vector3 const& target = m_pathWaypoints[targetIdx];
+    PointsArray chunkPoints(m_pathWaypoints.begin() + startIdx, m_pathWaypoints.begin() + targetIdx + 1);
 
-    // Advance the index past the target so next call starts from here
     m_pathIndex = targetIdx;
 
     bool isFinalChunk = (targetIdx >= (uint32)m_pathWaypoints.size() - 1);
 
-    // ── Travel-speed pin (2026-06-23) ──
-    // The chunk MovePoint used the default speed arg (0), so MoveSplineInit fell back to
-    // GetSpeed(MOVE_RUN). The fleet was gliding at ~7x run (a 207yd chunk in ~4s instead of
-    // ~28s). Pass an EXPLICIT speed so the chunk spline always walks at run speed, whatever
-    // the cause (inflated GetSpeed OR a spline that ignores it). runSpeed/rate are logged raw
-    // so an underlying rate inflation is visible: if rate>>1 the speed source must be hunted
-    // (combat chase will glide too); if rate~1.0 the spline was the bug and this pin is the fix.
-    // (GetSpeed / GetSpeedRate are standard MaNGOS Unit getters — verify on your fork.)
+    // ── Travel-speed pin (2026-06-23) ── unchanged rationale/values.
     float const runSpeed = me->GetSpeed(MOVE_RUN);
     float const runRate  = me->GetSpeedRate(MOVE_RUN);
     float       useSpeed = runSpeed;
@@ -312,39 +318,33 @@ bool AiBotAI::StartNextPathChunk()
         useSpeed = 7.0f;
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-        "[AIBOT-PATH] %s: chunk MovePoint to waypoint %u/%u (%.1f, %.1f, %.1f) "
-        "accumulated=%.0fyd runSpeed=%.1f rate=%.2f useSpeed=%.1f %s",
+        "[AIBOT-PATH] %s: chunk smoothed-path to waypoint %u/%u (%.1f, %.1f, %.1f) "
+        "accumulated=%.0fyd points=%u runSpeed=%.1f rate=%.2f useSpeed=%.1f %s",
         me->GetName(), targetIdx, (uint32)m_pathWaypoints.size(),
         target.x, target.y, target.z,
-        accumulated, runSpeed, runRate, useSpeed,
+        accumulated, (uint32)chunkPoints.size(), runSpeed, runRate, useSpeed,
         isFinalChunk ? "[FINAL]" : "");
 
-    me->GetMotionMaster()->MovePoint(AIBOT_POINT_TASK_DEST,
-        target.x, target.y, target.z, MOVE_PATHFINDING, useSpeed);
+    AiBotMovementIssuer::IssueSmoothedPath(*me, AIBOT_POINT_TASK_DEST, chunkPoints, MOVE_NONE, useSpeed);
 
     return true;
 }
 
 // ============================================================
-// MoveToDestination — COMPLETE-METHOD REPLACEMENT (2026-06-22)
+// MoveToDestination
 //
-// CHANGE vs the 2026-06-21 version: an OFF-MESH START recovery added inside the
-// no_path failure block, BEFORE the MOVE_FAILED|reason=no_path event is emitted.
+// OFF-MESH START recovery (2026-06-22): before failing a leg, snap the bot onto the
+// nearest navmesh poly and re-path from there if the bot itself is standing off-mesh.
 //
-// WHY: PathInfo::calculate() pathfinds FROM the bot's current position. When the
-// bot is standing off the navmesh (water surface / unmeshed tile / z-mismatch), the
-// START poly lookup fails and EVERY calculate() returns NOPATH regardless of the
-// destination — so every MOVE_TO (trainer, all quests) fails identically as no_path,
-// then C# shelves the lot even though nothing is wrong with the destinations. The
-// bot is just standing somewhere it can't path FROM (confirmed live: Hu at
-// (-9153,-397,69) no_path'd four scattered dests in a row, then killed a mob in
-// place — local play fine, travel dead).
+// PATH-SMOOTHING JOURNEY SEED (2026-07-01): rolled fresh only when the incoming
+// destination genuinely differs from what was last dispatched — see the block right
+// after the in-combat early-return. Deliberately NOT re-rolled on internal recursive
+// re-entry or a rapid external re-issue of the same leg (both observed live); re-rolled
+// on any genuinely new destination.
 //
-// FIX: before failing the leg, snap the bot onto the nearest navmesh poly and
-// re-path from there (mirrors the proven outbound seam-escape just above:
-// NearTeleportTo + immediate recursive MoveToDestination). One attempt per journey
-// (m_didNavmeshSnap, reset in BridgeHandleMoveTo) so a genuinely unreachable DEST
-// still falls through to a real no_path instead of looping.
+// Corner smoothing (SmoothPathCorners — tight fillet only, see that method) is applied
+// once, right before the point sequence is handed to either the short-leg or chunked
+// dispatch path.
 // ============================================================
 
 void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stopCurrentMovement)
@@ -366,6 +366,36 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         m_currentTask.y = destY;
         m_currentTask.z = destZ;
         return;
+    }
+
+    // ── PATH-SMOOTHING JOURNEY SEED ──
+    // Rolls fresh ONLY when the incoming destination differs from what we last dispatched to,
+    // beyond AIBOT_JOURNEY_DEST_EPSILON. This deliberately treats every internal recursive re-entry
+    // below (off-mesh re-tare, spawn-port recovery, outbound seam escape — all of which recurse with
+    // the SAME destX/destY/destZ params this call received) as the SAME journey, and — just as
+    // importantly — a rapid back-to-back re-issue of an unchanged destination from OUTSIDE this
+    // method (observed live) as the same journey too. A genuinely new destination (new quest leg,
+    // new errand, even a return trip to a coordinate visited long ago) rolls fresh.
+    {
+        bool isNewJourney = !m_hasDispatchedDest;
+        if (m_hasDispatchedDest)
+        {
+            float const ddx = destX - m_lastDispatchedDestX;
+            float const ddy = destY - m_lastDispatchedDestY;
+            float const ddz = destZ - m_lastDispatchedDestZ;
+            float const distSq = ddx * ddx + ddy * ddy + ddz * ddz;
+            if (distSq > AIBOT_JOURNEY_DEST_EPSILON * AIBOT_JOURNEY_DEST_EPSILON)
+                isNewJourney = true;
+        }
+
+        if (isNewJourney)
+        {
+            m_pathJourneySeed = (urand(0, 0xFFFF) << 16) ^ urand(0, 0xFFFF);
+            m_lastDispatchedDestX = destX;
+            m_lastDispatchedDestY = destY;
+            m_lastDispatchedDestZ = destZ;
+            m_hasDispatchedDest = true;
+        }
     }
 
     // ── OFF-MESH ALARM — re-tare onto valid navmesh BEFORE we try to path ──
@@ -634,7 +664,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // INCOMPLETE = the path stops at the poly budget, short of the dest.
     bool isPartial = (pType & PATHFIND_INCOMPLETE) != 0;
 
-    // ── Total length of THIS leg's path ──
+    // ── Total length of THIS leg's path ── measured off the RAW Detour points, before smoothing.
     float totalDist = 0.0f;
     for (uint32 i = 0; i + 1 < (uint32)points.size(); ++i)
     {
@@ -654,52 +684,47 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     m_currentTask.y = y;
     m_currentTask.z = z;
 
-    // ── Complete + short path: single MovePoint straight to dest ──
+    // Corner smoothing (tight fillet only) — one pass, feeds both branches below. Endpoints are
+    // never moved; only sharp corners are touched, and only after every candidate point is
+    // confirmed on-mesh. See SmoothPathCorners.
+    PointsArray const smoothed = SmoothPathCorners(points);
+
+    // ── Complete + short path: smoothed MovePoint straight to dest ──
     if (!isPartial && totalDist <= AIBOT_PATH_CHUNK_DIST)
     {
         float useSpeed = me->GetSpeed(MOVE_RUN);
         if (useSpeed > 9.0f) useSpeed = 7.0f;
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT-PATH] %s: short path (%.0fyd, %u waypoints) — single MovePoint (speed=%.1f)",
-            me->GetName(), totalDist, (uint32)points.size(), useSpeed);
+            "[AIBOT-PATH] %s: short path (%.0fyd, %u waypoints, %u smoothed) — smoothed MovePoint (speed=%.1f)",
+            me->GetName(), totalDist, (uint32)points.size(), (uint32)smoothed.size(), useSpeed);
 
-        me->GetMotionMaster()->MovePoint(AIBOT_POINT_TASK_DEST, x, y, z, MOVE_PATHFINDING, useSpeed);
+        AiBotMovementIssuer::IssueSmoothedPath(*me, AIBOT_POINT_TASK_DEST, smoothed, MOVE_NONE, useSpeed);
         return;
     }
 
     // ── Long, or a partial leg: store waypoints, walk in ~200yd chunks ──
-    m_pathWaypoints.reserve(points.size());
-    for (uint32 i = 0; i < (uint32)points.size(); ++i)
-        m_pathWaypoints.push_back(points[i]);
+    m_pathWaypoints.reserve(smoothed.size());
+    for (uint32 i = 0; i < (uint32)smoothed.size(); ++i)
+        m_pathWaypoints.push_back(smoothed[i]);
     m_pathIndex = 0;
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-        "[AIBOT-PATH] %s: %s path (%.0fyd, %u waypoints) — chunked pathing",
+        "[AIBOT-PATH] %s: %s path (%.0fyd, %u waypoints, %u smoothed) — chunked pathing",
         me->GetName(), isPartial ? "partial" : "long",
-        totalDist, (uint32)m_pathWaypoints.size());
+        totalDist, (uint32)points.size(), (uint32)smoothed.size());
 
     StartNextPathChunk();
 }
 
 // ============================================================
-// FindNearestNavmeshPoint — nearest valid navmesh poly point to the bot
-//
-// Queries the mmap navmesh directly (findNearestPoly) with a generous search box,
-// because the SMALL default snap extent inside PathInfo::calculate() is exactly what
-// is already failing for an off-mesh bot. Returns the closest on-mesh point within
-// searchYards, in MaNGOS world coords.
-//
-// ⚠ VERIFY against your fork (these are the standard VMaNGOS mmap conventions):
-//   1. include "MoveMap.h" at the top of AiBotAI.cpp (for MMAP::MMapFactory).
-//      PathFinder.h already pulls the Detour headers (dtNavMeshQuery / dtQueryFilter).
-//   2. MMapManager::GetNavMeshQuery(mapId) — per-map, single arg on this fork.
-//   3. Recast coordinate order: MaNGOS (x,y,z) ⇄ Detour (y,z,x). PathInfo does this
-//      same swizzle internally; if yours differs the snap will teleport to a wrong
-//      spot — the [AIBOT-PATH] OFF-MESH log line prints src→dst so a bad swizzle is
-//      immediately visible on the first run.
+// FindNearestNavmeshPointNear — like the original FindNearestNavmeshPoint, but for an ARBITRARY
+// point instead of the bot's own current position. Refactored out because corner-smoothing
+// validation needs to ask "is THIS candidate point walkable" — the original only ever asked
+// "is the bot itself off mesh."
 // ============================================================
-bool AiBotAI::FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, float searchYards) const
+bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float queryZ,
+    float& outX, float& outY, float& outZ, float searchYards) const
 {
     MMAP::MMapManager* mmap = MMAP::MMapFactory::createOrGetMMapManager();
     if (!mmap)
@@ -710,7 +735,7 @@ bool AiBotAI::FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, flo
         return false;
 
     // MaNGOS (x,y,z) → Detour (y,z,x).
-    float const center[3]  = { me->GetPositionY(), me->GetPositionZ(), me->GetPositionX() };
+    float const center[3]  = { queryY, queryZ, queryX };
     float const extents[3] = { searchYards, 50.0f, searchYards };   // wide vertical to catch z-mismatch
 
     dtQueryFilter filter;   // default: include all areas
@@ -744,6 +769,12 @@ bool AiBotAI::FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, flo
     }
 
     return true;
+}
+
+bool AiBotAI::FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, float searchYards) const
+{
+    return FindNearestNavmeshPointNear(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+        outX, outY, outZ, searchYards);
 }
 
 // ============================================================
@@ -811,7 +842,7 @@ void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
     me->GetMotionMaster()->MovePoint(pointId, x, y, z, MOVE_PATHFINDING, useSpeed);
 }
 
- 
+
 void AiBotAI::RecordNavBoundary(float innerX, float innerY, float innerZ)
 {
     uint32 mapId = me->GetMapId();
@@ -849,4 +880,174 @@ NavBoundary const* AiBotAI::FindNavBoundaryNear(float x, float y, float scope) c
         if (dSq < bestSq) { bestSq = dSq; best = &b; }
     }
     return best;
+}
+
+// ============================================================
+// SmoothPathCorners — corner-smoothing pass over a raw Detour path, run once right after
+// MoveToDestination gets a validated `points` array, before chunking/spline dispatch.
+//
+// Pass 1: measure turn angle + rotational direction at every interior vertex, then merge
+// consecutive same-direction turns into "corner runs" — this fork's Detour resamples the WHOLE
+// path at ~5yd intervals, so one real corner spans several vertices, none individually sharp
+// enough alone (confirmed live).
+// Pass 2: for each run whose cumulative angle clears the threshold, find the "peak" vertex
+// (furthest from the straight line between the run's outer neighbors) and fillet AT that vertex,
+// using the SAME tight quadratic-Bezier geometry from AiBotPathSmoothing (bounded inside the
+// Entry/peak/Exit triangle — cannot swing wider than the peak Detour itself validated, cannot
+// clip through geometry the peak's own corridor already avoided). Every candidate point is
+// re-validated on-mesh before being trusted; a rejected fillet falls back to the run's raw points
+// unchanged — never worse than pre-smoothing behavior.
+// ============================================================
+PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
+{
+    if (raw.size() < 3)
+        return raw;
+
+    uint32 const journeySeed = m_pathJourneySeed;
+    uint32 const n = (uint32)raw.size();
+
+    std::vector<float> turnDeg(n, 0.0f);
+    std::vector<int> turnSign(n, 0);
+
+    for (uint32 i = 1; i + 1 < n; ++i)
+    {
+        float const inX = raw[i].x - raw[i - 1].x, inY = raw[i].y - raw[i - 1].y;
+        float const outX = raw[i + 1].x - raw[i].x, outY = raw[i + 1].y - raw[i].y;
+        float const lenIn = sqrtf(inX * inX + inY * inY);
+        float const lenOut = sqrtf(outX * outX + outY * outY);
+        if (lenIn < 0.01f || lenOut < 0.01f)
+            continue;
+
+        float const dot = (inX * outX + inY * outY) / (lenIn * lenOut);
+        float const cosT = dot > 1.0f ? 1.0f : (dot < -1.0f ? -1.0f : dot);
+        turnDeg[i] = acosf(cosT) * (180.0f / 3.14159265f);
+
+        float const cross = inX * outY - inY * outX;
+        turnSign[i] = cross >= 0.0f ? 1 : -1;
+    }
+
+    PointsArray result;
+    result.reserve(raw.size());
+    result.push_back(raw.front());
+
+    uint32 filletedRuns = 0, consideredRuns = 0, filletedVertices = 0;
+    uint32 i = 1;
+    while (i + 1 < n)
+    {
+        if (turnDeg[i] < AIBOT_FILLET_MIN_TURN_EPSILON_DEG)
+        {
+            result.push_back(raw[i]);
+            ++i;
+            continue;
+        }
+
+        uint32 runStart = i, runEnd = i;
+        int const runSign = turnSign[i];
+        float cumulative = turnDeg[i];
+
+        uint32 j = i + 1;
+        while (j + 1 < n
+            && (runEnd - runStart) < AIBOT_FILLET_MAX_WINDOW_POINTS
+            && turnDeg[j] >= AIBOT_FILLET_MIN_TURN_EPSILON_DEG
+            && turnSign[j] == runSign)
+        {
+            cumulative += turnDeg[j];
+            runEnd = j;
+            ++j;
+        }
+
+        ++consideredRuns;
+
+        if (cumulative < AiBotPathSmoothing::kFilletAngleThresholdDeg)
+        {
+            // didn't clear the bar even merged — carry just this run's own points through
+            // unchanged; advance past only the run's first vertex so a later corner starting
+            // mid-run still gets its own chance
+            result.push_back(raw[runStart]);
+            i = runStart + 1;
+            continue;
+        }
+
+        // Representative "peak" vertex — whichever point in the run sits furthest from the
+        // straight line between the run's outer neighbors.
+        Vector3 const& A = raw[runStart - 1];
+        Vector3 const& C = raw[runEnd + 1];
+        uint32 peakIdx = runStart;
+        float bestDistSq = -1.0f;
+        float const acx = C.x - A.x, acy = C.y - A.y;
+        float const acLenSq = acx * acx + acy * acy;
+        for (uint32 k = runStart; k <= runEnd; ++k)
+        {
+            float distSq = 0.0f;
+            if (acLenSq >= 0.0001f)
+            {
+                float const apx = raw[k].x - A.x, apy = raw[k].y - A.y;
+                float const t = (apx * acx + apy * acy) / acLenSq;
+                float const projX = A.x + acx * t, projY = A.y + acy * t;
+                float const dx = raw[k].x - projX, dy = raw[k].y - projY;
+                distSq = dx * dx + dy * dy;
+            }
+            if (distSq > bestDistSq)
+            {
+                bestDistSq = distSq;
+                peakIdx = k;
+            }
+        }
+        Vector3 const& B = raw[peakIdx];
+
+        PointsArray candidate;
+        if (!AiBotPathSmoothing::ComputeCornerFillet(A, B, C, journeySeed, candidate))
+        {
+            for (uint32 k = runStart; k <= runEnd; ++k)
+                result.push_back(raw[k]);
+            i = runEnd + 1;
+            continue;
+        }
+
+        bool allValid = true;
+        for (Vector3& p : candidate)
+        {
+            float navX, navY, navZ;
+            if (!FindNearestNavmeshPointNear(p.x, p.y, p.z, navX, navY, navZ, AIBOT_FILLET_VALIDATE_SEARCH_YARDS))
+            {
+                allValid = false;
+                break;
+            }
+            float const off = sqrtf((navX - p.x) * (navX - p.x) + (navY - p.y) * (navY - p.y));
+            if (off > AIBOT_FILLET_VALIDATE_EPSILON)
+            {
+                allValid = false;
+                break;
+            }
+            p.x = navX;
+            p.y = navY;
+            ReGroundZ(p.x, p.y, p.z, "fillet-validate");
+        }
+
+        if (allValid)
+        {
+            filletedRuns++;
+            filletedVertices += (runEnd - runStart + 1);
+            for (Vector3 const& p : candidate)
+                result.push_back(p);
+        }
+        else
+        {
+            for (uint32 k = runStart; k <= runEnd; ++k)
+                result.push_back(raw[k]);
+        }
+
+        i = runEnd + 1;
+    }
+
+    result.push_back(raw.back());
+
+    if (consideredRuns > 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-PATH] %s: corner smoothing — %u/%u candidate runs filleted (%u raw vertices merged), %u -> %u points",
+            me->GetName(), filletedRuns, consideredRuns, filletedVertices, (uint32)raw.size(), (uint32)result.size());
+    }
+
+    return result;
 }
