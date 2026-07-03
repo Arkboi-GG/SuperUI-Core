@@ -296,6 +296,30 @@ struct CombatDirective
     void Clear()          { mode = COMBAT_MODE_NONE; anchorGuidLow = 0; }
 };
 
+// [TEAMPLAY] Sticky-assist safety valve (2026-07-02, closes the "anchor between kills"
+// divergence — see AiBotAITeamPlay.cpp for the full trace). Caps how many consecutive
+// ResolveCombatTarget calls a follower may keep assisting the anchor's LAST victim after
+// the anchor's live GetVictim() goes null, before yielding back to solo selection. Not a
+// wall-clock bound — the resolver has no tick-delta visibility, so this is a generous
+// call-count instead, same spirit as the ms-counters elsewhere on this class. Tune once
+// real resolver call cadence is visible in logs.
+#define AIBOT_ASSIST_STICKY_MAX_TICKS 8
+
+// [TEAMPLAY] Pull discipline (2026-07-02, B3 — closes the fresh-engagement SEEDING gap the
+// sticky memo structurally cannot: sticky bridges gaps in an EXISTING assist, but when the
+// group first arrives at a camp nobody is fighting, every follower's resolver yields, and
+// each member solo-pulls its own nearest simultaneously — the arrival fan-out that made
+// "each bot on its own mob" persist). A FOLLOWER whose assist directive is live but whose
+// resolver has no opinion HOLDS its grind pull this many consecutive dispatch ticks (~1s
+// each), letting the ANCHOR pull first so the resolver has a victim to hand everyone.
+// Bounded so a distracted anchor (eating / wandering / stuck) can never starve the group:
+// on expiry the follower falls through to a normal solo pull, and the counter re-arms the
+// next time an assist actually resolves — a permanently idle anchor costs one dwell total,
+// not one dwell per camp. Enforced at the DISPATCH site in UpdateAI, never inside
+// SelectGrindTarget — so a hold can never increment m_grindFreezeStreak or fire a false
+// GRIND_BLOCKED|no_target handback to C#.
+#define AIBOT_ASSIST_PULL_HOLD_TICKS 5
+
 class AiBotAI : public CombatBotBaseAI
 {
 public:
@@ -305,6 +329,8 @@ public:
           m_spawnRace(race), m_spawnClass(cls), m_spawnLevel(level),
           m_spawnMapId(mapId), m_spawnInstanceId(instanceId),
           m_spawnX(x), m_spawnY(y), m_spawnZ(z), m_spawnO(o),
+          m_lastDispatchedDestX(0.0f), m_lastDispatchedDestY(0.0f), m_lastDispatchedDestZ(0.0f),
+          m_hasDispatchedDest(false), m_pathJourneySeed(0),
           m_bridgeSocket(BRIDGE_INVALID_SOCKET)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] AiBotAI constructor fired (factory creation)");
@@ -477,6 +503,26 @@ public:
     // cleared on a 'none'/absent directive. Inactive (IsActive()==false) on every solo bot,
     // so the combat seam is a provable no-op unless the coordinator stamps it.
     CombatDirective m_combatDirective;
+
+    // [TEAMPLAY] Sticky-assist memo (2026-07-02) — the follower's own memory of the last
+    // mob it assisted, so ResolveCombatTarget can bridge the anchor's between-kill gaps
+    // instead of yielding to solo-pick every time GetVictim() is momentarily null. This is
+    // cache/memo state, not task/execution state — it doesn't move the bot, touch the wire,
+    // or affect anything outside the resolver's own next call — so it's `mutable` and written
+    // through TeamPlay's `AiBotAI const&`, rather than relaxing the resolver's constness or
+    // routing the write back through AiBotAI's own (non-const) call sites. See
+    // AiBotAITeamPlay.cpp for the read/write logic; nothing else on this class touches these.
+    mutable ObjectGuid m_lastAssistedVictimGuid;
+    mutable uint8 m_assistStickyTicks = 0;
+
+    // [TEAMPLAY] Pull-discipline dwell (B3, 2026-07-02) — consecutive grind dispatches this
+    // FOLLOWER has HELD waiting for the anchor to engage (see AIBOT_ASSIST_PULL_HOLD_TICKS
+    // above for the full rationale). Unlike the resolver's memo this is driven by UpdateAI's
+    // own (non-const) grind dispatch, so it is a plain member, not `mutable`: incremented on
+    // each held dispatch, reset whenever an assist actually resolves or the seam doesn't
+    // apply (solo / I am the anchor / filler-detour grind). Nothing outside UpdateAI's
+    // TASK_GRIND block touches it.
+    uint8 m_assistPullHoldTicks = 0;
 
     // --- Victim Tracking ---
     uint32 m_lastVictimEntry = 0;

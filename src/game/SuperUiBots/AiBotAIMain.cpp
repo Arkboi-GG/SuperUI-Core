@@ -425,6 +425,16 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
 // the in-combat backstop if too many pile on, and a genuinely unkillable field still trips
 // the C# 120s no-kill deadline → durable shelve. The no_target handback (truly empty field)
 // is UNCHANGED. Only the overpull_dwell objective handback is removed.
+//
+// [TEAMPLAY] 2026-07-02 (B2/B3, the focus-fire divergence closure): the sticky-assist fix
+// (v1.1) bridged only the narrowest of THREE divergence windows. This pass closes the two
+// structural ones: (B3) pull discipline — a follower whose assist seam can't resolve yet
+// HOLDS its grind pull for a bounded dwell so the anchor pulls first (the fresh-engagement
+// seeding gap: nothing could create the FIRST assist), applied at the grind dispatch and
+// the enriched-MOVE_TO approach scan; (B2) mid-combat convergence — an engaged follower
+// re-checks the seam every tick and SWITCHES to the anchor's resolved victim (the old
+// valid-victim branch held course for the victim's whole life and never consulted the
+// resolver, so the arrival fan-out persisted until kill boundaries coincided by luck).
 // ============================================================
 
 void AiBotAI::UpdateAI(uint32 const diff)
@@ -885,6 +895,51 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // objective grind no longer hands overpull_dwell back to C#.
             bool const fillerOrDetour = (m_currentTask.creatureEntry == 0);
 
+            // [TEAMPLAY] Pull discipline (B3, 2026-07-02) — the fresh-engagement seeding gap.
+            // The sticky-assist memo (v1.1) bridges gaps in an EXISTING assist; it structurally
+            // cannot create the first one: when the group arrives at a camp nobody is fighting,
+            // every follower's resolver yields (anchor victim null, sticky empty), and each
+            // member solo-pulls its own nearest simultaneously — the arrival fan-out behind the
+            // observed "each bot on its own mob". So: a FOLLOWER whose assist directive is live
+            // but unresolvable HOLDS its pull for a bounded dwell, letting the ANCHOR pull first;
+            // the resolver then hands everyone the anchor's victim (SelectGrindTarget's weave +
+            // the B2 convergence below). Scoped to OBJECTIVE grinds only (!fillerOrDetour): the
+            // C# unstick detour (entry=0 killGoal=1) must land its kill NOW, and the indefinite
+            // filler runs when the group has deliberately scattered (GroupOrder.None) — holding
+            // either would be wrong. The anchor itself is exempt (it must pull), and dwell expiry
+            // falls through to a solo pull so an idle/distracted anchor can never starve the
+            // team. The counter re-arms only when an assist actually resolves — a permanently
+            // idle anchor costs ONE dwell total, not one per camp. Sits HERE at the dispatch
+            // site, never inside SelectGrindTarget, so a hold can never bump m_grindFreezeStreak
+            // or fire a false GRIND_BLOCKED|no_target handback.
+            if (!fillerOrDetour &&
+                m_combatDirective.IsActive() &&
+                m_combatDirective.anchorGuidLow != me->GetGUIDLow())
+            {
+                if (TeamPlay::ResolveCombatTarget(*this) != nullptr)
+                {
+                    m_assistPullHoldTicks = 0;   // assist resolvable — re-arm the hold for future engagements
+                }
+                else if (m_assistPullHoldTicks < AIBOT_ASSIST_PULL_HOLD_TICKS)
+                {
+                    ++m_assistPullHoldTicks;
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                        "[AIBOT-TEAMPLAY] %s: holding pull %u/%u — waiting for anchor %u to engage",
+                        me->GetName(), (uint32)m_assistPullHoldTicks, (uint32)AIBOT_ASSIST_PULL_HOLD_TICKS,
+                        m_combatDirective.anchorGuidLow);
+                    DoGrindPatrol();
+                    return;
+                }
+                // Dwell exhausted → solo pull below (anchor idle / distracted / stuck). The
+                // counter stays saturated so we don't re-hold camp after camp for a dead seam;
+                // it re-arms the moment an assist resolves (branch above), and B2 converges us
+                // mid-fight the instant the anchor does engage.
+            }
+            else
+            {
+                m_assistPullHoldTicks = 0;   // solo, filler/detour, or I AM the anchor — the gate never applies
+            }
+
             if (Unit* pGrindTarget = SelectGrindTarget())
             {
                 if (OverpullGuard(pGrindTarget))
@@ -968,10 +1023,27 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         "[AIBOT-PATH] %s: approach scan hit %s (entry=%u, %.0fyd) — handoff to GRIND",
                         me->GetName(), pMob->GetName(), m_currentTask.creatureEntry, me->GetDistance(pMob));
                     ConvertMoveToGrindInPlace();
+
+                    // [TEAMPLAY] Pull discipline (B3): the scan hit is the OTHER "group arrives
+                    // at a camp" moment. A follower with a live assist seam engages the ANCHOR'S
+                    // resolved victim if there is one (pile the shared mob, not our own scan hit);
+                    // with nothing resolvable it still converts to GRIND in place (above) but does
+                    // NOT self-pull — the grind dispatch's hold gate owns the wait from the very
+                    // next tick. Anchor / solo: byte-for-byte the old engage.
+                    Unit* pEngage = pMob;
+                    if (m_combatDirective.IsActive() &&
+                        m_combatDirective.anchorGuidLow != me->GetGUIDLow())
+                    {
+                        if (Unit* pAssist = TeamPlay::ResolveCombatTarget(*this))
+                            pEngage = pAssist;
+                        else
+                            return;   // follower, anchor not fighting yet → hold (grind gate next tick)
+                    }
+
                     // [OVERPULL] Same gate as the grind dispatch: convert to a local grind but
                     // don't dive a dense pack solo. The grind dispatch re-gates next tick.
-                    if (!OverpullGuard(pMob))
-                        AttackStart(pMob);
+                    if (!OverpullGuard(pEngage))
+                        AttackStart(pEngage);
                     return;
                 }
             }
@@ -1173,6 +1245,37 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
     else
     {
+        // [TEAMPLAY] Mid-combat convergence (B2, 2026-07-02) — the structural half of the
+        // focus-fire divergence. This valid-victim branch used to hold course unconditionally:
+        // SelectAttackTarget (the only path to the resolver) runs ONLY in the branch above,
+        // when the victim is dead/invalid/out-of-range — so a follower that solo-picked its
+        // own mob (the arrival fan-out, or an add) stayed on it for that mob's WHOLE LIFE and
+        // never once compared it to the anchor's. Divergence persisted until kill boundaries
+        // happened to coincide (the observed "may randomly tick into the same one"). Now an
+        // engaged follower re-checks the seam every tick and SWITCHES when the anchor's
+        // resolved victim differs. Gated to VISIBILITY_DISTANCE_SMALL: the resolver's own
+        // range gate is NORMAL (wider than this branch's validation range), and switching to
+        // a target the outer validation would reject next tick is a guaranteed flap loop.
+        // Stable by construction — once switched, pFocus == pVictim and this no-ops until
+        // the anchor genuinely retargets; the anchor itself gets nullptr from the resolver
+        // (self), so it is untouched and the team converges on IT.
+        if (m_combatDirective.IsActive())
+        {
+            if (Unit* pFocus = TeamPlay::ResolveCombatTarget(*this))
+            {
+                if (pFocus != pVictim &&
+                    pFocus->IsWithinDist(me, VISIBILITY_DISTANCE_SMALL) &&
+                    AttackStart(pFocus))
+                {
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                        "[AIBOT-TEAMPLAY] %s: converge %s -> %s (assist anchor %u)",
+                        me->GetName(), pVictim->GetName(), pFocus->GetName(),
+                        m_combatDirective.anchorGuidLow);
+                    return;
+                }
+            }
+        }
+
         if (!me->HasInArc(pVictim, 2 * M_PI_F / 3) && !me->IsMoving())
         {
             me->SetInFront(pVictim);
