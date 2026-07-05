@@ -220,6 +220,16 @@ bool AiBotAI::IsValidAssistTarget(Unit* pTarget) const
 // flees that still haven't broken it (bot on a no-navmesh tile — the water-spawn strand),
 // a hard NearTeleportTo to a known-good anchor (nav-seam outer point, else spawn).
 //
+// NO-VICTIM FIX (2026-07-03): me->GetVictim()==nullptr with the combat flag still set
+// (the ordinary ~5s tag-linger right after a kill, or any other transient gap) used to
+// fall into the SAME no-damage-either-way path as a genuine deadlock — botHp unchanged
+// (nobody's hitting us) read as "no damage moved," so a bot that just killed its last
+// target and has nothin0g left to fight would accumulate stalemate time and nudge
+// against guid 0 (confirmed live: Piv, 2026-07-03 — both observed nudges logged
+// "vs guid 0"). There is nothing to be deadlocked AGAINST with no victim, so bail
+// before the accumulator. This also stops those non-problems from burning the
+// Stage-1/Stage-2 escalation budget a genuine stuck-mob deadlock will want.
+//
 // Returns true when it acted this tick (caller must skip combat AI / return).
 // ============================================================
 bool AiBotAI::HandleCombatStalemate()
@@ -254,14 +264,23 @@ bool AiBotAI::HandleCombatStalemate()
     }
 
     Unit* pVictim = me->GetVictim();
+
+    // NO-VICTIM FIX — see header comment. Nothing to be deadlocked against; don't
+    // accumulate, don't nudge. m_lastHealth still tracks so a real fight starting next
+    // tick compares against fresh HP instead of a stale reading from before the gap.
+    if (!pVictim)
+    {
+        m_lastHealth = me->GetHealth();
+        return false;
+    }
+
     uint32 botHp = me->GetHealth();
-    uint32 vicHp = pVictim ? pVictim->GetHealth() : 0;
+    uint32 vicHp = pVictim->GetHealth();
 
     bool damageMoved = (botHp != m_lastHealth) ||
-                       (pVictim && m_lastVictimHealth != 0 && vicHp != m_lastVictimHealth);
+                       (m_lastVictimHealth != 0 && vicHp != m_lastVictimHealth);
     m_lastHealth = botHp;
-    if (pVictim)
-        m_lastVictimHealth = vicHp;
+    m_lastVictimHealth = vicHp;
 
     // Damage flowing either way → genuine fight. Respect it (and clear the disengage
     // counter — a real fight means we are NOT stalemate-locked).
@@ -275,7 +294,7 @@ bool AiBotAI::HandleCombatStalemate()
     }
 
     // No damage either way — anchor the stalemate target once, then accumulate.
-    if (m_stalemateVictim.IsEmpty() && pVictim)
+    if (m_stalemateVictim.IsEmpty())
         m_stalemateVictim = pVictim->GetObjectGuid();
 
     m_stalemateMs += AIBOT_UPDATE_INTERVAL;
@@ -415,27 +434,40 @@ bool AiBotAI::HandleCombatStalemate()
     return true;
 }
 
-// Overpull discipline — solo bots must not bum-rush dense packs / respawn fields.
-// OverpullGuard gates the PULL (don't engage a target buried in a cluster while solo);
-// HandleOverpullRetreat is the in-combat BACKSTOP (bail when too many end up on us).
-// Both reuse CountNearbyHostiles / me->GetAttackers() — primitives already in the file.
- 
+// ════════════════════════════════════════════════════════════════════════════════════════
+// AiBotAICombat.cpp — FUNCTION REPLACEMENT (2026-07-05)
+//
+// ONE function changes in this 1900-line TU: OverpullGuard.
+//
+// WHY: the old guard self-disabled when grouped ("let the pack absorb density") — written
+// when every member pulled independently and a pre-pull cap on one bot meant nothing. Under
+// the one-picker doctrine (AiBotDoctrineTeam.cpp, same date) the ANCHOR's pull is the TEAM's
+// pull: followers never self-acquire, so the anchor diving a target buried in a dense cluster
+// commits the whole trio — the 23-kobold Fargodeep camp dive from the 2026-07-04 death
+// forensics. The anchor now respects the GROUP density cap (AIBOT_OVERPULL_GROUP, 6) before
+// engaging; the in-combat HandleOverpullRetreat backstop is unchanged. Followers still hit
+// this via HoldPull, harmlessly — they have no autonomous pulls left to veto.
+// ════════════════════════════════════════════════════════════════════════════════════════
+
 bool AiBotAI::OverpullGuard(Unit* target) const
 {
     if (!target)
         return false;
-    if (me->GetGroup())
-        return false;   // grouped: let the pack absorb density (group caps are higher)
 
     // Neutral TARGET: attacking it doesn't proximity-aggro the field (no cascade), so the cluster
-    // depth is irrelevant — it's always safe to pull solo. Only a reaction-hostile target risks the
+    // depth is irrelevant — it's always safe to pull. Only a reaction-hostile target risks the
     // bum-rush. (As with CountNearbyHostiles, same-faction social-assist is the lone residue, deferred.)
     if (!me->IsHostileTo(target))
         return false;
 
-    // Solo: count the OTHER will-aggro hostiles clustered with the target — that's what wakes when we
-    // pull it. More than the solo cap = a bum-rush; hold instead of diving in.
-    return CountNearbyHostiles(target, AIBOT_PULL_DENSITY_RADIUS) > AIBOT_OVERPULL_SOLO;
+    // Count the OTHER will-aggro hostiles clustered with the target — that's what wakes when we
+    // pull it. Solo cap for a solo bot; the GROUP cap for a grouped one (2026-07-05: no longer a
+    // grouped no-op — under the one-picker doctrine the anchor's pull commits the whole team, so
+    // the team-sized density cap must gate it. A camp denser than the cap = hold + patrol instead
+    // of diving in; the C# grind-lock wall clock relocates a team parked against an un-pullable
+    // field, so a hold here can never wedge the group forever).
+    uint32 const cap = me->GetGroup() ? AIBOT_OVERPULL_GROUP : AIBOT_OVERPULL_SOLO;
+    return CountNearbyHostiles(target, AIBOT_PULL_DENSITY_RADIUS) > cap;
 }
 
 bool AiBotAI::HandleOverpullRetreat()
@@ -537,19 +569,11 @@ bool AiBotAI::AttackStart(Unit* pVictim)
 
 Unit* AiBotAI::SelectAttackTarget(Unit* pExcept) const
 {
-    // [TEAMPLAY] Group focus-fire seam (in-combat re-pick path). When a combat directive is
-    // live (assist mode), focus the anchor's victim instead of our own nearest-threat pick.
-    // Inactive (solo, OR grouped-but-unstamped) → resolver returns null → the existing
-    // selection below runs byte-for-byte. The pExcept guard preserves this method's contract
-    // (never return the unit the caller is switching away from), so the seam cannot misroute.
-    if (m_combatDirective.IsActive())
-    {
-        if (Unit* t = TeamPlay::ResolveCombatTarget(*this))
-        {
-            if (t != pExcept)
-                return t;
-        }
-    }
+    // [DOCTRINE] SelectAttackTarget is now the PURE solo re-pick. The group focus-fire override
+    // that used to prefix it here moved into the TeamAuto doctrine's MaintainTarget
+    // (AiBotDoctrineTeam.cpp) — the single in-combat target authority — so this method runs only
+    // as the Solo / defer fallback. The pExcept contract (never return the unit the caller is
+    // switching away from) is unchanged for that solo path.
 
     // 1. Check units we are currently in combat with.
 

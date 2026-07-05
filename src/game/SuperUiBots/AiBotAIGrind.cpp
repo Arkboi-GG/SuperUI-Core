@@ -11,6 +11,21 @@
  * SelectGrindTarget, so it stays in this TU). All other definitions are members of
  * AiBotAI and link across the sibling TUs transparently; cross-TU members called from
  * here (ClearStoredPath) live in AiBotAIMovement.cpp.
+ *
+ * 2026-07-05 (chain queue + level band, pairs with AiBotDoctrineTeam.cpp v3):
+ *   - SelectGrindTarget gains `Unit* pExcept` (default nullptr in the header declaration —
+ *     every existing call site compiles untouched). The TeamAuto doctrine's mid-fight
+ *     next-target election passes the CURRENT victim here so the scan can pre-elect the
+ *     mob AFTER this one; without the exclusion the scan just hands back the mob already
+ *     being killed and the chain queue never fills. Excluded at every pick site: the
+ *     aggro-list scan, the objective ring/filler picker, and the indefinite-grind loop.
+ *   - Priority 2b (indefinite grind) gains the LEVEL-BAND PREFERENCE (Nico, 2026-07-04:
+ *     "level appropriate, preferably +-1, maybe 2 levels"): within the valid set the scan
+ *     now prefers the nearest mob in [L-2, L+1] and only reaches for the L+2..L+3
+ *     stragglers when the preferred band is empty. The hard skips are unchanged (grey
+ *     below, > L+AIBOT_GRIND_HIGH_OFFSET above). This matters double under the one-picker
+ *     doctrine: the anchor's pick is now the whole TEAM's fight, so its default diet
+ *     should be the comfortable band, with orange-red only as the last resort.
  */
 
 #include "AiBotAIMain.h"
@@ -54,7 +69,7 @@
 // centers. Counts alive, hostile, untapped creatures within
 // `radius` of the candidate — excluding the candidate itself.
 // ============================================================
- 
+
 uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
 {
     if (!pCandidate || !pCandidate->IsAlive())
@@ -103,15 +118,21 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
 //    now match m_currentTask.MatchesObjectiveEntry(...) — the primary dispatched entry
 //    OR any tied item-drop alternate — instead of exact-equality on creatureEntry alone.
 //    Priority 2a's ring scan also queries every non-zero alternate entry per rung, not
-//    just the primary, merging results before picking. Priority 2b is untouched by this
-//    pass — it's already entry-agnostic (creatureEntry==0, kill anything hostile).)
+//    just the primary, merging results before picking.)
+//   (2026-07-05 — pExcept + level band: see the file header. pExcept is the chain queue's
+//    exclusion — the doctrine pre-elects the NEXT target mid-fight by passing the current
+//    victim here; every pick site skips it. Priority 2b prefers [L-2, L+1] before the
+//    L+2..L+3 stragglers.)
 //
-// 2b directive: find the NEAREST mob that is a real XP kill, and kill it; rescan; repeat.
+// 2b directive: find the NEAREST mob that is a real XP kill — preferring the comfortable
+// band — and kill it; rescan; repeat.
 //   - skip CREATURE_TYPE_CRITTER (8)  → no more chicken / sheep / cow farms (0 XP)
 //   - skip grey (level <= gray)        → no XP, not worth a swing
 //   - skip > L+AIBOT_GRIND_HIGH_OFFSET → don't suicide on a red (an L7 in Westfall finds
 //                                        NOTHING valid → no kills → C# breaker hearths it out)
-//   - pure NEAREST: no density penalty, no center leash (bot-centric scan to
+//   - PREFER [L-2, L+1]                → the team's default diet; L+2..L+3 only when the
+//                                        preferred band is empty within the scan radius
+//   - NEAREST within its tier: no density penalty, no center leash (bot-centric scan to
 //                   AIBOT_GRIND_SCAN_YARDS). Chasing a valid mob a little further IS progress.
 // ============================================================================
 
@@ -125,19 +146,22 @@ static uint32 AiBotGrayLevel(uint32 plLevel)
     return plLevel - 9;
 }
 
-Unit* AiBotAI::SelectGrindTarget() const
+// Level-band preference for the indefinite grind (2026-07-05). File-local — only 2b reads
+// them, and the hard ceiling stays AIBOT_GRIND_HIGH_OFFSET in the shared header.
+static uint32 const AIBOT_GRIND_PREF_LOW  = 2;   // preferred band floor: L - 2 (clamped above grey)
+static uint32 const AIBOT_GRIND_PREF_HIGH = 1;   // preferred band ceiling: L + 1
+
+Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
 {
     if (m_currentTask.type != TASK_GRIND)
         return nullptr;
 
-    // [TEAMPLAY] Group focus-fire seam (grind-path entry). A grouped escort's grind target is
-    // overridden to the anchor's victim when an assist directive is live, so the team piles one
-    // mob instead of each escort fanning to its own nearest. Inactive → null → the existing
-    // priority scan below runs byte-for-byte. (Kill-counting still goes through UpdateAI's
-    // MatchesObjectiveEntry check — primary or any tied alternate, wolf-meat fix 2026-06-30.)
-    if (m_combatDirective.IsActive())
-        if (Unit* t = TeamPlay::ResolveCombatTarget(*this))
-            return t;
+    // [DOCTRINE] SelectGrindTarget is now the PURE solo priority scan. The group focus-fire
+    // override that used to prefix it here moved into the TeamAuto doctrine's AcquireTarget
+    // (AiBotDoctrineTeam.cpp), the single owner of group-fight decisions — so this method is
+    // doctrine-agnostic shared scan machinery that both Solo and TeamAuto call into. The
+    // doctrine's chain queue calls it WITH pExcept = the current victim (pre-elect the mob
+    // after this one); every other caller passes nothing and gets the old behaviour exactly.
 
     float const AGGRO_PENALTY = 15.0f;
 
@@ -154,7 +178,8 @@ Unit* AiBotAI::SelectGrindTarget() const
         {
             if (Unit* pTarget = pRef->getSourceUnit())
             {
-                if (IsValidHostileTarget(pTarget) &&
+                if (pTarget != pExcept &&
+                    IsValidHostileTarget(pTarget) &&
                     !IsCombatIgnored(pTarget->GetGUIDLow()) &&
                     me->IsWithinDist(pTarget, bestDist))
                 {
@@ -181,13 +206,16 @@ Unit* AiBotAI::SelectGrindTarget() const
     // Scores a creature list against the BOT and returns the best (lowest score).
     // score = distance-from-bot + 15*nearbyHostiles → prefers isolated mobs, walks
     // a little further to dodge a pack center. Filters: alive / valid-hostile /
-    // untapped-by-others / not combat-ignored. LOS only enforced when requireLos.
+    // untapped-by-others / not combat-ignored / not the chain-queue exclusion.
+    // LOS only enforced when requireLos.
     auto pickBest = [&](std::list<Creature*> const& list, float maxDist, bool requireLos) -> Unit*
     {
         float bestScore = 99999.0f;
         Creature* best = nullptr;
         for (Creature* c : list)
         {
+            if (c == pExcept)
+                continue;
             if (!c->IsAlive())
                 continue;
             if (!IsValidHostileTarget(c))
@@ -219,6 +247,8 @@ Unit* AiBotAI::SelectGrindTarget() const
     // dropped (we path to the spawn — we don't need to see it). First ring with a
     // hit wins; all four dry → fall through to filler/patrol. Gated to entry!=0 so
     // the kill-anything grind below keeps its tight 50y leash (no drift, Issue 4).
+    // NO level-band preference here: an objective entry is what the quest names,
+    // and the server only credits that exact entry (or a shipped tied alternate).
     if (m_currentTask.creatureEntry != 0)
     {
         // Scan entries: the primary dispatched objective + any tied item-drop alternates
@@ -270,22 +300,31 @@ Unit* AiBotAI::SelectGrindTarget() const
     }
 
     // ── Priority 2b: INDEFINITE grind — NEAREST LEVEL-APPROPRIATE XP MOB (bot-centric) ──
-    // The directive, literally: nearest mob that gives XP → kill it → rescan. No density
-    // scoring, no center leash. Skip critters (type 8) and grey (no XP) so the bot never
-    // farms chickens/sheep; skip > L+HIGH so an L7 doesn't dive a red (it instead finds
-    // nothing valid → no real kills → the C# no-progress breaker relocates/hearths it).
+    // The directive, literally: nearest mob that gives XP → kill it → rescan — PREFERRING
+    // the comfortable band [L-2, L+1] and reaching for L+2..L+3 only when the band is empty
+    // (2026-07-05: under the one-picker doctrine this scan feeds the whole team, so its
+    // default diet must be the band, not whatever orange happens to stand closest). No
+    // density scoring, no center leash. Skip critters (type 8) and grey (no XP) so the bot
+    // never farms chickens/sheep; skip > L+HIGH so an L7 doesn't dive a red (it instead
+    // finds nothing valid → no real kills → the C# no-progress breaker relocates/hearths it).
     uint32 const myLevel   = me->GetLevel();
     uint32 const grayLevel = AiBotGrayLevel(myLevel);
+    uint32 const prefLow   = std::max(grayLevel + 1,
+                                      myLevel > AIBOT_GRIND_PREF_LOW ? myLevel - AIBOT_GRIND_PREF_LOW : 1u);
+    uint32 const prefHigh  = myLevel + AIBOT_GRIND_PREF_HIGH;
 
     std::list<Unit*> targets;
     MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck u_check(me, me, AIBOT_GRIND_SCAN_YARDS);
     MaNGOS::UnitListSearcher<MaNGOS::AnyUnfriendlyUnitInObjectRangeCheck> searcher(targets, u_check);
     Cell::VisitAllObjects(me, searcher, AIBOT_GRIND_SCAN_YARDS);
 
-    float bestDist = 99999.0f;
-    Creature* bestTarget = nullptr;
+    float bestPrefDist = 99999.0f, bestFallDist = 99999.0f;
+    Creature* bestPref = nullptr;
+    Creature* bestFall = nullptr;
     for (Unit* pUnit : targets)
     {
+        if (pUnit == pExcept)
+            continue;
         if (!pUnit->IsCreature())
             continue;
         Creature* c = static_cast<Creature*>(pUnit);
@@ -314,14 +353,22 @@ Unit* AiBotAI::SelectGrindTarget() const
             continue;
 
         float d = me->GetDistance(c);
-        if (d < bestDist)
+        if (cl >= prefLow && cl <= prefHigh)
         {
-            bestDist = d;
-            bestTarget = c;
+            if (d < bestPrefDist)
+            {
+                bestPrefDist = d;
+                bestPref = c;
+            }
+        }
+        else if (d < bestFallDist)
+        {
+            bestFallDist = d;
+            bestFall = c;
         }
     }
 
-    return bestTarget;
+    return bestPref ? bestPref : bestFall;
 }
 
 

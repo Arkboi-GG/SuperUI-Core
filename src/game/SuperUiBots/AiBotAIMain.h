@@ -46,6 +46,7 @@
 #include "Timer.h"
 #include "Log.h"
 #include "PathFinder.h"   // Vector3, PointsArray — needed for SmoothPathCorners' signature
+#include "AiBotDoctrine.h" // [DOCTRINE] IEngagementDoctrine + ResolveDoctrine/MakeDoctrine (Layer D)
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -385,6 +386,10 @@ public:
     Player* GetBotPlayer() const { return me; }
     bool    IsValidAssistTarget(Unit* pTarget) const;
 
+    // [DOCTRINE] Re-resolve + swap m_doctrine for the current combat state (§2.2). Called once
+    // per behaviour tick at the top of UpdateAI, before any acquisition/combat decision.
+    void    RefreshDoctrine();
+
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---
     void UpdateInCombatAI() override;
     void UpdateOutOfCombatAI() override;
@@ -420,7 +425,7 @@ public:
     void BridgeHandleSetTask(const char* json);
     void BridgeHandleCombatDirective(const char* json);   // [TEAMPLAY] group focus-fire stamp
     void DoGrindPatrol();
-    Unit* SelectGrindTarget() const;
+   Unit* SelectGrindTarget(Unit* pExcept = nullptr) const;
 
     // --- §4 objective approach: enrich MOVE_TO → hand off to GRIND in place ---
     // ScanApproachTarget scans for m_currentTask.creatureEntry around the BOT (no
@@ -504,25 +509,14 @@ public:
     // so the combat seam is a provable no-op unless the coordinator stamps it.
     CombatDirective m_combatDirective;
 
-    // [TEAMPLAY] Sticky-assist memo (2026-07-02) — the follower's own memory of the last
-    // mob it assisted, so ResolveCombatTarget can bridge the anchor's between-kill gaps
-    // instead of yielding to solo-pick every time GetVictim() is momentarily null. This is
-    // cache/memo state, not task/execution state — it doesn't move the bot, touch the wire,
-    // or affect anything outside the resolver's own next call — so it's `mutable` and written
-    // through TeamPlay's `AiBotAI const&`, rather than relaxing the resolver's constness or
-    // routing the write back through AiBotAI's own (non-const) call sites. See
-    // AiBotAITeamPlay.cpp for the read/write logic; nothing else on this class touches these.
-    mutable ObjectGuid m_lastAssistedVictimGuid;
-    mutable uint8 m_assistStickyTicks = 0;
-
-    // [TEAMPLAY] Pull-discipline dwell (B3, 2026-07-02) — consecutive grind dispatches this
-    // FOLLOWER has HELD waiting for the anchor to engage (see AIBOT_ASSIST_PULL_HOLD_TICKS
-    // above for the full rationale). Unlike the resolver's memo this is driven by UpdateAI's
-    // own (non-const) grind dispatch, so it is a plain member, not `mutable`: incremented on
-    // each held dispatch, reset whenever an assist actually resolves or the seam doesn't
-    // apply (solo / I am the anchor / filler-detour grind). Nothing outside UpdateAI's
-    // TASK_GRIND block touches it.
-    uint8 m_assistPullHoldTicks = 0;
+    // [DOCTRINE] The active engagement doctrine (Layer D) — Solo / TeamAuto / Directed. One
+    // instance owned by the bot, re-resolved each behaviour tick by RefreshDoctrine() and
+    // swapped only when the kind changes. ALL group-fight transient state — the sticky-assist
+    // memo and the B3 pull-hold counter that used to live here as members — now lives ON the
+    // TeamAuto instance (AiBotDoctrineTeam.cpp), so a mode swap resets it by construction. The
+    // in-combat target authority, OOC acquisition, and pull discipline all route through it.
+    std::unique_ptr<IEngagementDoctrine> m_doctrine;
+    DoctrineKind m_doctrineKind = DoctrineKind::Solo;
 
     // --- Victim Tracking ---
     uint32 m_lastVictimEntry = 0;

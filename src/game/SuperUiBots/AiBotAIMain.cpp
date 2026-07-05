@@ -437,6 +437,24 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
 // resolver, so the arrival fan-out persisted until kill boundaries coincided by luck).
 // ============================================================
 
+// [DOCTRINE] Re-resolve the engagement doctrine for the current combat state and swap the
+// instance only when the kind changes (so TeamAuto's sticky memo + pull-hold counter reset by
+// construction on a mode switch). Cheap; called once per behaviour tick from UpdateAI.
+void AiBotAI::RefreshDoctrine()
+{
+    DoctrineKind const kind = ResolveDoctrine(*this);
+    if (!m_doctrine || kind != m_doctrineKind)
+    {
+        char const* from = m_doctrine ? m_doctrine->Name() : "(none)";
+        m_doctrine = MakeDoctrine(kind);
+        m_doctrineKind = kind;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-DOCTRINE] %s: %s -> %s%s",
+            me ? me->GetName() : "?", from, m_doctrine ? m_doctrine->Name() : "?",
+            m_combatDirective.IsActive() ? " (directive active)" : "");
+    }
+}
+
 void AiBotAI::UpdateAI(uint32 const diff)
 {
     // Handle pending teleports from base class
@@ -469,6 +487,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
             it = m_combatIgnore.erase(it);
         else { it->second -= AIBOT_UPDATE_INTERVAL; ++it; }
     }
+
+    // [DOCTRINE] Resolve which engagement doctrine governs this tick (Solo / TeamAuto / Directed)
+    // and swap on change, before any acquisition or combat decision below consults m_doctrine.
+    RefreshDoctrine();
 
     // --- Bridge: connect + recv + periodic state ---
     if (!m_bridgeConnected)
@@ -889,89 +911,40 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // --- TASK_GRIND: proactive pull or patrol ---
         if (m_currentTask.type == TASK_GRIND)
         {
-            // An entry==0 grind is "kill whatever's nearest": the indefinite filler (Goal.Grinding,
-            // killGoal==0) OR the C# unstick detour (killGoal==1). It is logged distinctly below, but
-            // BOTH grind modes now self-unstick a dense field (see the freeze-escape block) — the
-            // objective grind no longer hands overpull_dwell back to C#.
-            bool const fillerOrDetour = (m_currentTask.creatureEntry == 0);
-
-            // [TEAMPLAY] Pull discipline (B3, 2026-07-02) — the fresh-engagement seeding gap.
-            // The sticky-assist memo (v1.1) bridges gaps in an EXISTING assist; it structurally
-            // cannot create the first one: when the group arrives at a camp nobody is fighting,
-            // every follower's resolver yields (anchor victim null, sticky empty), and each
-            // member solo-pulls its own nearest simultaneously — the arrival fan-out behind the
-            // observed "each bot on its own mob". So: a FOLLOWER whose assist directive is live
-            // but unresolvable HOLDS its pull for a bounded dwell, letting the ANCHOR pull first;
-            // the resolver then hands everyone the anchor's victim (SelectGrindTarget's weave +
-            // the B2 convergence below). Scoped to OBJECTIVE grinds only (!fillerOrDetour): the
-            // C# unstick detour (entry=0 killGoal=1) must land its kill NOW, and the indefinite
-            // filler runs when the group has deliberately scattered (GroupOrder.None) — holding
-            // either would be wrong. The anchor itself is exempt (it must pull), and dwell expiry
-            // falls through to a solo pull so an idle/distracted anchor can never starve the
-            // team. The counter re-arms only when an assist actually resolves — a permanently
-            // idle anchor costs ONE dwell total, not one per camp. Sits HERE at the dispatch
-            // site, never inside SelectGrindTarget, so a hold can never bump m_grindFreezeStreak
-            // or fire a false GRIND_BLOCKED|no_target handback.
-            if (!fillerOrDetour &&
-                m_combatDirective.IsActive() &&
-                m_combatDirective.anchorGuidLow != me->GetGUIDLow())
+            // [DOCTRINE] Acquisition + pull discipline are the doctrine's; the freeze / GRIND_BLOCKED
+            // / patrol bookkeeping stays here in the spine. AcquireTarget returns the mob to pull, or
+            // nullptr to hold/patrol. A nullptr that is a DELIBERATE TeamAuto wait-for-anchor hold (B3
+            // — a follower letting the anchor pull first) is flagged by HoldingForTeam(): patrol
+            // WITHOUT a freeze tick, so a hold can never bump m_grindFreezeStreak or fire a false
+            // GRIND_BLOCKED|no_target. Solo returns its priority scan; the anchor / filler-detour /
+            // dwell-expired follower all fall through to a real pull. (The whole group-fight decision
+            // — resolver-first, the B3 dwell + its counter, sticky — now lives in AiBotDoctrineTeam.)
+            if (Unit* pGrindTarget = m_doctrine->AcquireTarget(*this))
             {
-                if (TeamPlay::ResolveCombatTarget(*this) != nullptr)
-                {
-                    m_assistPullHoldTicks = 0;   // assist resolvable — re-arm the hold for future engagements
-                }
-                else if (m_assistPullHoldTicks < AIBOT_ASSIST_PULL_HOLD_TICKS)
-                {
-                    ++m_assistPullHoldTicks;
-                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT-TEAMPLAY] %s: holding pull %u/%u — waiting for anchor %u to engage",
-                        me->GetName(), (uint32)m_assistPullHoldTicks, (uint32)AIBOT_ASSIST_PULL_HOLD_TICKS,
-                        m_combatDirective.anchorGuidLow);
-                    DoGrindPatrol();
-                    return;
-                }
-                // Dwell exhausted → solo pull below (anchor idle / distracted / stuck). The
-                // counter stays saturated so we don't re-hold camp after camp for a dead seam;
-                // it re-arms the moment an assist resolves (branch above), and B2 converges us
-                // mid-fight the instant the anchor does engage.
-            }
-            else
-            {
-                m_assistPullHoldTicks = 0;   // solo, filler/detour, or I AM the anchor — the gate never applies
-            }
-
-            if (Unit* pGrindTarget = SelectGrindTarget())
-            {
-                if (OverpullGuard(pGrindTarget))
+                if (m_doctrine->HoldPull(*this, pGrindTarget))
                 {
                     ++m_grindFreezeStreak;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT-OVERPULL] %s: holding (%u/%u) — target %s in %u-deep cluster (solo cap %u)%s",
+                        "[AIBOT-OVERPULL] %s: holding (%u/%u) — target %s in %u-deep cluster (solo cap %u) [will self-unstick]",
                         me->GetName(), m_grindFreezeStreak, AIBOT_GRIND_FREEZE_DWELL,
                         pGrindTarget->GetName(),
-                        CountNearbyHostiles(pGrindTarget, AIBOT_PULL_DENSITY_RADIUS), AIBOT_OVERPULL_SOLO,
-                        " [will self-unstick]");
+                        CountNearbyHostiles(pGrindTarget, AIBOT_PULL_DENSITY_RADIUS), AIBOT_OVERPULL_SOLO);
 
                     if (m_grindFreezeStreak >= AIBOT_GRIND_FREEZE_DWELL)
                     {
                         m_grindFreezeStreak = 0;
 
-                        // Self-unstick BOTH grind modes. The objective grind USED to hand back
-                        // GRIND_BLOCKED|overpull_dwell so C# could "resync + re-derive" — but the brain
-                        // ALWAYS answers overpull_dwell with a forced single-kill detour, then re-issues
-                        // the SAME objective, which re-freezes against the SAME dense field. Net effect:
-                        // a quest-mob camp gets ground one kill per ~3s C# roundtrip, and once the fail/
-                        // deadline machinery trips, the bot shelves the quest and wanders off to easier
-                        // work — beside an ocean of perfectly valid mobs (the kobold-camp livelock). A
-                        // dense field of QUEST mobs is exactly where we want to grind, so take the pull
-                        // right here, same as the filler/detour path already does: SelectGrindTarget
-                        // handed us the LEAST-clustered candidate (its density score), HandleOverpullRetreat
-                        // stays the in-combat backstop if too many pile on, and a field that genuinely
-                        // can't be killed still trips the C# 120s no-kill deadline → durable shelve.
+                        // Self-unstick: the objective grind USED to hand back GRIND_BLOCKED|overpull_dwell
+                        // so C# could "resync + re-derive" — but the brain ALWAYS answered with a forced
+                        // single-kill detour + re-issue of the SAME objective, re-freezing on the SAME
+                        // dense field (the kobold-camp livelock). A dense field of QUEST mobs is exactly
+                        // where we want to grind, so take the pull right here: HoldPull handed us the
+                        // least-clustered candidate, HandleOverpullRetreat is the in-combat backstop if too
+                        // many pile on, and a field that genuinely can't be killed still trips the C# 120s
+                        // no-kill deadline → durable shelve.
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                            "[AIBOT-OVERPULL] %s: freeze-escape — self-unstick pull of %s (bypassing cap, %s)",
-                            me->GetName(), pGrindTarget->GetName(),
-                            fillerOrDetour ? "filler/detour" : "objective");
+                            "[AIBOT-OVERPULL] %s: freeze-escape — self-unstick pull of %s (bypassing cap)",
+                            me->GetName(), pGrindTarget->GetName());
                         AttackStart(pGrindTarget);
                         return;
                     }
@@ -986,9 +959,17 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 return;
             }
 
-            // No valid target this tick. Only an OBJECTIVE grind (entry!=0) hands back (quest mobs all
-            // dead/tapped → C# resyncs + detours). An entry==0 grind just patrols: a filler with no mobs
-            // is GrindPlanner's no-kills→reselect job, and a detour with no mob rides its own WAIT deadline.
+            // AcquireTarget returned nullptr. If that was a deliberate wait-for-anchor hold (B3),
+            // patrol and DO NOT count a freeze — the doctrine is choosing to wait, not stuck.
+            if (m_doctrine->HoldingForTeam())
+            {
+                DoGrindPatrol();
+                return;
+            }
+
+            // Genuinely no valid target this tick. Only an OBJECTIVE grind (entry!=0) hands back (quest
+            // mobs all dead/tapped → C# resyncs + detours). An entry==0 grind just patrols: a filler with
+            // no mobs is GrindPlanner's no-kills→reselect job, and a detour rides its own WAIT deadline.
             if (m_currentTask.creatureEntry != 0)
             {
                 if (++m_grindFreezeStreak >= AIBOT_GRIND_FREEZE_DWELL)
@@ -1024,25 +1005,24 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         me->GetName(), pMob->GetName(), m_currentTask.creatureEntry, me->GetDistance(pMob));
                     ConvertMoveToGrindInPlace();
 
-                    // [TEAMPLAY] Pull discipline (B3): the scan hit is the OTHER "group arrives
-                    // at a camp" moment. A follower with a live assist seam engages the ANCHOR'S
-                    // resolved victim if there is one (pile the shared mob, not our own scan hit);
-                    // with nothing resolvable it still converts to GRIND in place (above) but does
-                    // NOT self-pull — the grind dispatch's hold gate owns the wait from the very
-                    // next tick. Anchor / solo: byte-for-byte the old engage.
+                    // [DOCTRINE] The scan hit is the OTHER "group arrives at a camp" moment. A
+                    // TeamAuto follower piles the ANCHOR'S resolved victim if there is one (via the
+                    // doctrine's target authority), or HOLDS if the anchor isn't fighting yet — the
+                    // grind dispatch's wait-for-anchor owns the wait from the very next tick. Solo /
+                    // anchor: engage the scan hit under the pull veto, byte-for-byte the old engage.
                     Unit* pEngage = pMob;
                     if (m_combatDirective.IsActive() &&
                         m_combatDirective.anchorGuidLow != me->GetGUIDLow())
                     {
-                        if (Unit* pAssist = TeamPlay::ResolveCombatTarget(*this))
+                        if (Unit* pAssist = m_doctrine->MaintainTarget(*this, nullptr))
                             pEngage = pAssist;
                         else
                             return;   // follower, anchor not fighting yet → hold (grind gate next tick)
                     }
 
-                    // [OVERPULL] Same gate as the grind dispatch: convert to a local grind but
+                    // [OVERPULL] Same veto as the grind dispatch: convert to a local grind but
                     // don't dive a dense pack solo. The grind dispatch re-gates next tick.
-                    if (!OverpullGuard(pEngage))
+                    if (!m_doctrine->HoldPull(*this, pEngage))
                         AttackStart(pEngage);
                     return;
                 }
@@ -1225,6 +1205,19 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
         }
 
+        // [DOCTRINE] Target authority on reselect (the flap fix). TeamAuto returns the anchor's
+        // mob and the follower COMMITS to it — even if it's the same mob we just "lost" for
+        // drifting past VISIBILITY_DISTANCE_SMALL (we were lagging; AttackStart re-chases and the
+        // ChaseMovementGenerator closes the gap). No pExcept exclusion of the anchor's mob, and no
+        // "not hitting me → drop" bail for a mob the anchor is tanking — those two, plus the SMALL
+        // drop, are what produced the A/B/A/B flap. Solo / defer → nullptr → the legacy solo pick
+        // + drop below run byte-for-byte. (Kill-credit above already ran regardless.)
+        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))
+        {
+            AttackStart(pFocus);
+            return;
+        }
+
         if (Unit* pNewVictim = SelectAttackTarget(pVictim))
         {
             if (pVictim != pNewVictim)
@@ -1245,34 +1238,21 @@ void AiBotAI::UpdateAI(uint32 const diff)
     }
     else
     {
-        // [TEAMPLAY] Mid-combat convergence (B2, 2026-07-02) — the structural half of the
-        // focus-fire divergence. This valid-victim branch used to hold course unconditionally:
-        // SelectAttackTarget (the only path to the resolver) runs ONLY in the branch above,
-        // when the victim is dead/invalid/out-of-range — so a follower that solo-picked its
-        // own mob (the arrival fan-out, or an add) stayed on it for that mob's WHOLE LIFE and
-        // never once compared it to the anchor's. Divergence persisted until kill boundaries
-        // happened to coincide (the observed "may randomly tick into the same one"). Now an
-        // engaged follower re-checks the seam every tick and SWITCHES when the anchor's
-        // resolved victim differs. Gated to VISIBILITY_DISTANCE_SMALL: the resolver's own
-        // range gate is NORMAL (wider than this branch's validation range), and switching to
-        // a target the outer validation would reject next tick is a guaranteed flap loop.
-        // Stable by construction — once switched, pFocus == pVictim and this no-ops until
-        // the anchor genuinely retargets; the anchor itself gets nullptr from the resolver
-        // (self), so it is untouched and the team converges on IT.
-        if (m_combatDirective.IsActive())
+        // [DOCTRINE] Mid-combat convergence via the single target authority. TeamAuto returns the
+        // anchor's mob; a follower SWITCHES to it and commits. There is NO VISIBILITY_DISTANCE_SMALL
+        // gate here anymore — that gate (narrower than the doctrine's own NORMAL range check) is
+        // exactly what made a lagging follower flap A/B/A/B, switching to a mob the outer validation
+        // would reject the very next tick. Committing without it, the ChaseMovementGenerator closes
+        // the gap. Solo / defer → nullptr → hold course exactly as before; the anchor gets nullptr
+        // from the resolver (self), so it is untouched and the team converges on IT.
+        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))
         {
-            if (Unit* pFocus = TeamPlay::ResolveCombatTarget(*this))
+            if (pFocus != pVictim && AttackStart(pFocus))
             {
-                if (pFocus != pVictim &&
-                    pFocus->IsWithinDist(me, VISIBILITY_DISTANCE_SMALL) &&
-                    AttackStart(pFocus))
-                {
-                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT-TEAMPLAY] %s: converge %s -> %s (assist anchor %u)",
-                        me->GetName(), pVictim->GetName(), pFocus->GetName(),
-                        m_combatDirective.anchorGuidLow);
-                    return;
-                }
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-DOCTRINE] %s: converge %s -> %s (%s)",
+                    me->GetName(), pVictim->GetName(), pFocus->GetName(), m_doctrine->Name());
+                return;
             }
         }
 

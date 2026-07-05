@@ -199,6 +199,10 @@ set (game_SRCS
     SuperUiBots/AiBotAIGrind.cpp
     SuperUiBots/AiBotAIBridge.cpp
     SuperUiBots/AiBotAITeamPlay.cpp
+    SuperUiBots/AiBotDoctrine.cpp
+    SuperUiBots/AiBotDoctrineSolo.cpp
+    SuperUiBots/AiBotDoctrineTeam.cpp
+    SuperUiBots/AiBotDoctrineDirected.cpp
     SuperUiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiBots/Movement/AiBotPathSmoothing.cpp
     PlayerBots/BattleBotWaypoints.cpp
