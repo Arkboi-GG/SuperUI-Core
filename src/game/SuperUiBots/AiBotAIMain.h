@@ -128,6 +128,21 @@
 #define AIBOT_GRIND_SCAN_YARDS   100.0f  // indefinite grind: bot-centric scan radius for the nearest valid XP mob
 #define AIBOT_GRIND_HIGH_OFFSET  3       // …skip a mob more than this many levels above the bot (no red suicide)
 #define AIBOT_GRIND_FREEZE_DWELL    3      // consecutive frozen grind ticks (~1s each) — over-cap veto OR no valid target — before handing back to C# (GRIND_BLOCKED). ~3s, fast vs the old 8-hold dwell.
+// Fight-initiation discipline + recovery hysteresis (2026-07-05, solo death reduction).
+// The OLD eat gate was a one-way threshold: with an active task, DrinkAndEat was reachable
+// only below 40% HP / 20% mana — so the loop RELEASED the bot back into the grind at
+// 41%/21%, every time. A tasked bot lived permanently in the 40-60% band (the fight-losing
+// band; any add = death), and a caster re-pulled at 21% mana as a melee caster. The latch
+// (m_eatRecoveryLatch) turns the threshold into hysteresis: enter at the floor, hold until
+// genuinely restored — the exact shape the C# rez heal proved (RezHealTarget 0.95/0.85).
+// The PULL floor gates fight INITIATION only; defense at any HP is untouched.
+#define AIBOT_EAT_ENTER_HP    40.0f   // dip below → recovery latch ON (the old one-way gate value)
+#define AIBOT_EAT_ENTER_MANA  20.0f
+#define AIBOT_EAT_EXIT_HP     90.0f   // latch releases only when BOTH exits are met (mana classes)
+#define AIBOT_EAT_EXIT_MANA   85.0f
+#define AIBOT_PULL_MIN_HP     70.0f   // never INITIATE a new pull below this (solo doctrine only)
+#define AIBOT_PULL_MIN_MANA   50.0f
+
 
 // Spell / item ids referenced across the combat + self-maintenance methods.
 // (Moved here from AiBotAI.cpp at the file split so every TU — combat, movement,
@@ -377,6 +392,9 @@ public:
     //   instantly re-acquire them mid-flee. Returns true when it acted (caller returns).
     bool OverpullGuard(Unit* target) const;
     bool HandleOverpullRetreat();
+    // PullReady: fight-INITIATION readiness (solo). Gates only the start of a new pull at
+    // the grind dispatch + approach scan; never gates defense or an in-progress fight.
+    bool PullReady() const;
 
     // --- [TEAMPLAY] public seams for the stateless group-combat resolvers ---
     // TeamPlay (AiBotAITeamPlay.cpp) reads this AI but mutates nothing; these two accessors
@@ -577,7 +595,15 @@ public:
     uint32 m_overpullFleeHoldMs = 0;   // mid-retreat hold (suppress re-chase while the hop runs)
     uint8  m_overpullFlees      = 0;   // retreats issued this combat (cap at AIBOT_OVERPULL_MAX_FLEES)
     uint32 m_lastAttackerCount  = 0;   // peak melee attackers this combat — stamped on the DEATH event
- // --- Grind freeze-escape (livelock fix, generalized) ---
+    // --- Recovery hysteresis latch (2026-07-05) ---
+    // Set when HP/mana dips below AIBOT_EAT_ENTER_* OR when a pull is refused
+    // under-resourced (PullReady false at an engage site); held until
+    // AIBOT_EAT_EXIT_HP/_MANA. While set, the OOC eat block runs every tick (tasked or
+    // not) and the solo grind dispatch never initiates. Survives combat interrupts —
+    // the food aura breaks on aggro, the latch doesn't — so a mid-eat defense fight
+    // resumes eating afterward instead of chaining into the next pull at 45%.
+    bool m_eatRecoveryLatch = false;
+    // --- Grind freeze-escape (livelock fix, generalized) ---
     // Consecutive TASK_GRIND ticks that produced no pull — EITHER OverpullGuard vetoed every
     // candidate (field denser than the solo cap) OR SelectGrindTarget found nothing valid (all
     // killed/tapped/grey/red, or empty — the "nothing matches" freeze under a crowd of bots).

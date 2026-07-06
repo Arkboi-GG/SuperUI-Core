@@ -434,6 +434,32 @@ bool AiBotAI::HandleCombatStalemate()
     return true;
 }
 
+// ============================================================
+// [PULLGATE] PullReady — fight-initiation readiness (2026-07-05, solo discipline).
+//
+// The bot may DEFEND at any HP — this gates only the INITIATION of a new pull (the
+// TASK_GRIND dispatch and the enriched-MOVE_TO approach scan in UpdateAI). Below the
+// floor the caller latches m_eatRecoveryLatch and stands down; the OOC eat block then
+// owns every tick until the latch releases at AIBOT_EAT_EXIT_HP/_MANA. Rage/energy
+// classes gate on HP alone (rage starts empty by design; energy refills in seconds).
+//
+// Why 70: a pull initiated at 41-60% (where the old one-way eat gate parked the fleet)
+// is a coin flip against an even-level mob and a guaranteed loss against one add. Every
+// survival net downstream of this line fires AFTER the corpse; this is the first that
+// fires before it.
+// ============================================================
+bool AiBotAI::PullReady() const
+{
+    if (me->GetHealthPercent() < AIBOT_PULL_MIN_HP)
+        return false;
+
+    if (me->GetPowerType() == POWER_MANA &&
+        me->GetPowerPercent(POWER_MANA) < AIBOT_PULL_MIN_MANA)
+        return false;
+
+    return true;
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════
 // AiBotAICombat.cpp — FUNCTION REPLACEMENT (2026-07-05)
 //

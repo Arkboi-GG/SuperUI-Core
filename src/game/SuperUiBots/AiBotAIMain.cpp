@@ -455,6 +455,29 @@ void AiBotAI::RefreshDoctrine()
     }
 }
 
+// ============================================================
+// MAIN UPDATE LOOP — COMPLETE-METHOD REPLACEMENT (2026-07-05, survival pass fixes 1+2)
+//
+// Identical to the deployed doctrine/self-unstick version EXCEPT:
+//
+//   [EAT-HYST]  The OOC eat gate is now a hysteresis LATCH. Old behaviour: with an active
+//               task, DrinkAndEat was reachable only below 40% HP / 20% mana — the moment
+//               HP crossed 41% the condition went false and the grind dispatch re-pulled,
+//               so a tasked bot lived permanently in the 40-60% band (casters re-pulled at
+//               21% mana). New: dipping below the floor latches recovery ON; the latch
+//               releases only at 90% HP / 85% mana (the proven RezHealTarget shape).
+//
+//   [PULLGATE]  Solo fight-initiation floor at BOTH engage sites (grind dispatch +
+//               approach scan): never START a fight below 70% HP / 50% mana — latch
+//               recovery and stand down instead of patrolling INTO the field. Defense,
+//               in-progress fights, and the TeamAuto/Directed doctrines are untouched
+//               (the group has its own recovery protocols: GroupDefend / guard-heal /
+//               the chain 40/40 gate). Recovery (~10-30s) is well inside the 120s
+//               no-kill deadline, so no false shelves.
+//
+// The kobold-camp self-unstick, doctrine dispatch, [GRAVE-SELFREZ], and §4 blocks are
+// carried verbatim from the deployed build.
+// ============================================================
 void AiBotAI::UpdateAI(uint32 const diff)
 {
     // Handle pending teleports from base class
@@ -793,16 +816,29 @@ void AiBotAI::UpdateAI(uint32 const diff)
         return;
     }
 
-    // --- Out of combat: eat/drink ---
+    // --- Out of combat: eat/drink — [EAT-HYST] hysteresis latch (2026-07-05) ---
+    // OLD: one-way gate — with an active task DrinkAndEat was reachable only below 40% HP /
+    // 20% mana, so the loop RELEASED the bot back into the grind at 41%/21%: a tasked bot
+    // lived permanently in the fight-losing band, every objective, every camp.
+    // NEW: dipping below the floor latches recovery ON; the latch releases only at 90% HP /
+    // 85% mana (the shape the C# rez heal proved at 0.95/0.85). The food aura breaks on
+    // aggro but the LATCH survives combat, so a mid-eat defense fight resumes eating
+    // afterward instead of chaining into the next pull half-dead.
     if (!me->IsInCombat())
     {
         bool hasActiveTask = (m_currentTask.type == TASK_MOVE_TO ||
                               m_currentTask.type == TASK_GRIND);
-        bool criticalHP = me->GetHealthPercent() < 40.0f;
-        bool criticalMana = (me->GetPowerType() == POWER_MANA) &&
-                            (me->GetPowerPercent(POWER_MANA) < 20.0f);
+        bool const manaUser = (me->GetPowerType() == POWER_MANA);
+        float const hp = me->GetHealthPercent();
+        float const mp = manaUser ? me->GetPowerPercent(POWER_MANA) : 100.0f;
 
-        if (!hasActiveTask || criticalHP || criticalMana)
+        if (hp < AIBOT_EAT_ENTER_HP || (manaUser && mp < AIBOT_EAT_ENTER_MANA))
+            m_eatRecoveryLatch = true;
+
+        if (m_eatRecoveryLatch && hp >= AIBOT_EAT_EXIT_HP && mp >= AIBOT_EAT_EXIT_MANA)
+            m_eatRecoveryLatch = false;
+
+        if (!hasActiveTask || m_eatRecoveryLatch)
         {
             if (DrinkAndEat())
                 return;
@@ -911,6 +947,27 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // --- TASK_GRIND: proactive pull or patrol ---
         if (m_currentTask.type == TASK_GRIND)
         {
+            // [PULLGATE] Fight-initiation floor (solo, 2026-07-05). Never START a fight
+            // under-resourced: below the floor, latch recovery and stand down — and do NOT
+            // patrol (DoGrindPatrol random-hops INTO the field, i.e. body-pulling at low
+            // HP — the exact death class this closes). The eat block above owns every
+            // subsequent tick until the latch releases at 90/85; recovery (~10-30s) is well
+            // inside the C# 120s no-kill deadline, so no false shelves. Placed BEFORE
+            // AcquireTarget so neither the pull nor the freeze/self-unstick escalation can
+            // run while weak. TeamAuto/Directed pass through untouched — the group owns its
+            // own recovery (GroupDefend / guard-heal / the chain 40/40 gate).
+            if (m_doctrineKind == DoctrineKind::Solo && !PullReady())
+            {
+                if (!m_eatRecoveryLatch)
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                        "[AIBOT-PULLGATE] %s: refusing new pull at hp=%.0f%% mp=%.0f%% — recovering to %.0f/%.0f",
+                        me->GetName(), me->GetHealthPercent(),
+                        me->GetPowerType() == POWER_MANA ? me->GetPowerPercent(POWER_MANA) : 100.0f,
+                        AIBOT_EAT_EXIT_HP, AIBOT_EAT_EXIT_MANA);
+                m_eatRecoveryLatch = true;
+                return;
+            }
+
             // [DOCTRINE] Acquisition + pull discipline are the doctrine's; the freeze / GRIND_BLOCKED
             // / patrol bookkeeping stays here in the spine. AcquireTarget returns the mob to pull, or
             // nullptr to hold/patrol. A nullptr that is a DELIBERATE TeamAuto wait-for-anchor hold (B3
@@ -1000,6 +1057,24 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 m_approachScanTimer = urand(2000, 3000);
                 if (Unit* pMob = ScanApproachTarget())
                 {
+                    // [PULLGATE] (solo, 2026-07-05) Arriving at the field under-resourced:
+                    // the scan just proved live mobs are AHEAD, so stop HERE — still outside
+                    // the camp — latch recovery, and eat before the engage. The MOVE_TO
+                    // resume logic below picks the journey back up once the latch releases,
+                    // the scan re-fires at full HP, and the engage proceeds as normal.
+                    if (m_doctrineKind == DoctrineKind::Solo && !PullReady())
+                    {
+                        if (!m_eatRecoveryLatch)
+                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                                "[AIBOT-PULLGATE] %s: field ahead (%s, %.0fyd) but hp=%.0f%% mp=%.0f%% — stopping to recover first",
+                                me->GetName(), pMob->GetName(), me->GetDistance(pMob),
+                                me->GetHealthPercent(),
+                                me->GetPowerType() == POWER_MANA ? me->GetPowerPercent(POWER_MANA) : 100.0f);
+                        StopMoving();
+                        m_eatRecoveryLatch = true;
+                        return;
+                    }
+
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-PATH] %s: approach scan hit %s (entry=%u, %.0fyd) — handoff to GRIND",
                         me->GetName(), pMob->GetName(), m_currentTask.creatureEntry, me->GetDistance(pMob));
