@@ -305,6 +305,12 @@ void AiBotAI::BridgeSendState()
             minDurabilityPct = pct;
     }
 
+    // --- [PLAYERPARTY] escort echo (2026-07-07) ---
+    // 1 = this bot's group contains a REAL player (FindPartyBoss resolves) → C# stands down
+    // to Goal.Idle ("player-party" hold) and C++ owns the whole behaviour. Cheap group walk,
+    // once per 5s STATE.
+    uint32 const pparty = FindPartyBoss() ? 1u : 0u;
+
     // --- Active quest status from server (authoritative) ---
     uint32 questStatus = 0;  // 0 = no tracked quest
     if (m_trackedQuestId > 0)
@@ -383,7 +389,7 @@ void AiBotAI::BridgeSendState()
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
         "\"inCombat\":%s,\"isDead\":%s,"
         "\"targetGuid\":%u,\"taskState\":\"%s\","
-        "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,"
+        "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,\"pparty\":%u,"
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
         "\"quests\":\"%s\","
@@ -398,7 +404,7 @@ void AiBotAI::BridgeSendState()
         me->IsDead() ? "true" : "false",
         me->GetTargetGuid().IsEmpty() ? 0 : me->GetTargetGuid().GetCounter(),
         taskStr,
-        freeSlots, totalSlots, me->GetMoney(), minDurabilityPct,
+        freeSlots, totalSlots, me->GetMoney(), minDurabilityPct, pparty,
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
         questBlob.c_str(),
@@ -914,6 +920,27 @@ void AiBotAI::BridgeHandleSayText(const char* json)
     else if (chatType == 6)
     {
         me->Yell(text, LANG_UNIVERSAL);
+    }
+    else if (chatType == 1)
+    {
+        // PARTY — wire int 1 == CHAT_MSG_PARTY (0x01, VERIFIED SharedDefines.h).
+        // Mirrors the whisper branch's packet-building idiom. Broadcast VERIFIED Group.h:
+        //   void BroadcastPacket(WorldPacket* packet, bool ignorePlayersInBGRaid, int group=-1, ObjectGuid ignore = ObjectGuid());
+        // Self receives its own line (like a real client); the C0 self-echo filter in
+        // OnPacketReceived keeps it from re-entering the coordinator as a stimulus.
+        if (Group* pGroup = me->GetGroup())
+        {
+            WorldPacket data;
+            ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, text, LANG_UNIVERSAL,
+                CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName());
+            pGroup->BroadcastPacket(&data, false);
+        }
+        else
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: PARTY requested but ungrouped, falling back to SAY",
+                me->GetName());
+            me->Say(text, LANG_UNIVERSAL);
+        }
     }
     else
     {
@@ -2318,6 +2345,19 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         return;
     }
  
+    // [PLAYERPARTY] Never let the god-bot yank this bot out of a REAL player's party
+    // (2026-07-07). A stale C# coordinator decision must not disband a human's escort
+    // mid-quest — the human outranks the coordinator, always. C# also stands down off the
+    // pparty STATE echo, so this refusal is the belt to that suspender.
+    if (FindPartyBoss())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-GROUP] %s: FORM_GROUP refused — this bot is in a REAL player's party",
+            me->GetName());
+        BridgeSendEvent("FORM_GROUP_FAIL", "in_player_party");
+        return;
+    }
+
     // If already in a group, leave it first
     if (Group* oldGroup = me->GetGroup())
     {
@@ -2353,6 +2393,28 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
             continue;
         }
  
+        // [PLAYERPARTY] Skip a member currently escorting a REAL player — pulling him out
+        // of the human's party to form a bot group is exactly the yank the leader guard
+        // above refuses for ourselves (2026-07-07).
+        bool memberInPlayerParty = false;
+        if (Group* memberOldGroup = pMember->GetGroup())
+        {
+            for (GroupReference* mItr = memberOldGroup->GetFirstMember(); mItr != nullptr; mItr = mItr->next())
+                if (Player* pOther = mItr->getSource())
+                    if (pOther->GetSession() && !pOther->GetSession()->GetBot())
+                    {
+                        memberInPlayerParty = true;
+                        break;
+                    }
+        }
+        if (memberInPlayerParty)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-GROUP] %s: FORM_GROUP skipping %s (GUID %u) — escorting a REAL player",
+                me->GetName(), pMember->GetName(), memberGuid);
+            continue;
+        }
+
         // If member is already in a group, remove them first
         if (Group* memberOldGroup = pMember->GetGroup())
         {
@@ -2405,6 +2467,17 @@ void AiBotAI::BridgeHandleDisbandGroup(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: DISBAND_GROUP but not in a group", me->GetName());
         BridgeSendEvent("GROUP_DISBANDED", "was_not_grouped");
+        return;
+    }
+
+    // [PLAYERPARTY] Never disband a REAL player's party from the wire (2026-07-07) — the
+    // human formed it, only the human unforms it. Same rationale as the FORM_GROUP guard.
+    if (FindPartyBoss())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-GROUP] %s: DISBAND_GROUP refused — this is a REAL player's party",
+            me->GetName());
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "in_player_party");
         return;
     }
  
@@ -2609,27 +2682,59 @@ void AiBotAI::SendLevelUpEvent(uint32 newLevel)
     BridgeSend(json);
 }
 
-void AiBotAI::SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName)
+// ── C0 (§5.1): minimal JSON string escape for outbound chat text. Chat is the one
+// bridge lane carrying arbitrary player-typed text; a `"` or `\` in a message corrupts
+// the newline-delimited JSON framing. Escapes `"` `\`; control chars (<0x20) become a
+// space (in-game chat can't contain meaningful ones). Truncates safely on small dst.
+static void JsonEscapeInto(char* dst, size_t dstSize, const char* src)
+{
+    size_t o = 0;
+    if (!dst || dstSize == 0) return;
+    for (const char* p = src ? src : ""; *p && o + 2 < dstSize; ++p)
+    {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\')
+        {
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+        }
+        else if (c < 0x20)
+            dst[o++] = ' ';
+        else
+            dst[o++] = (char)c;
+    }
+    dst[o] = '\0';
+}
+
+void AiBotAI::SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName, uint32 senderGuidLow)
 {
     if (!m_bridgeConnected)
         return;
 
-    char json[512];
-    if (channelName && channelName[0] != '\0')
+    // Escaped copies (§5.1): sender, message, channel_name are player-influenced text.
+    // chatType is compiler-controlled ("say"/"whisper"/"channel"/"party") — no escape needed.
+    char senderEsc[128];
+    char messageEsc[1024];   // 511-char message cap upstream; worst case doubles under escaping
+    char channelEsc[128];
+    JsonEscapeInto(senderEsc, sizeof(senderEsc), senderName);
+    JsonEscapeInto(messageEsc, sizeof(messageEsc), message);
+    JsonEscapeInto(channelEsc, sizeof(channelEsc), channelName ? channelName : "");
+
+    char json[1024];
+    int n = snprintf(json, sizeof(json),
+        "{\"type\":\"EVENT\",\"payload\":{"
+        "\"guid\":%u,\"event\":\"CHAT_RECV\","
+        "\"sender\":\"%s\",\"sender_guid\":%u,\"message\":\"%s\","
+        "\"chat_type\":\"%s\",\"channel_name\":\"%s\"}}",
+        me->GetGUIDLow(), senderEsc, senderGuidLow, messageEsc, chatType, channelEsc);
+
+    // A truncated line is broken JSON that poisons the newline framing — drop it instead.
+    if (n < 0 || n >= (int)sizeof(json))
     {
-        snprintf(json, sizeof(json),
-            "{\"type\":\"EVENT\",\"payload\":{"
-            "\"guid\":%u,\"event\":\"CHAT_RECV\","
-            "\"sender\":\"%s\",\"message\":\"%s\",\"chat_type\":\"%s\",\"channel_name\":\"%s\"}}",
-            me->GetGUIDLow(), senderName, message, chatType, channelName);
-    }
-    else
-    {
-        snprintf(json, sizeof(json),
-            "{\"type\":\"EVENT\",\"payload\":{"
-            "\"guid\":%u,\"event\":\"CHAT_RECV\","
-            "\"sender\":\"%s\",\"message\":\"%s\",\"chat_type\":\"%s\"}}",
-            me->GetGUIDLow(), senderName, message, chatType);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: CHAT_RECV dropped — escaped payload exceeds buffer (%d)",
+            me->GetName(), n);
+        return;
     }
     BridgeSend(json);
 }

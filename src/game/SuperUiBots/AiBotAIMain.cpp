@@ -13,6 +13,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "Server/Packet.h"   // NullClientPacket — the typed empty client packet the group accept/decline handlers take
 #include "AiBotAITeamPlay.h"   // [TEAMPLAY] ResolveCombatTarget — the group focus-fire resolver
 #include "Player.h"
 #include <cstring>
@@ -50,6 +51,13 @@ void AiBotAI::OnPlayerLogin()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] OnPlayerLogin for %s (guid %u)",
         me ? me->GetName() : "NULL",
         me ? me->GetGUIDLow() : 0);
+
+    // Bots always accept whispers (the runtime equivalent of a GM's ".whispers on").
+    // PlayerBotMgr sessions are synthetic (no realmd row) and may carry elevated
+    // security; the core hides higher-security characters from lower-security
+    // whisperers ("That player doesn't exist") UNLESS the target accepts whispers.
+    // A social-layer bot must be whisperable by everyone, always.
+    me->SetAcceptWhispers(true);
 
     if (!m_initialized)
         me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SPAWNING);
@@ -263,7 +271,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
             uint32 lang;
             pkt >> chatType >> lang;
  
-            if (chatType == CHAT_MSG_SAY || chatType == CHAT_MSG_WHISPER)
+            if (chatType == CHAT_MSG_SAY || chatType == CHAT_MSG_WHISPER || chatType == CHAT_MSG_PARTY)
             {
                 ObjectGuid senderGuid;
                 pkt >> senderGuid;
@@ -273,6 +281,14 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                 {
                     ObjectGuid dupGuid;
                     pkt >> dupGuid;
+                }
+ 
+                // ── C0 self-echo filter (D16, §5.1): a bot hears its own Say/Party broadcast.
+                // Forwarding it would let the bot converse with itself (reply loop). Skip entirely.
+                if (senderGuid == me->GetObjectGuid())
+                {
+                    CombatBotBaseAI::OnPacketReceived(packet);
+                    return;
                 }
  
                 uint32 textLen;
@@ -286,10 +302,14 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                     if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))
                         senderName = pSender->GetName();
  
-                    const char* typeStr = (chatType == CHAT_MSG_WHISPER) ? "whisper" : "say";
+                    const char* typeStr = (chatType == CHAT_MSG_WHISPER) ? "whisper"
+                                        : (chatType == CHAT_MSG_PARTY)   ? "party"
+                                        : "say";
+                    // sender_guid: GUID low when the sender is a player, else 0 (§5.1)
+                    uint32 senderGuidLow = senderGuid.IsPlayer() ? senderGuid.GetCounter() : 0;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: CHAT_RECV [%s] from %s: %s",
                         me->GetName(), typeStr, senderName.c_str(), message.c_str());
-                    SendChatRecvEvent(senderName.c_str(), message.c_str(), typeStr);
+                    SendChatRecvEvent(senderName.c_str(), message.c_str(), typeStr, nullptr, senderGuidLow);
                 }
             }
             else if (chatType == CHAT_MSG_CHANNEL)
@@ -303,6 +323,13 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                 ObjectGuid senderGuid;
                 pkt >> senderGuid;
  
+                // ── C0 self-echo filter (D16, §5.1): channel Say echoes back to the speaker too.
+                if (senderGuid == me->GetObjectGuid())
+                {
+                    CombatBotBaseAI::OnPacketReceived(packet);
+                    return;
+                }
+ 
                 uint32 textLen;
                 pkt >> textLen;
                 if (textLen > 0 && textLen < 512)
@@ -314,9 +341,11 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                     if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))
                         senderName = pSender->GetName();
  
+                    // sender_guid: GUID low when the sender is a player, else 0 (§5.1)
+                    uint32 senderGuidLow = senderGuid.IsPlayer() ? senderGuid.GetCounter() : 0;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: CHAT_RECV [channel:%s] from %s: %s",
                         me->GetName(), channelName.c_str(), senderName.c_str(), message.c_str());
-                    SendChatRecvEvent(senderName.c_str(), message.c_str(), "channel", channelName.c_str());
+                    SendChatRecvEvent(senderName.c_str(), message.c_str(), "channel", channelName.c_str(), senderGuidLow);
                 }
             }
         }
@@ -326,6 +355,44 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
     }
  
+    // ── [PLAYERPARTY] Group invite (2026-07-07): accept from a REAL player, decline the rest ──
+    // A human /invite is the entire control plane for escort mode — no UI, no bridge command.
+    // Accept iff the pending group's LEADER is a real (non-bot) session; decline otherwise so a
+    // stray bot-sourced invite can't graft this bot into an unmanaged group (the god-bot's own
+    // grouping is direct Group::Create/AddMember — BridgeHandleFormGroup — and never sends
+    // invite packets, so declining here cannot touch TeamAuto formation). Handled EXPLICITLY,
+    // before the base fall-through, so behaviour never depends on CombatBotBaseAI's own invite
+    // policy. On accept, ResolveDoctrine sees the real-player group next behaviour tick and
+    // swaps to PlayerParty; STATE echoes pparty=1 and C# stands down.
+    if (packet->GetOpcode() == SMSG_GROUP_INVITE)
+    {
+        bool accept = false;
+        if (Group* pInviteGroup = me->GetGroupInvite())
+        {
+            if (Player* pLeader = sObjectMgr.GetPlayer(pInviteGroup->GetLeaderGuid()))
+                accept = pLeader->GetSession() && !pLeader->GetSession()->GetBot();
+        }
+
+        if (accept)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-PARTY] %s: group invite from a REAL player — accepting (escort mode arms next tick)",
+                me->GetName());
+            NullClientPacket data(CMSG_GROUP_ACCEPT);   // zero-payload typed packet (Server/Packet.h)
+            me->GetSession()->HandleGroupAcceptOpcode(data);
+            BridgeSendEvent("PARTY_JOIN", "");
+        }
+        else
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-PARTY] %s: group invite is not from a real player — declining",
+                me->GetName());
+            NullClientPacket data(CMSG_GROUP_DECLINE);
+            me->GetSession()->HandleGroupDeclineOpcode(data);
+        }
+        return;   // handled — never fall through to the base class's own invite policy
+    }
+
     CombatBotBaseAI::OnPacketReceived(packet);
 }
 
@@ -452,6 +519,82 @@ void AiBotAI::RefreshDoctrine()
             "[AIBOT-DOCTRINE] %s: %s -> %s%s",
             me ? me->GetName() : "?", from, m_doctrine ? m_doctrine->Name() : "?",
             m_combatDirective.IsActive() ? " (directive active)" : "");
+    }
+}
+
+// ── [PLAYERPARTY] The escort primitives (2026-07-07) ──────────────────────────────────────
+
+// The human this bot escorts: the group LEADER when it is a real (non-bot) session, else the
+// first real-player member; nullptr when no real player is in the group (or no group). This
+// is the ONE detection primitive — ResolveDoctrine keys the PlayerParty doctrine on it, the
+// STATE producer echoes it (pparty), the bridge Form/Disband guards refuse on it, and the
+// escort hook follows it. Bot sessions are identified by WorldSession::GetBot() (the
+// PlayerBotEntry every PlayerBotMgr-owned session carries; real clients have none).
+Player* AiBotAI::FindPartyBoss() const
+{
+    if (!me || !me->IsInWorld())
+        return nullptr;
+
+    Group* pGroup = me->GetGroup();
+    if (!pGroup)
+        return nullptr;
+
+    Player* firstReal = nullptr;
+    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* pMember = itr->getSource();
+        if (!pMember || pMember == me)
+            continue;
+        WorldSession* pSess = pMember->GetSession();
+        if (!pSess || pSess->GetBot())
+            continue;   // a bot session — not a boss
+        if (pMember->GetObjectGuid() == pGroup->GetLeaderGuid())
+            return pMember;   // the leader is real — unambiguous
+        if (!firstReal)
+            firstReal = pMember;
+    }
+    return firstReal;   // leader is a bot but a human is present — escort the human
+}
+
+// Keep formation on the boss (called from the escort hook, out of combat, after the engage
+// attempt found nothing to fight). Movement is spine-owned, doctrine names targets only.
+//  - dead boss: stand vigil (his ghost is not a follow target; follow resumes on his rez);
+//  - cross-map boss: stand down this tick (flight / instance — v1 does not chase across
+//    maps; the doctrine + pparty stay live, so C# stays hands-off and we re-follow when he
+//    lands back on our map);
+//  - left far behind on the SAME map (boss took a port): NearTeleportTo the boss, grounded;
+//  - otherwise: (re)issue MoveFollow only when the follow generator is not already driving,
+//    with a per-guid angle so the escort fans out behind him instead of stacking.
+void AiBotAI::DoPartyFollow()
+{
+    Player* pBoss = FindPartyBoss();
+    if (!pBoss || !pBoss->IsInWorld() || !pBoss->IsAlive())
+        return;
+
+    if (pBoss->GetMapId() != me->GetMapId())
+        return;
+
+    float const dist = me->GetDistance(pBoss);
+
+    if (dist > AIBOT_PARTY_CATCHUP_TELEPORT)
+    {
+        float bx = pBoss->GetPositionX();
+        float by = pBoss->GetPositionY();
+        float bz = pBoss->GetPositionZ();
+        ReGroundZ(bx, by, bz, "party-catchup");
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-PARTY] %s: left %.0fyd behind the boss — catch-up teleport to (%.1f, %.1f, %.1f)",
+            me->GetName(), dist, bx, by, bz);
+        me->NearTeleportTo(bx, by, bz, me->GetOrientation());
+        return;
+    }
+
+    if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE &&
+        dist > AIBOT_PARTY_FOLLOW_DIST + 1.0f)
+    {
+        // Deterministic per-bot spread behind the boss: 8 slots around the rear arc.
+        float const angle = M_PI_F + (float(me->GetGUIDLow() % 8) - 3.5f) * (M_PI_F / 8.0f);
+        me->GetMotionMaster()->MoveFollow(pBoss, AIBOT_PARTY_FOLLOW_DIST, angle);
     }
 }
 
@@ -942,6 +1085,26 @@ void AiBotAI::UpdateAI(uint32 const diff)
         {
             m_lastVictimEntry = static_cast<Creature*>(pVictim)->GetEntry();
             m_lastVictimGuidLow = pVictim->GetGUIDLow();
+        }
+
+        // ── [PLAYERPARTY] Escort mode (2026-07-07): a REAL player leads this group ──
+        // The human is the coordinator; C++ owns the whole behaviour. Engage the doctrine's
+        // party focus (boss's victim → boss's attacker → a party member's attacker → sticky;
+        // NEVER a self-initiated pull), else keep formation on the boss. The return makes the
+        // task machinery unreachable while escorting — no grind dispatch, no MOVE_TO resume,
+        // no patrol, no wander — so a stale C# task from before the invite simply idles out
+        // (C# stands down to Goal.Idle off the pparty STATE echo and SET_TASK IDLEs anyway).
+        // Placed AFTER kill-detection so escort kills still fire KILL events + loot timers,
+        // and AFTER the [EAT-HYST] block so a companion still sits to eat between fights.
+        if (m_doctrineKind == DoctrineKind::PlayerParty)
+        {
+            if (Unit* pEscortTarget = m_doctrine->AcquireTarget(*this))
+            {
+                if (AttackStart(pEscortTarget))
+                    return;
+            }
+            DoPartyFollow();
+            return;
         }
 
         // --- TASK_GRIND: proactive pull or patrol ---

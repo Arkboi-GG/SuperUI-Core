@@ -16,6 +16,10 @@
 //    (2) Added the three factory-hook free functions (one per doctrine TU) that the
 //        central MakeDoctrine() in AiBotDoctrine.cpp dispatches to. Each doctrine TU
 //        keeps its concrete class file-local and exposes only its Make*() hook.
+//    (3) 2026-07-07: added the FOURTH doctrine, PlayerParty (escort mode) -- a REAL
+//        player invited this bot to their party, the human IS the coordinator. Auto-
+//        selected off FindPartyBoss(), ranked ABOVE TeamAuto so a stale C# directive
+//        can never out-vote a live human. AiBotDoctrinePlayerParty.cpp.
 //
 //  Line endings: LF (C++ repo convention).
 // =====================================================================================
@@ -35,7 +39,12 @@ enum class DoctrineKind
                 //   The WHOLE group-fight decision -- resolver-first acquisition, B3
                 //   wait-for-anchor pull-hold, B2 mid-combat convergence, sticky-assist --
                 //   lives in AiBotDoctrineTeam.cpp and nowhere else.
-    Directed    // companion / puppet posture (M2). Orders + the player are the authority.
+    Directed,   // companion / puppet posture (M2). Orders + the player are the authority.
+    PlayerParty // (2026-07-07) a REAL player is in this bot's group -- the human IS the
+                //   coordinator. Follow + assist his fights (his victim -> his attacker ->
+                //   a party member's attacker -> sticky), defend, NEVER initiate. Selected
+                //   off FindPartyBoss(), ranked ABOVE TeamAuto (a live human outranks a
+                //   stale directive stamp). AiBotDoctrinePlayerParty.cpp.
 };
 
 // -------------------------------------------------------------------------------------
@@ -109,5 +118,6 @@ std::unique_ptr<IEngagementDoctrine> MakeDoctrine(DoctrineKind kind);
 std::unique_ptr<IEngagementDoctrine> MakeSoloDoctrine();
 std::unique_ptr<IEngagementDoctrine> MakeTeamDoctrine();
 std::unique_ptr<IEngagementDoctrine> MakeDirectedDoctrine();
+std::unique_ptr<IEngagementDoctrine> MakePlayerPartyDoctrine();   // escort mode (2026-07-07)
 
 #endif // MANGOS_AIBOTDOCTRINE_H

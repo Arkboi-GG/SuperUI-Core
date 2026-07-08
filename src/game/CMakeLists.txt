@@ -203,6 +203,7 @@ set (game_SRCS
     SuperUiBots/AiBotDoctrineSolo.cpp
     SuperUiBots/AiBotDoctrineTeam.cpp
     SuperUiBots/AiBotDoctrineDirected.cpp
+    SuperUiBots/AiBotDoctrinePlayerParty.cpp
     SuperUiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiBots/Movement/AiBotPathSmoothing.cpp
     PlayerBots/BattleBotWaypoints.cpp

@@ -20,10 +20,21 @@
 
 DoctrineKind ResolveDoctrine(AiBotAI const& bot)
 {
-    // Frozen logic (§2.2):
+    // Frozen logic (§2.2), extended 2026-07-07 with the one live-human override on top:
+    //   FindPartyBoss() resolves (a REAL player is in the group) -> PlayerParty
     //   posture == Companion || Puppet          -> Directed
     //   m_combatDirective.IsActive() && grouped -> TeamAuto
     //   else                                    -> Solo
+    //
+    // [PLAYERPARTY] ranks ABOVE everything: a human /invite is the entire control plane for
+    // escort mode, and a live human must outrank both a stale C# assist directive (the
+    // coordinator also stands down off the pparty STATE echo, plus the bridge Form/Disband
+    // guards refuse to touch a player-led party -- this is the third belt) and, for now, the
+    // present-but-dark M2 Directed branch (revisit the ranking when the conduct substrate
+    // actually lands). Leaving the party un-resolves FindPartyBoss and this drops straight
+    // back to the frozen ladder next behaviour tick -- swap == reset, as always.
+    if (bot.FindPartyBoss())
+        return DoctrineKind::PlayerParty;
     //
     // Posture source is the M2 ConductState. Until it lands, every bot is AUTONOMOUS (§3), so the
     // Directed branch below is present-but-dark and the resolver only ever picks TeamAuto or Solo
@@ -47,9 +58,10 @@ std::unique_ptr<IEngagementDoctrine> MakeDoctrine(DoctrineKind kind)
 {
     switch (kind)
     {
-        case DoctrineKind::Solo:     return MakeSoloDoctrine();
-        case DoctrineKind::TeamAuto: return MakeTeamDoctrine();
-        case DoctrineKind::Directed: return MakeDirectedDoctrine();
+        case DoctrineKind::Solo:        return MakeSoloDoctrine();
+        case DoctrineKind::TeamAuto:    return MakeTeamDoctrine();
+        case DoctrineKind::Directed:    return MakeDirectedDoctrine();
+        case DoctrineKind::PlayerParty: return MakePlayerPartyDoctrine();
     }
     return MakeSoloDoctrine();   // unreachable — total switch; keeps the compiler happy
 }

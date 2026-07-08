@@ -128,6 +128,9 @@
 #define AIBOT_GRIND_SCAN_YARDS   100.0f  // indefinite grind: bot-centric scan radius for the nearest valid XP mob
 #define AIBOT_GRIND_HIGH_OFFSET  3       // …skip a mob more than this many levels above the bot (no red suicide)
 #define AIBOT_GRIND_FREEZE_DWELL    3      // consecutive frozen grind ticks (~1s each) — over-cap veto OR no valid target — before handing back to C# (GRIND_BLOCKED). ~3s, fast vs the old 8-hold dwell.
+// [PLAYERPARTY] Escort mode (2026-07-07) — a REAL player invited this bot to their party.
+#define AIBOT_PARTY_FOLLOW_DIST      3.0f   // MoveFollow distance behind the boss (per-bot angle spread on top)
+#define AIBOT_PARTY_CATCHUP_TELEPORT 100.0f // same-map gap beyond this = we were left behind (boss ported) → NearTeleportTo the boss
 // Fight-initiation discipline + recovery hysteresis (2026-07-05, solo death reduction).
 // The OLD eat gate was a one-way threshold: with an active task, DrinkAndEat was reachable
 // only below 40% HP / 20% mana — so the loop RELEASED the bot back into the grind at
@@ -408,6 +411,19 @@ public:
     // per behaviour tick at the top of UpdateAI, before any acquisition/combat decision.
     void    RefreshDoctrine();
 
+    // --- [PLAYERPARTY] Escort mode (2026-07-07) — a REAL player leads this bot's group ---
+    // FindPartyBoss: the human this bot escorts — the group LEADER if it is a real (non-bot)
+    // session, else the first real-player member; nullptr when the group has no real player
+    // (or no group). THE detection primitive: ResolveDoctrine keys PlayerParty on it, the
+    // STATE producer echoes it to C# (pparty), the Form/Disband guards refuse to touch a
+    // player-led party, and the escort hook follows it.
+    // DoPartyFollow: the escort spine (UpdateAI OOC hook) — engage the doctrine's party
+    // focus if one resolves, else keep formation on the boss (MoveFollow with a per-bot
+    // angle spread; same-map NearTeleportTo catch-up when left > AIBOT_PARTY_CATCHUP_TELEPORT
+    // behind). Movement stays spine-owned — the doctrine only ever names targets.
+    Player* FindPartyBoss() const;
+    void    DoPartyFollow();
+
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---
     void UpdateInCombatAI() override;
     void UpdateOutOfCombatAI() override;
@@ -516,7 +532,9 @@ public:
     void SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow);
     void SendQuestUpdateEvent(uint32 questId, const char* status);
     void SendLevelUpEvent(uint32 newLevel);
-    void SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName = nullptr);
+    // C0 (§5.1): senderGuidLow = GUID low of the sending player (0 when non-player/unresolvable).
+    // C# uses it for roster lookup (is-bot); the NAME remains the memory key (D3).
+    void SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName = nullptr, uint32 senderGuidLow = 0);
 
     // --- Task executor ---
     AiBotTaskData m_currentTask;
