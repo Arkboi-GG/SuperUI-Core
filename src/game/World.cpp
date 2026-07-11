@@ -85,6 +85,8 @@
 #include "TransportMgr.h"
 #include "RealmZone.h"
 #include "IO/Multithreading/CreateThread.h"
+#include "Loot/QuestRewardVariantStore.h"
+#include "Loot/CraftingRewardVariantStore.h" 
 
 #include <chrono>
 
@@ -1480,6 +1482,12 @@ void World::SetInitialWorldSettings()
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Item Texts...");
     sObjectMgr.LoadItemTexts();
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading quest reward variants...");
+    sQuestRewardVariantStore.Load();
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading crafting reward variants...");
+    sCraftingRewardVariantStore.Load();
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading Creature Display Info Addon...");
     sObjectMgr.LoadCreatureDisplayInfoAddon();

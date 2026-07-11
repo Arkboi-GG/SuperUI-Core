@@ -305,11 +305,23 @@ void AiBotAI::BridgeSendState()
             minDurabilityPct = pct;
     }
 
-    // --- [PLAYERPARTY] escort echo (2026-07-07) ---
-    // 1 = this bot's group contains a REAL player (FindPartyBoss resolves) → C# stands down
-    // to Goal.Idle ("player-party" hold) and C++ owns the whole behaviour. Cheap group walk,
-    // once per 5s STATE.
-    uint32 const pparty = FindPartyBoss() ? 1u : 0u;
+    // --- [PLAYERPARTY] escort echo (2026-07-07) + boss range (2026-07-08) ---
+    // pparty: 1 = this bot's group contains a REAL player (FindPartyBoss resolves) → C# stands
+    // down to the player-party hold and C++ owns the whole behaviour. ppdist: distance to that
+    // boss — -1 no boss, 99999 boss on ANOTHER map (instance/boat), else 3D yards. Feeds the
+    // C# hub-errand abort guard (boss >150yd / off-map → drop the rounds, resume follow).
+    // Same cheap group walk, once per 5s STATE.
+    // [MULTI-HUMAN] Both key on FindEscortBoss — null iff no real player is in the group
+    // (the SAME truth value as FindPartyBoss, so pparty's meaning is unchanged), but ppdist
+    // now measures the bot's OWN assigned human, which is exactly who the hub-errand abort
+    // guard should watch: the bot returns to ITS human, not necessarily the leader.
+    uint32 pparty = 0u;
+    int ppdist = -1;
+    if (Player* pBoss = FindEscortBoss())
+    {
+        pparty = 1u;
+        ppdist = (pBoss->GetMapId() == me->GetMapId()) ? (int)me->GetDistance(pBoss) : 99999;
+    }
 
     // --- Active quest status from server (authoritative) ---
     uint32 questStatus = 0;  // 0 = no tracked quest
@@ -389,7 +401,7 @@ void AiBotAI::BridgeSendState()
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
         "\"inCombat\":%s,\"isDead\":%s,"
         "\"targetGuid\":%u,\"taskState\":\"%s\","
-        "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,\"pparty\":%u,"
+        "\"freeSlots\":%u,\"totalSlots\":%u,\"copper\":%u,\"durability\":%u,\"pparty\":%u,\"ppdist\":%d,"
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
         "\"quests\":\"%s\","
@@ -404,7 +416,7 @@ void AiBotAI::BridgeSendState()
         me->IsDead() ? "true" : "false",
         me->GetTargetGuid().IsEmpty() ? 0 : me->GetTargetGuid().GetCounter(),
         taskStr,
-        freeSlots, totalSlots, me->GetMoney(), minDurabilityPct, pparty,
+        freeSlots, totalSlots, me->GetMoney(), minDurabilityPct, pparty, ppdist,
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
         questBlob.c_str(),

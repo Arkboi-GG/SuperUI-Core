@@ -128,6 +128,8 @@ set (game_SRCS
     LFG/LFGHandler.cpp
     LFG/LFGMgr.cpp
     LFG/LFGQueue.cpp
+    Loot/QuestRewardVariantStore.cpp
+    Loot/CraftingRewardVariantStore.cpp
     Mail/Mail.cpp
     Mail/MassMailMgr.cpp
     Maps/GridMap.cpp
@@ -370,6 +372,8 @@ set (game_SRCS
     LFG/LFGDefines.h
     LFG/LFGMgr.h
     LFG/LFGQueue.h
+    Loot/QuestRewardVariantStore.h
+    Loot/CraftingRewardVariantStore.h
     Mail/Mail.h
     Mail/MassMailMgr.h
     Maps/Cell.h

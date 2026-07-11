@@ -42,6 +42,8 @@
 #include "MapManager.h"
 #include "CreatureGroups.h"
 #include "HardcodedEvents.h"
+#include "Loot/QuestRewardVariantStore.h"
+#include "Loot/CraftingRewardVariantStore.h"
 
 bool ChatHandler::HandleAnnounceCommand(char* args)
 {
@@ -1323,6 +1325,22 @@ bool ChatHandler::HandleReloadReputationRewardRateCommand(char* /*args*/)
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Re-Loading `reputation_reward_rate` Table!");
     sObjectMgr.LoadReputationRewardRate();
     SendSysMessage("DB table `reputation_reward_rate` reloaded.");
+    return true;
+}
+
+bool ChatHandler::HandleReloadQuestRewardVariantsCommand(char* /*args*/)
+{
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Re-Loading quest reward variants...");
+    sQuestRewardVariantStore.Load();
+    SendSysMessage("Quest reward variants reloaded.");
+    return true;
+}
+
+bool ChatHandler::HandleReloadCraftingRewardVariantsCommand(char* /*args*/)
+{
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Re-Loading crafting reward variants...");
+    sCraftingRewardVariantStore.Load();
+    SendSysMessage("Crafting reward variants reloaded.");
     return true;
 }
 

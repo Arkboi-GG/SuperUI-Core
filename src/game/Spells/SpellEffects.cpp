@@ -49,6 +49,7 @@
 #include "InstanceData.h"
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
+#include "Loot/CraftingRewardVariantStore.h"
 
 using namespace Spells;
 
@@ -1830,6 +1831,24 @@ void Spell::EffectHealthLeech(SpellEffectIndex effIndex)
     m_damage += damage;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  src/game/Spells/SpellEffects.cpp — Spell::DoCreateItem, complete method.
+//
+//  Only change vs. stock: the "Crafting Lootifier" block inserted right after the
+//  prototype null-check. Everything downstream already keys off `newItemId`, so no
+//  other edits are needed:
+//    * GenerateItemRandomPropertyId(newItemId)  -> variant
+//    * Stackable clamp                          -> variant's stacksize (1 for gear)
+//    * SendNewItem(pItem, .., bgType == 0)      -> already announces the variant in chat
+//    * UpdateCraftSkill(m_spellInfo->Id)        -> spell-keyed, skill-ups unaffected
+//
+//  ALSO ADD, once, near the top of SpellEffects.cpp with the other includes:
+//      #include "CraftingRewardVariantStore.h"
+//
+//  Build note: this pulls in a new header from src/game/Loot/, so re-run
+//  `cmake ..` (not just `make`) so the glob picks it up on the include path.
+// ─────────────────────────────────────────────────────────────────────────────
+
 void Spell::DoCreateItem(SpellEffectIndex effIdx, uint32 itemtype)
 {
     Player* player = ToPlayer(unitTarget);
@@ -1843,6 +1862,36 @@ void Spell::DoCreateItem(SpellEffectIndex effIdx, uint32 itemtype)
         player->SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, nullptr, nullptr);
         return;
     }
+
+    // ── Crafting Lootifier ───────────────────────────────────────────────────
+    // Swap the crafted output for a rolled additive variant when one exists.
+    // Gate to normal crafts of equippable, non-stackable GEAR: this excludes
+    // conjured water/food, arrows/bullets/reagents (stackable), and battleground
+    // marks (not gear). The store self-gates as well (only gear ever has
+    // variants), so this guard is belt-and-suspenders. The store's own ~20% base
+    // passthrough means many crafts still return the plain item unchanged.
+    {
+        bool equippableGear =
+            (pProto->Class == ITEM_CLASS_WEAPON || pProto->Class == ITEM_CLASS_ARMOR) &&
+            pProto->InventoryType != INVTYPE_NON_EQUIP &&
+            pProto->Stackable <= 1;
+
+        if (equippableGear)
+        {
+            uint32 rolled = sCraftingRewardVariantStore.RollVariant(newItemId);
+            if (rolled != newItemId)
+            {
+                if (ItemPrototype const* pRolled = sObjectMgr.GetItemPrototype(rolled))
+                {
+                    newItemId = rolled;
+                    pProto = pRolled;
+                }
+                // else: variant prototype not in memory (needs a full mangosd
+                // restart after generation) — fall through with the base item.
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // bg reward have some special in code work
     uint32 bgType = 0;

@@ -82,6 +82,7 @@
 #include "GameEventMgr.h"
 #include "world/scourge_invasion.h"
 #include "world/world_event_wareffort.h"
+#include "Loot/QuestRewardVariantStore.h"
 
 #include <climits>
 
@@ -12874,8 +12875,11 @@ bool Player::CanRewardQuest(Quest const* pQuest, uint32 reward, bool msg) const
         ++numRewardedItems;
         if (pQuest->RewChoiceItemId[reward])
         {
+            // Validate against the VARIANT that will actually be stored, not the
+            // base — a lootified reward hands out sQuestRewardVariantStore.RollVariant.
+            uint32 itemId = sQuestRewardVariantStore.RollVariant(pQuest->RewChoiceItemId[reward]);
             ItemPosCountVec dest;
-            InventoryResult res = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, pQuest->RewChoiceItemId[reward], pQuest->RewChoiceItemCount[reward]);
+            InventoryResult res = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, pQuest->RewChoiceItemCount[reward]);
             if (res != EQUIP_ERR_OK)
             {
                 if (res == EQUIP_ERR_INVENTORY_FULL)
@@ -12883,7 +12887,7 @@ bool Player::CanRewardQuest(Quest const* pQuest, uint32 reward, bool msg) const
                 else if (res == EQUIP_ERR_CANT_CARRY_MORE_OF_THIS)
                     SendQuestFailedAtTaker(pQuest->GetQuestId(), INVALIDREASON_QUEST_FAILED_DUPLICATE_ITEM);
                 else
-                    SendEquipError(res, nullptr, nullptr, pQuest->RewChoiceItemId[reward]);
+                    SendEquipError(res, nullptr, nullptr, itemId);
                 return false;
             }
         }
@@ -12895,8 +12899,9 @@ bool Player::CanRewardQuest(Quest const* pQuest, uint32 reward, bool msg) const
         {
             if (pQuest->RewItemId[i])
             {
+                uint32 itemId = sQuestRewardVariantStore.RollVariant(pQuest->RewItemId[i]);
                 ItemPosCountVec dest;
-                InventoryResult res = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, pQuest->RewItemId[i], pQuest->RewItemCount[i]);
+                InventoryResult res = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, pQuest->RewItemCount[i]);
                 if (res != EQUIP_ERR_OK)
                 {
                     if (res == EQUIP_ERR_INVENTORY_FULL)
@@ -13205,68 +13210,78 @@ void Player::RemoveQuestAtSlot(uint32 slot)
 void Player::RewardQuest(Quest const* pQuest, uint32 reward, WorldObject* questEnder, bool announce)
 {
     uint32 questId = pQuest->GetQuestId();
-
+ 
     for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
     {
         if (pQuest->ReqItemId[i])
             DestroyItemCount(pQuest->ReqItemId[i], pQuest->ReqItemCount[i], true);
     }
-
+ 
     RemoveTimedQuest(questId);
-
+ 
     if (BattleGround* bg = GetBattleGround())
         if ((bg->GetTypeID() == BATTLEGROUND_AV) && (questEnder->GetTypeId() == TYPEID_UNIT))
             ((BattleGroundAV*)bg)->HandleQuestComplete(questEnder->ToUnit(), pQuest->GetQuestId(), this);
-
+ 
     if (pQuest->GetRewChoiceItemsCount() > 0)
     {
-        if (uint32 itemId = pQuest->RewChoiceItemId[reward])
+        if (uint32 baseItemId = pQuest->RewChoiceItemId[reward])
         {
+            // Lootifier: swap the base reward for a weighted-random variant (or
+            // the base itself if this item has no variants). Roll BEFORE the space
+            // check so dest is computed for the item actually stored.
+            uint32 itemId = sQuestRewardVariantStore.RollVariant(baseItemId);
             ItemPosCountVec dest;
             if (CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, pQuest->RewChoiceItemCount[reward]) == EQUIP_ERR_OK)
             {
                 Item* item = StoreNewItem(dest, itemId, true, Item::GenerateItemRandomPropertyId(itemId));
-                SendNewItem(item, pQuest->RewChoiceItemCount[reward], true, false, false, false);
+                // showInChat=true → the "Received item" chat line uses item->GetEntry()
+                // (the VARIANT that was actually stored), not the base reward.
+                SendNewItem(item, pQuest->RewChoiceItemCount[reward], true, false, false, true);
             }
         }
     }
-
+ 
     if (pQuest->GetRewItemsCount() > 0)
     {
         for (uint32 i = 0; i < pQuest->GetRewItemsCount(); ++i)
         {
-            if (uint32 itemId = pQuest->RewItemId[i])
+            if (uint32 baseItemId = pQuest->RewItemId[i])
             {
+                // Lootifier: swap the base reward for a weighted-random variant
+                // (or the base itself if none exist). Roll BEFORE the space check.
+                uint32 itemId = sQuestRewardVariantStore.RollVariant(baseItemId);
                 ItemPosCountVec dest;
                 if (CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, pQuest->RewItemCount[i]) == EQUIP_ERR_OK)
                 {
                     Item* item = StoreNewItem(dest, itemId, true, Item::GenerateItemRandomPropertyId(itemId));
-                    SendNewItem(item, pQuest->RewItemCount[i], true, false, false, false);
+                    // showInChat=true → announce the VARIANT (item->GetEntry()) in chat.
+                    SendNewItem(item, pQuest->RewItemCount[i], true, false, false, true);
                 }
             }
         }
     }
-
+ 
     RewardReputation(pQuest);
-
+ 
     uint16 log_slot = FindQuestSlot(questId);
     if (log_slot < MAX_QUEST_LOG_SIZE)
         SetQuestSlot(log_slot, 0);
-
+ 
     QuestStatusData& q_status = mQuestStatus[questId];
     q_status.m_reward_choice = pQuest->RewChoiceItemId[reward];
-
+ 
     // Used for client inform but rewarded only in case not max level
     uint32 xp = uint32(pQuest->XPValue(GetLevel()) * sWorld.getConfig(CONFIG_FLOAT_RATE_XP_QUEST));
-
+ 
     if (GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
         GiveXP(xp , nullptr);
     else if (int32 money = pQuest->GetRewMoneyMaxLevelAtComplete())
         LogModifyMoney(money, "QuestMaxLevel", questEnder->GetObjectGuid(), questId);
-
+ 
     // Give player extra money if GetRewOrReqMoney > 0 and get ReqMoney if negative
     LogModifyMoney(pQuest->GetRewOrReqMoney(), "Quest", questEnder->GetObjectGuid(), questId);
-
+ 
     // Send reward mail
     if (int32 mail_template_id = pQuest->GetRewMailTemplateId())
     {
@@ -13284,25 +13299,25 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, WorldObject* questE
                 }
             }
         }
-
+ 
         MailDraft(mail_template_id, true, GetSession()->GetSessionDbcLocale()).SetMoney(pQuest->GetRewMailMoney()).SendMailTo(this, creatureId ? MailSender(MAIL_CREATURE, creatureId) : questEnder, MAIL_CHECK_MASK_HAS_BODY, pQuest->GetRewMailDelaySecs());
-
+ 
     }
-
+ 
     q_status.m_rewarded = true;
     if (!pQuest->IsRepeatable())
         SetQuestStatus(questId, QUEST_STATUS_COMPLETE);
     else
         SetQuestStatus(questId, QUEST_STATUS_NONE);
-
+ 
     if (q_status.uState != QUEST_NEW)
         q_status.uState = QUEST_CHANGED;
-
+ 
     if (announce)
         SendQuestReward(pQuest, xp);
-
+ 
     bool handled = false;
-
+ 
     switch (questEnder->GetTypeId())
     {
         case TYPEID_UNIT:
@@ -13312,19 +13327,19 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, WorldObject* questE
             handled = sScriptMgr.OnQuestRewarded(this, (GameObject*)questEnder, pQuest);
             break;
     }
-
+ 
     if (!handled && pQuest->GetQuestCompleteScript() != 0)
         GetMap()->ScriptsStart(sQuestEndScripts, pQuest->GetQuestCompleteScript(), questEnder->GetObjectGuid(), GetObjectGuid());
-
+ 
     // Find spell cast on spell reward if any, then find the appropriate caster and cast it
     uint32 spellId = pQuest->GetRewSpellCast() ? pQuest->GetRewSpellCast() : pQuest->GetRewSpell();
-
+ 
     if (spellId)
     {
         if (SpellEntry const* spellProto = sSpellMgr.GetSpellEntry(spellId))
         {
             Unit* caster = this;
-
+ 
             if (questEnder->GetTypeId() == TYPEID_UNIT)
             {
                 for (uint8 i = 0; i < MAX_EFFECT_INDEX; ++i)
@@ -13339,32 +13354,32 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, WorldObject* questE
                     }
                 }
             }
-
+ 
             caster->CastSpell(this, spellId, true);
         }
     }
-
+ 
     uint32 zone = 0;
     uint32 area = 0;
-
+ 
     // remove auras from spells with quest reward state limitations
     SpellAreaForQuestMapBounds saEndBounds = sSpellMgr.GetSpellAreaForQuestEndMapBounds(questId);
     if (saEndBounds.first != saEndBounds.second)
     {
         GetZoneAndAreaId(zone, area);
-
+ 
         for (SpellAreaForAreaMap::const_iterator itr = saEndBounds.first; itr != saEndBounds.second; ++itr)
             if (!itr->second->IsFitToRequirements(this, zone, area))
                 RemoveAurasDueToSpell(itr->second->spellId);
     }
-
+ 
     // Some spells applied at quest reward
     SpellAreaForQuestMapBounds saBounds = sSpellMgr.GetSpellAreaForQuestMapBounds(questId, false);
     if (saBounds.first != saBounds.second)
     {
         if (!zone || !area)
             GetZoneAndAreaId(zone, area);
-
+ 
         for (SpellAreaForAreaMap::const_iterator itr = saBounds.first; itr != saBounds.second; ++itr)
             if (itr->second->autocast && itr->second->IsFitToRequirements(this, zone, area))
                 if (!HasAura(itr->second->spellId, EFFECT_INDEX_0))

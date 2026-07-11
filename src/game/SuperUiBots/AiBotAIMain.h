@@ -131,6 +131,7 @@
 // [PLAYERPARTY] Escort mode (2026-07-07) — a REAL player invited this bot to their party.
 #define AIBOT_PARTY_FOLLOW_DIST      3.0f   // MoveFollow distance behind the boss (per-bot angle spread on top)
 #define AIBOT_PARTY_CATCHUP_TELEPORT 100.0f // same-map gap beyond this = we were left behind (boss ported) → NearTeleportTo the boss
+#define AIBOT_PARTY_INSTANCE_DWELL_MS 3000  // boss on ANOTHER map this long (and not taxi/transport) → TeleportTo him (instance-follow, symmetric both directions)
 // Fight-initiation discipline + recovery hysteresis (2026-07-05, solo death reduction).
 // The OLD eat gate was a one-way threshold: with an active task, DrinkAndEat was reachable
 // only below 40% HP / 20% mana — so the loop RELEASED the bot back into the grind at
@@ -422,6 +423,14 @@ public:
     // angle spread; same-map NearTeleportTo catch-up when left > AIBOT_PARTY_CATCHUP_TELEPORT
     // behind). Movement stays spine-owned — the doctrine only ever names targets.
     Player* FindPartyBoss() const;
+    // FindEscortBoss: the human THIS bot keeps formation on (2026-07-08, multi-human split).
+    // With ONE real player it is FindPartyBoss; with several, each bot deterministically picks
+    // reals[GUIDLow % count] over the group's real players — the Group member list is a single
+    // server-side object, so every bot iterates the identical order and the fleet splits
+    // ~evenly across the humans with zero coordination and zero tick-to-tick flapping.
+    // FindPartyBoss stays the DETECTION primitive (doctrine / pparty / invite / guards);
+    // this one is only the FORMATION target (DoPartyFollow + the ppdist STATE echo).
+    Player* FindEscortBoss() const;
     void    DoPartyFollow();
 
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---
@@ -628,6 +637,16 @@ public:
     // At AIBOT_GRIND_FREEZE_DWELL we emit GRIND_BLOCKED so C# breaks the freeze with a single
     // unstick kill, then re-issues the objective. Reset to 0 on any successful pull.
     uint32 m_grindFreezeStreak = 0;
+
+    // --- [PLAYERPARTY] Instance-follow dwell (2026-07-08) ---
+    // Accumulates while the escort boss is on a DIFFERENT map (and not taxi-flying / on a
+    // transport); at AIBOT_PARTY_INSTANCE_DWELL_MS DoPartyFollow TeleportTo's him — into his
+    // instance OR back out, symmetrically. Reset on same-map / taxi / transport / no boss, so
+    // a portal in-out or a boat ride can't thrash the fleet through loading screens.
+    // TeleportTo skips areatrigger level checks — under-leveled companions WILL enter; the
+    // only gate is the human. Instance-copy binding = verify-first-run (group binding should
+    // land members in the boss's copy; if a parallel copy spawns, pass GetInstanceId()).
+    uint32 m_bossOffMapMs = 0;
 
 
     // --- Graveyard self-rez state (race-free port→rez; no C# roundtrip) ---

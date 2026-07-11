@@ -556,23 +556,90 @@ Player* AiBotAI::FindPartyBoss() const
     return firstReal;   // leader is a bot but a human is present — escort the human
 }
 
+// The human THIS bot keeps formation on (2026-07-08, multi-human split). Null iff the group
+// holds no real player — the SAME truth value as FindPartyBoss, so pparty semantics are
+// unchanged when the STATE producer keys on this instead. With one human it degenerates to
+// him; with several, GUIDLow % count spreads the escort across them deterministically (the
+// group's member list is one server-side object — every bot walks the identical order, so
+// no sort and no coordination are needed, and the pick never flaps between ticks; it only
+// reshuffles when membership actually changes, which is the right time to reshuffle).
+Player* AiBotAI::FindEscortBoss() const
+{
+    if (!me || !me->IsInWorld())
+        return nullptr;
+
+    Group* pGroup = me->GetGroup();
+    if (!pGroup)
+        return nullptr;
+
+    std::vector<Player*> reals;
+    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* pMember = itr->getSource();
+        if (!pMember || pMember == me)
+            continue;
+        WorldSession* pSess = pMember->GetSession();
+        if (!pSess || pSess->GetBot())
+            continue;   // a bot session — not a human
+        reals.push_back(pMember);
+    }
+
+    if (reals.empty())
+        return nullptr;
+    return reals[me->GetGUIDLow() % reals.size()];
+}
+
 // Keep formation on the boss (called from the escort hook, out of combat, after the engage
 // attempt found nothing to fight). Movement is spine-owned, doctrine names targets only.
+// [MULTI-HUMAN] "the boss" here = this bot's ASSIGNED human (FindEscortBoss) — with several
+// real players in the party the escort splits across them deterministically.
 //  - dead boss: stand vigil (his ghost is not a follow target; follow resumes on his rez);
-//  - cross-map boss: stand down this tick (flight / instance — v1 does not chase across
-//    maps; the doctrine + pparty stay live, so C# stays hands-off and we re-follow when he
-//    lands back on our map);
+//  - cross-map boss (2026-07-08, instance-follow): dwell AIBOT_PARTY_INSTANCE_DWELL_MS so a
+//    portal in-out can't thrash, never while he's taxi-flying or riding a transport (boat/
+//    zeppelin — he'll land somewhere; chasing mid-ride teleports bots into the ocean), then
+//    TeleportTo his exact position — into his instance OR back out, symmetrically. The far
+//    port defers behind a loading screen like any real relocation; the doctrine + pparty stay
+//    live throughout. NO ReGroundZ on this dest: it queries the CURRENT map's terrain, which
+//    is the wrong map here — the boss is standing on his coords, they're trustworthy;
 //  - left far behind on the SAME map (boss took a port): NearTeleportTo the boss, grounded;
 //  - otherwise: (re)issue MoveFollow only when the follow generator is not already driving,
 //    with a per-guid angle so the escort fans out behind him instead of stacking.
 void AiBotAI::DoPartyFollow()
 {
-    Player* pBoss = FindPartyBoss();
+    // [MULTI-HUMAN] Formation keys on the ASSIGNED human (FindEscortBoss), not the single
+    // detection boss — with two real players the fleet splits ~evenly instead of stacking
+    // on one. Catch-up teleport + instance-follow below inherit the same target, so each
+    // half of the escort tracks ITS human even when the humans split up.
+    Player* pBoss = FindEscortBoss();
     if (!pBoss || !pBoss->IsInWorld() || !pBoss->IsAlive())
         return;
 
     if (pBoss->GetMapId() != me->GetMapId())
+    {
+        // [PLAYERPARTY] Instance-follow (2026-07-08): the boss crossed a map boundary
+        // (dungeon portal — or a boat/taxi, which we deliberately wait out).
+        if (pBoss->HasUnitState(UNIT_STATE_TAXI_FLIGHT) || pBoss->GetTransport())
+        {
+            m_bossOffMapMs = 0;   // in transit — he'll land; don't chase a moving platform
+            return;
+        }
+
+        m_bossOffMapMs += AIBOT_UPDATE_INTERVAL;
+        if (m_bossOffMapMs < AIBOT_PARTY_INSTANCE_DWELL_MS)
+            return;
+
+        m_bossOffMapMs = 0;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-PARTY] %s: boss on map %u (we are on %u) — instance-follow TeleportTo (%.1f, %.1f, %.1f)",
+            me->GetName(), pBoss->GetMapId(), me->GetMapId(),
+            pBoss->GetPositionX(), pBoss->GetPositionY(), pBoss->GetPositionZ());
+        me->TeleportTo(pBoss->GetMapId(),
+            pBoss->GetPositionX(), pBoss->GetPositionY(), pBoss->GetPositionZ(),
+            me->GetOrientation());
         return;
+    }
+
+    m_bossOffMapMs = 0;   // same map — a fresh crossing starts a fresh dwell
 
     float const dist = me->GetDistance(pBoss);
 
@@ -1103,8 +1170,23 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 if (AttackStart(pEscortTarget))
                     return;
             }
-            DoPartyFollow();
-            return;
+
+            // [HUB-ERRAND] YIELD (2026-07-08 §3): an active MOVE_TO while in a human's party
+            // is by construction a deliberate C#-issued errand leg (the GoalSelector's
+            // player-party hold stands everything else down; C# never sends otherwise), so
+            // fall THROUGH to the task machinery below and let the leg walk/resume/arrive
+            // exactly like a solo MOVE_TO. Doctrine stays PlayerParty throughout — a mob
+            // jumping the bot at the vendor still gets the full escort ladder above. Every
+            // OTHER task type keeps the pre-yield stand-down (a stale pre-invite GRIND still
+            // idles out as before). Known cosmetic: 1-2 ticks of turn-toward-boss between
+            // errand legs (the task clears on TASK_COMPLETE, follow resumes until the next
+            // command lands).
+            if (m_currentTask.type != TASK_MOVE_TO)
+            {
+                DoPartyFollow();
+                return;
+            }
+            // fall through — the TASK_MOVE_TO resume/arrival machinery below drives the leg
         }
 
         // --- TASK_GRIND: proactive pull or patrol ---
