@@ -751,6 +751,18 @@ void AiBotAI::UpdateOutOfCombatAI()
 
 void AiBotAI::UpdateInCombatAI()
 {
+    // [ROTATION] A loaded slate OWNS in-combat casting — the class switch below is the
+    // vanilla else-branch (RotationSlate design, 2026-05-11). The 250ms sub-tick in
+    // UpdateAI is the main driver; this 1s call is just one more evaluation, so a bot
+    // whose sub-tick guards skipped (e.g. mid-cast) still gets the behaviour-tick try.
+    if (!m_rotation.empty())
+    {
+        UpdateRotationSlate();
+        if (me->GetVictim())
+            UseTrinketEffects();
+        return;
+    }
+
     switch (me->GetClass())
     {
         case CLASS_PALADIN:
@@ -784,6 +796,108 @@ void AiBotAI::UpdateInCombatAI()
 
     if (me->GetVictim())
         UseTrinketEffects();
+}
+
+// ============================================================================
+// [ROTATION] The slate evaluator (2026-07-16; RotationSlate design 2026-05-11).
+//
+// Walk the priority-sorted instructions; the FIRST one whose target resolves,
+// whose HP window and aura condition pass, and that CanTryToCastSpell accepts,
+// is cast — first match wins the tick, exactly the design. Called from the
+// 250ms sub-tick in UpdateAI and from UpdateInCombatAI; both gate on IsAlive/
+// InCombat/not-casting before reaching here, so this stays lean for 4 Hz.
+//
+// Notes locked at build time:
+//  - pSpell was resolved at LOAD (unknown/unlearned spells are null → skipped);
+//  - CanTryToCastSpell owns GCD / cooldown / power / range; DoCastSpell owns
+//    stopping to cast — the same primitives every class rotation trusts;
+//  - an active autorepeat of the SAME spell is skipped (don't restart the wand
+//    every sub-tick), but a DIFFERENT castable instruction interrupts wanding
+//    naturally via DoCastSpell — the wand-trap cure;
+//  - returns true whenever a slate is present: slate present == combat handled,
+//    even on a tick where nothing was castable (the vanilla switch must not run).
+// ============================================================================
+bool AiBotAI::UpdateRotationSlate()
+{
+    if (m_rotation.empty())
+        return false;
+
+    for (auto const& inst : m_rotation)
+    {
+        SpellEntry const* pSpell = inst.pSpell;
+        if (!pSpell)
+            continue;
+
+        // Already wanding/shooting this exact spell — let the autorepeat run.
+        if (Spell* pAuto = me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+            if (pAuto->m_spellInfo == pSpell)
+                continue;
+
+        Unit* pTarget = ResolveRotationTarget(inst.target);
+        if (!pTarget || !pTarget->IsAlive())
+            continue;
+
+        float const hp = pTarget->GetHealthPercent();
+        if (hp < (float)inst.hpMin || hp > (float)inst.hpMax)
+            continue;
+
+        if (inst.auraId)
+        {
+            bool const has = pTarget->HasAura(inst.auraId);
+            if (has != inst.auraPresent)
+                continue;
+        }
+
+        if (!CanTryToCastSpell(pTarget, pSpell))
+            continue;
+
+        if (DoCastSpell(pTarget, pSpell) == SPELL_CAST_OK)
+            return true;
+    }
+
+    return true;   // slate present — combat handled even when nothing fired this tick
+}
+
+// [ROTATION] Target kinds the slate can name. 0=SELF, 1=CURRENT_TARGET (the spine/
+// doctrine-owned victim — the slate never picks fights, it only executes on them),
+// 2=LOWEST_HP_PARTY (lowest-HP% living group player within 40yd, self included; solo
+// bots resolve to self, and the instruction's own hpMax window gates whether a heal
+// actually fires). Unknown kinds resolve null and the instruction is skipped.
+Unit* AiBotAI::ResolveRotationTarget(uint8 kind)
+{
+    switch (kind)
+    {
+        case 0:
+            return me;
+        case 1:
+            return me->GetVictim();
+        case 2:
+        {
+            Group* pGroup = me->GetGroup();
+            if (!pGroup)
+                return me;
+            Unit* pBest = nullptr;
+            float bestHp = 101.0f;
+            for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                Player* pMember = itr->getSource();
+                if (!pMember || !pMember->IsAlive() || !pMember->IsInWorld())
+                    continue;
+                if (pMember->GetMapId() != me->GetMapId())
+                    continue;
+                if (pMember != me && !me->IsWithinDist(pMember, 40.0f))
+                    continue;
+                float const hp = pMember->GetHealthPercent();
+                if (hp < bestHp)
+                {
+                    bestHp = hp;
+                    pBest = pMember;
+                }
+            }
+            return pBest ? pBest : me;
+        }
+    }
+    return nullptr;
 }
 
 void AiBotAI::UpdateOutOfCombatAI_Paladin()

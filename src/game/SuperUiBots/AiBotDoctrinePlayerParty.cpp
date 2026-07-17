@@ -59,6 +59,7 @@
 #include "AiBotDoctrine.h"
 #include "AiBotAIMain.h"
 #include "Player.h"
+#include "WorldSession.h"   // [MULTI-HUMAN] GetSession()->GetBot() — the real-player test in rungs 1-2
 #include "Group.h"
 #include "Creature.h"   // Map::GetCreature returns Creature* — need the complete type (sticky lookup)
 #include "Map.h"
@@ -141,33 +142,66 @@ private:
             return nullptr;   // human left / logged — ResolveDoctrine flips us back next tick
         }
 
-        if (boss->IsAlive())
+        // [MULTI-HUMAN] (2026-07-16) Rungs 1-2 run over EVERY real player, the bot's
+        // ASSIGNED human first — with two humans in the party, the OTHER human's fights
+        // used to be invisible to these rungs (only rung 3/3b could catch them, and only
+        // once a mob was already beating on a player), which is exactly the "bots stand
+        // there for a hot minute" Deadmines report. FindEscortBoss front-loads the human
+        // this bot escorts, so "attack my targets" now means YOUR human's targets first,
+        // then any human's — deterministic per bot, converged per escort half.
+        Player* humans[8];
+        int humanCount = 0;
         {
-            // Rung 1: the boss's own fight is authoritative — "attack my targets".
-            if (Unit* pVictim = boss->GetVictim())
+            if (Player* pAssigned = bot.FindEscortBoss())
+                humans[humanCount++] = pAssigned;
+            if (Group* pGroup = me->GetGroup())
+            {
+                for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr && humanCount < 8; itr = itr->next())
+                {
+                    Player* pMember = itr->getSource();
+                    if (!pMember || pMember == me || !pMember->IsInWorld())
+                        continue;
+                    WorldSession* pSess = pMember->GetSession();
+                    if (!pSess || pSess->GetBot())
+                        continue;   // a bot — not a human
+                    if (humanCount > 0 && pMember == humans[0])
+                        continue;   // the assigned human is already front-loaded
+                    humans[humanCount++] = pMember;
+                }
+            }
+        }
+
+        for (int h = 0; h < humanCount; ++h)
+        {
+            Player* pHuman = humans[h];
+            if (!pHuman->IsAlive())
+                continue;
+
+            // Rung 1: a human's own fight is authoritative — "attack my targets".
+            if (Unit* pVictim = pHuman->GetVictim())
             {
                 if (bot.IsValidAssistTarget(pVictim) &&
                     me->IsWithinDist(pVictim, VISIBILITY_DISTANCE_NORMAL))
                 {
                     m_lastAssistedVictimGuid = pVictim->GetObjectGuid();
                     m_assistStickyTicks = 0;
-                    TraceFocus(me, pVictim, "boss victim");
+                    TraceFocus(me, pVictim, h == 0 ? "my human's victim" : "human victim");
                     return pVictim;
                 }
             }
 
-            // Rung 2: the boss is not attacking, but something is attacking HIM —
+            // Rung 2: the human is not attacking, but something is attacking HIM —
             // "only attack not-my-target if I'm not attacking anything but being attacked".
             // GetAttackerForHelper is the same deterministic read for every companion, so
-            // the whole escort converges on the SAME unit.
-            if (Unit* pAggro = boss->GetAttackerForHelper())
+            // each escort half converges on the SAME unit.
+            if (Unit* pAggro = pHuman->GetAttackerForHelper())
             {
                 if (bot.IsValidAssistTarget(pAggro) &&
                     me->IsWithinDist(pAggro, VISIBILITY_DISTANCE_NORMAL))
                 {
                     m_lastAssistedVictimGuid = pAggro->GetObjectGuid();
                     m_assistStickyTicks = 0;
-                    TraceFocus(me, pAggro, "boss attacker");
+                    TraceFocus(me, pAggro, h == 0 ? "my human's attacker" : "human attacker");
                     return pAggro;
                 }
             }
@@ -221,12 +255,19 @@ private:
                 if (!u->IsCreature())
                     continue;
                 Unit* uVictim = u->GetVictim();
-                if (!uVictim || !uVictim->IsPlayer())
+                if (!uVictim)
                     continue;
-                bool const onBoss = (uVictim == boss);
+                // [PET-FIX] (2026-07-16) Resolve pets/minions to their owning player: a mob
+                // beating on the warlock's voidwalker or the hunter's cat IS a party fight,
+                // but uVictim->IsPlayer() used to exclude it — the Hogger report (mob tagged
+                // on a real player's minion, escort stood watching) lands exactly here.
+                Player* pVictimPlayer = uVictim->GetCharmerOrOwnerPlayerOrPlayerItself();
+                if (!pVictimPlayer)
+                    continue;
+                bool const onBoss = (pVictimPlayer == boss);
                 bool const onMember = onBoss ||
-                    (uVictim == me) ||
-                    (pGroup && pGroup->IsMember(uVictim->GetObjectGuid()));
+                    (pVictimPlayer == me) ||
+                    (pGroup && pGroup->IsMember(pVictimPlayer->GetObjectGuid()));
                 if (!onMember)
                     continue;
                 if (!bot.IsValidAssistTarget(u))

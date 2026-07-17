@@ -68,6 +68,7 @@
 #endif
 
 #define AIBOT_UPDATE_INTERVAL 1000
+#define AIBOT_ROTATION_SUBTICK_MS 250   // [ROTATION] slate evaluation cadence in combat — the 1s behaviour tick starves GCD weaving; 4 Hz tracks it
 
 // Bridge config
 #define BRIDGE_HOST "127.0.0.1"
@@ -435,6 +436,17 @@ public:
 
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---
     void UpdateInCombatAI() override;
+
+    // --- [ROTATION] Custom rotation slate (2026-07-16, RotationSlate design 2026-05-11) ---
+    // A C#-authored, priority-sorted instruction list pushed via LOAD_ROTATION. When present
+    // it OWNS in-combat casting: UpdateInCombatAI runs the slate instead of the class switch,
+    // and a 250ms sub-tick in UpdateAI evaluates it between behaviour ticks (the 1 Hz loop —
+    // and its wand-autorepeat early-return, which freezes a wanding vanilla bot's spell
+    // evaluation entirely — no longer caps ability throughput). Empty slate = vanilla class
+    // AI, bit-for-bit: the OG behaviour is just the else branch. OOC class AI (buffs, food,
+    // post-fight healing) is untouched either way.
+    bool UpdateRotationSlate();                 // walk the slate, first castable match wins; true = slate present (combat handled)
+    Unit* ResolveRotationTarget(uint8 kind);    // 0=SELF 1=CURRENT_TARGET 2=LOWEST_HP_PARTY
     void UpdateOutOfCombatAI() override;
     void UpdateInCombatAI_Paladin() override;
     void UpdateOutOfCombatAI_Paladin() override;
@@ -535,6 +547,8 @@ public:
     void BridgeHandleUseGameObject(const char* json);
     void BridgeHandleFormGroup(const char* json);
     void BridgeHandleDisbandGroup(const char* json);
+    void BridgeHandleSetEscort(const char* json);   // [FOLLOW-CMD] "{bot} follow {player}" — sets/clears m_escortOverrideName
+    void BridgeHandleLoadRotation(const char* json); // [ROTATION] load/replace/clear the custom slate (pipe payload, resolves SpellEntry at load)
     void BridgeHandleRepairItems(const char* json);
 
     // --- Quest/combat/event helpers ---
@@ -574,6 +588,7 @@ public:
 
     // --- State ---
     ShortTimeTracker m_updateTimer;
+    ShortTimeTracker m_rotationSubTick;   // [ROTATION] 250ms in-combat slate cadence (see AIBOT_ROTATION_SUBTICK_MS)
     bool m_wasDead = false;
     bool m_loggedFirstUpdate = false;
     bool m_freshSpawn = false;
@@ -647,6 +662,32 @@ public:
     // only gate is the human. Instance-copy binding = verify-first-run (group binding should
     // land members in the boss's copy; if a parallel copy spawns, pass GetInstanceId()).
     uint32 m_bossOffMapMs = 0;
+
+    // [FOLLOW-CMD] Escort override (2026-07-16): "{bot} follow {player}" in party chat.
+    // Stored LOWERCASED by BridgeHandleSetEscort; empty = no override (the GUIDLow-modulo
+    // auto split applies). FindEscortBoss prefers the named REAL player when he is present
+    // in the group; if he isn't (offline / left / typo), it silently falls back to the auto
+    // split — self-healing, never a stuck bot. Session-lifetime state, deliberately not
+    // persisted: a fresh login starts on the auto split.
+    std::string m_escortOverrideName;
+
+    // --- [ROTATION] The loaded slate ---
+    // Instructions arrive pre-sorted by priority (C# sorts; C++ preserves order). pSpell is
+    // resolved once at load (sSpellMgr + me->HasSpell) so the 4 Hz tick never string-parses
+    // or table-scans. Cleared by LOAD_ROTATION with empty data; survives goal changes and
+    // party joins/leaves by design — the slate is per-BOT kit, not per-doctrine state.
+    struct RotationInstruction
+    {
+        uint32 spellId = 0;
+        SpellEntry const* pSpell = nullptr;   // resolved at load; null = unknown/unlearned (skipped, reported on the ack)
+        uint8  target = 1;                    // 0=SELF 1=CURRENT_TARGET 2=LOWEST_HP_PARTY
+        int    hpMin = 0;                     // resolved target's health % window, inclusive
+        int    hpMax = 100;
+        uint32 auraId = 0;                    // 0 = no aura condition
+        bool   auraPresent = false;           // auraId != 0: cast only if target HAS (true) / LACKS (false) it
+    };
+    std::vector<RotationInstruction> m_rotation;
+    std::string m_rotationProfile;            // observability: echoed in logs/acks
 
 
     // --- Graveyard self-rez state (race-free port→rez; no C# roundtrip) ---

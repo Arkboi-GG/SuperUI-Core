@@ -20,6 +20,7 @@
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
+#include <cctype>   // tolower — [FOLLOW-CMD] lowercases the stored escort-override name
 #include "Group.h"
 #include "CreatureAI.h"
 #include "Log.h"
@@ -587,6 +588,10 @@ void AiBotAI::BridgeProcessLine(const char* line)
        BridgeHandleFormGroup(line);
     else if (strcmp(msgType, "DISBAND_GROUP") == 0)
        BridgeHandleDisbandGroup(line);
+    else if (strcmp(msgType, "SET_ESCORT") == 0)
+        BridgeHandleSetEscort(line);
+    else if (strcmp(msgType, "LOAD_ROTATION") == 0)
+        BridgeHandleLoadRotation(line);
     else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0)
         BridgeHandleQueryQuestStatus(line);
     else if (strcmp(msgType, "PING") == 0)
@@ -861,6 +866,108 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     MoveToDestination(x, y, z);
 }
  
+
+// ============================================================
+// BridgeHandleLoadRotation — [ROTATION] load/replace/clear the custom slate (2026-07-16).
+//
+// Payload: {"profile":"priest_smite_v1","data":"spellId:prio:target:hpMin:hpMax:aura:present|..."}
+// The pipe format is the house wire idiom (quest log, TRAIN_ACK). C# pre-sorts by
+// priority; C++ preserves order and drops the priority field after parse (it exists on
+// the wire only so a human can read a captured payload). Empty/absent data CLEARS the
+// slate — vanilla class AI resumes next tick, the RotationSlate else-branch contract.
+//
+// SpellEntry resolution happens HERE, once: unknown spell IDs and spells the bot has
+// not learned parse to pSpell=null and are skipped at tick time; the ROTATION_ACK
+// reports loaded vs skipped counts so C# can log a bad profile loudly instead of the
+// bot silently doing less than the profile says.
+// ============================================================
+void AiBotAI::BridgeHandleLoadRotation(const char* json)
+{
+    char profileBuf[64] = {0};
+    JsonExtractString(json, "profile", profileBuf, sizeof(profileBuf));
+
+    char dataBuf[2048] = {0};
+    JsonExtractString(json, "data", dataBuf, sizeof(dataBuf));
+
+    m_rotation.clear();
+    m_rotationProfile = profileBuf;
+
+    if (dataBuf[0] == '\0')
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-ROTATION] %s: slate CLEARED — vanilla class AI resumes", me->GetName());
+        BridgeSendEvent("ROTATION_ACK", "profile=|loaded=0|skipped=0");
+        return;
+    }
+
+    uint32 loaded = 0, skipped = 0;
+    char* saveptr = nullptr;
+    for (char* seg = strtok_r(dataBuf, "|", &saveptr); seg != nullptr; seg = strtok_r(nullptr, "|", &saveptr))
+    {
+        uint32 spellId = 0, auraId = 0;
+        int prio = 0, target = 1, hpMin = 0, hpMax = 100, present = 0;
+        if (sscanf(seg, "%u:%d:%d:%d:%d:%u:%d", &spellId, &prio, &target, &hpMin, &hpMax, &auraId, &present) != 7)
+        {
+            ++skipped;
+            continue;
+        }
+
+        RotationInstruction inst;
+        inst.spellId = spellId;
+        inst.pSpell = me->HasSpell(spellId) ? sSpellMgr.GetSpellEntry(spellId) : nullptr;
+        inst.target = (uint8)target;
+        inst.hpMin = hpMin;
+        inst.hpMax = hpMax;
+        inst.auraId = auraId;
+        inst.auraPresent = (present != 0);
+        m_rotation.push_back(inst);
+
+        if (inst.pSpell)
+            ++loaded;
+        else
+        {
+            ++skipped;
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-ROTATION] %s: spell %u in profile '%s' unknown/unlearned — instruction will be skipped",
+                me->GetName(), spellId, profileBuf);
+        }
+    }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-ROTATION] %s: slate '%s' loaded — %u castable, %u skipped (of %u instructions)",
+        me->GetName(), profileBuf, loaded, skipped, (uint32)m_rotation.size());
+
+    char ack[160];
+    snprintf(ack, sizeof(ack), "profile=%s|loaded=%u|skipped=%u", profileBuf, loaded, skipped);
+    BridgeSendEvent("ROTATION_ACK", ack);
+}
+
+// ============================================================
+// BridgeHandleSetEscort — [FOLLOW-CMD] "{bot} follow {player}" (2026-07-16)
+//
+// Sets/clears the escort override consumed by FindEscortBoss. C# recognizes the
+// addressed party-chat command deterministically (BotBridgeService CHAT_RECV) and
+// sends {"player_name": "Athren"} — or "" to revert to the GUIDLow-modulo auto
+// split ("{bot} follow auto" / bare "{bot} follow"). The name is stored LOWERCASED;
+// resolution against group members is case-insensitive at follow time, and a name
+// that never resolves (offline / left / typo) silently falls back to the auto
+// split, so a bad command can never strand a bot. Fire-and-forget: no ack event —
+// C# speaks the party-chat confirmation itself.
+// ============================================================
+void AiBotAI::BridgeHandleSetEscort(const char* json)
+{
+    char nameBuf[64] = {0};
+    JsonExtractString(json, "player_name", nameBuf, sizeof(nameBuf));   // absent/empty = clear
+
+    std::string lowered;
+    for (char const* p = nameBuf; *p; ++p)
+        lowered.push_back((char)tolower((unsigned char)*p));
+
+    m_escortOverrideName = lowered;
+    if (m_escortOverrideName.empty())
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-PARTY] %s: escort override CLEARED (auto split)", me->GetName());
+    else
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-PARTY] %s: escort override -> '%s'", me->GetName(), nameBuf);
+}
 
 void AiBotAI::BridgeHandleSayText(const char* json)
 {

@@ -18,6 +18,7 @@
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
+#include <cctype>   // tolower — [FOLLOW-CMD] case-insensitive escort-name match
 #include "Group.h"
 #include "CreatureAI.h"
 #include "Log.h"
@@ -586,6 +587,24 @@ Player* AiBotAI::FindEscortBoss() const
 
     if (reals.empty())
         return nullptr;
+
+    // [FOLLOW-CMD] Explicit assignment wins: "{bot} follow {player}" stored a lowercased
+    // name; if that human is HERE, escort him. Not present (offline / left / typo) → fall
+    // through to the auto split below, so a stale override can never strand the bot.
+    if (!m_escortOverrideName.empty())
+    {
+        for (Player* pReal : reals)
+        {
+            char const* n = pReal->GetName();
+            size_t i = 0;
+            for (; n[i] && i < m_escortOverrideName.size(); ++i)
+                if ((char)tolower((unsigned char)n[i]) != m_escortOverrideName[i])
+                    break;
+            if (!n[i] && i == m_escortOverrideName.size())
+                return pReal;   // full-length case-insensitive match
+        }
+    }
+
     return reals[me->GetGUIDLow() % reals.size()];
 }
 
@@ -692,6 +711,24 @@ void AiBotAI::UpdateAI(uint32 const diff)
 {
     // Handle pending teleports from base class
     PlayerBotAI::UpdateAI(diff);
+
+    // [ROTATION] Combat sub-tick (2026-07-16): with a slate loaded, evaluate it at 4 Hz
+    // AHEAD of the 1s behaviour gate — the 1 Hz loop can't weave a GCD, and its wand
+    // autorepeat early-return silences a wanding bot's spell evaluation entirely. This
+    // runs ONLY the cast attempt; every behaviour decision (tasks, doctrine, bridge,
+    // loot, kill detection) stays on the 1s tick below. Slate-less bots skip in one
+    // branch — vanilla cadence bit-for-bit.
+    m_rotationSubTick.Update(diff);
+    if (m_rotationSubTick.Passed())
+    {
+        m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
+        if (!m_rotation.empty() && me && me->IsInWorld() && !me->IsBeingTeleported()
+            && me->IsAlive() && me->IsInCombat()
+            && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
+            && !me->IsNonMeleeSpellCasted(false, false, true))
+            UpdateRotationSlate();
+    }
+
     m_updateTimer.Update(diff);
     if (m_updateTimer.Passed())
         m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL);
@@ -1440,7 +1477,45 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     tapperInMyGroup = pGroup->IsMember(pTapper->GetObjectGuid());
             }
 
+            // [PARTY-TAP-EXEMPT] (2026-07-16) The human's fight is authoritative — even on a
+            // stranger's tap. If any REAL player in my group is currently attacking this mob,
+            // or the mob is beating on a group member (or a member's pet), disengaging is
+            // abandoning MY party's fight, not declining a steal: the old gate AttackStopped
+            // here while the doctrine ladder recommitted the same mob next tick — a 1 Hz
+            // engage/stop thrash that reads at the keyboard as "barely pushing buttons".
+            // The human owns the ninja-etiquette call; companions back his choice. Mobs no
+            // group player is on remain vetoed (companions still don't initiate steals).
+            bool partyOwnsThisFight = false;
             if (!tapperInMyGroup)
+            {
+                if (Group* pGroup = me->GetGroup())
+                {
+                    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    {
+                        Player* pMember = itr->getSource();
+                        if (!pMember || pMember == me || !pMember->IsInWorld())
+                            continue;
+                        WorldSession* pSess = pMember->GetSession();
+                        if (!pSess || pSess->GetBot())
+                            continue;   // only a HUMAN's choice grants the exemption
+                        if (pMember->GetVictim() == pVicCre)
+                        {
+                            partyOwnsThisFight = true;
+                            break;
+                        }
+                    }
+                }
+                if (!partyOwnsThisFight)
+                    if (Unit* pMobVictim = pVicCre->GetVictim())
+                        if (Player* pMobVictimOwner = pMobVictim->GetCharmerOrOwnerPlayerOrPlayerItself())
+                            if (pMobVictimOwner == me ||
+                                (me->GetGroup() && me->GetGroup()->IsMember(pMobVictimOwner->GetObjectGuid())))
+                                partyOwnsThisFight = true;
+                if (partyOwnsThisFight)
+                    m_combatIgnore.erase(pVicCre->GetGUIDLow());   // heal any earlier wrong veto
+            }
+
+            if (!tapperInMyGroup && !partyOwnsThisFight)
             {
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s: victim %u (guid=%u) tapped by another — disengaging (not mine)",
