@@ -88,6 +88,7 @@ set (game_SRCS
     Commands/MiscCommands.cpp
     Commands/ObjectCommands.cpp
     Commands/ServerCommands.cpp
+    Commands/SpecCommands.cpp
     Commands/TeleportCommands.cpp
     Commands/TicketCommands.cpp
     Commands/UnitCommands.cpp

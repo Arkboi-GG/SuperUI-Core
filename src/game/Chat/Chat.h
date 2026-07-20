@@ -889,6 +889,11 @@ class ChatHandler
         bool HandleResetSpellsCommand(char* args);
         bool HandleResetStatsCommand(char* args);
         bool HandleResetTalentsCommand(char* args);
+        bool HandleTestBarsCommand(char* args);
+        bool HandleSpecSaveCommand(char* args);
+        bool HandleSpecShowCommand(char* args);
+        bool HandleSpecLoadCommand(char* args);
+        bool HandleSpecBarsCommand(char* args);
         bool HandleResetItemsCommand(char* args);
 
         bool HandleSendItemsCommand(char* args);

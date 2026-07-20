@@ -923,6 +923,15 @@ ChatCommand * ChatHandler::getCommandTable()
         { nullptr,          0,                  false, nullptr,                                        "", nullptr }
     };
 
+    static ChatCommand specCommandTable[] =
+    {
+        { "save",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecSaveCommand,           "", nullptr },
+        { "show",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecShowCommand,           "", nullptr },
+        { "load",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecLoadCommand,           "", nullptr },
+        { "bars",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecBarsCommand,           "", nullptr },
+        { nullptr,          0,                  false, nullptr,                                       "", nullptr }
+    };
+
     static ChatCommand sendMassCommandTable[] =
     {
         { "items",          SEC_ADMINISTRATOR,  true,  &ChatHandler::HandleSendMassItemsCommand,       "", nullptr },
@@ -1212,6 +1221,8 @@ ChatCommand * ChatHandler::getCommandTable()
         { "quest",          SEC_GAMEMASTER,     false, nullptr,                                        "", questCommandTable    },
         { "reload",         SEC_DEVELOPER,      true, nullptr,                                         "", reloadCommandTable   },
         { "reset",          SEC_GAMEMASTER,     true, nullptr,                                         "", resetCommandTable    },
+        { "spec",           SEC_GAMEMASTER,     false, nullptr,                                       "", specCommandTable     },
+        { "testbars",       SEC_GAMEMASTER,     false, &ChatHandler::HandleTestBarsCommand,           "", nullptr },
         { "server",         SEC_PLAYER,         true, nullptr,                                         "", serverCommandTable   },
         { "tele",           SEC_TICKETMASTER,   true, nullptr,                                         "", teleCommandTable     },
         { "trigger",        SEC_TICKETMASTER,   false, nullptr,                                        "", triggerCommandTable  },
