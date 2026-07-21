@@ -894,6 +894,8 @@ class ChatHandler
         bool HandleSpecShowCommand(char* args);
         bool HandleSpecLoadCommand(char* args);
         bool HandleSpecBarsCommand(char* args);
+        bool HandleSpecInitCommand(char* args);
+        bool HandleSpecRespecCommand(char* args);
         bool HandleResetItemsCommand(char* args);
 
         bool HandleSendItemsCommand(char* args);

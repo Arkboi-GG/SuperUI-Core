@@ -1,12 +1,24 @@
 /*
- * Dual-spec TEST HARNESS — throwaway scaffolding, not production code.
+ * Dual-spec commands.
  *
  * Commands:
  *   .testbars <button> <spellId>   push one button + resend the whole bar (redraw test)
  *   .spec save <n>                 snapshot current talents + action bars into spec n
  *   .spec show <n>                 print what is stored for spec n (applies nothing)
  *   .spec load <n>                 ResetTalents(true) -> replay talents -> restore bars
- *   .spec bars <n>                 restore ONLY the bars for spec n (race workaround)
+ *   .spec bars <n>                 restore ONLY the bars for spec n (GM diagnostic)
+ *   .spec init <from> <to>         snapshot into <from>, free respec, claim <to> empty
+ *   .spec respec <n>               free respec + clear the stored build for <n>
+ *
+ * PLAYER ACCESS
+ *   init and respec exist so the addon never has to call the GM command
+ *   ".reset talents". They sit under .spec, so lowering .spec to SEC_PLAYER
+ *   opens them too, and nothing else has to be unlocked.
+ *
+ *   Once .spec is SEC_PLAYER every check below is the ONLY check -- the addon
+ *   can be bypassed by typing the command, so client-side guards are advisory.
+ *   init refuses a target slot that already holds a build, which is what stops
+ *   it being an unlimited free-respec command wearing a different name.
  *
  * Scratch tables are created on first use in the CHARACTERS database:
  *   character_spec_test          (guid, spec, talent_id, rank)
@@ -28,6 +40,7 @@
 
 #include <vector>
 #include <map>
+#include <memory>
 
 namespace
 {
@@ -205,6 +218,95 @@ namespace
         master->SendInitialActionButtons();
         return placed;
     }
+
+    // ------------------------------------------------------------------
+    // Player-facing guards. These matter only once .spec is SEC_PLAYER,
+    // at which point they are the sole enforcement.
+    // ------------------------------------------------------------------
+
+    uint32 const MAX_SPEC_SLOTS = 2;
+
+    bool IsValidSpecIndex(uint32 spec)
+    {
+        return spec >= 1 && spec <= MAX_SPEC_SLOTS;
+    }
+
+    // Returns nullptr when the player may mutate their specs, else the reason.
+    // Kept as a plain string so the caller does the messaging -- avoids
+    // reaching into ChatHandler's protected members from this namespace.
+    char const* SpecMutationBlocker(Player* player)
+    {
+        if (!player->IsAlive())
+            return "Not while dead.";
+
+        if (player->IsInCombat())
+            return "Not while in combat.";
+
+        if (player->IsNonMeleeSpellCasted(false))
+            return "Not while casting.";
+
+        // TODO: unlock gate goes here once the trainer NPC exists --
+        //   if (!PlayerHasDualSpec(player->GetGUIDLow()))
+        //       return "You have not learned dual specialization.";
+
+        return nullptr;
+    }
+
+    bool SpecHasStoredBuild(uint32 guidLow, uint32 spec)
+    {
+        std::unique_ptr<QueryResult> result(CharacterDatabase.PQuery(
+            "SELECT COUNT(*) FROM `character_spec_test` WHERE `guid` = %u AND `spec` = %u",
+            guidLow, spec));
+
+        if (!result)
+            return false;
+
+        return result->Fetch()[0].GetUInt32() > 0;
+    }
+
+    // Snapshot live talents + bars into `spec`. Body mirrors
+    // HandleSpecSaveCommand so the two cannot drift apart. Caller owns the
+    // transaction.
+    uint32 WriteSpecSnapshot(Player* player, MasterPlayer* master,
+                             uint32 guidLow, uint32 spec, uint32& outButtons)
+    {
+        std::vector<StoredTalent> talents;
+        CaptureTalents(player, talents);
+
+        CharacterDatabase.PExecute("DELETE FROM `character_spec_test` WHERE `guid` = %u AND `spec` = %u",
+                                   guidLow, spec);
+        CharacterDatabase.PExecute("DELETE FROM `character_spec_action_test` WHERE `guid` = %u AND `spec` = %u",
+                                   guidLow, spec);
+
+        for (size_t i = 0; i < talents.size(); ++i)
+        {
+            CharacterDatabase.PExecute(
+                "INSERT INTO `character_spec_test` (`guid`,`spec`,`talent_id`,`rank`) VALUES (%u, %u, %u, %u)",
+                guidLow, spec, talents[i].talentId, talents[i].rank);
+        }
+
+        outButtons = 0;
+
+        if (master)
+        {
+            ActionButtonList& buttons = master->GetActionButtons();
+            for (ActionButtonList::const_iterator itr = buttons.begin(); itr != buttons.end(); ++itr)
+            {
+                if (itr->second.uState == ACTIONBUTTON_DELETED)
+                    continue;
+
+                CharacterDatabase.PExecute(
+                    "INSERT INTO `character_spec_action_test` (`guid`,`spec`,`button`,`action`,`type`) "
+                    "VALUES (%u, %u, %u, %u, %u)",
+                    guidLow, spec, uint32(itr->first),
+                    itr->second.GetAction(), uint32(itr->second.GetType()));
+
+                ++outButtons;
+            }
+        }
+
+        return uint32(talents.size());
+    }
 }
 
 // ############################################################################
@@ -289,6 +391,13 @@ bool ChatHandler::HandleSpecSaveCommand(char* args)
         return false;
     }
 
+    if (!IsValidSpecIndex(spec))
+    {
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
     EnsureSpecTables();
 
     uint32 const guidLow = player->GetGUIDLow();
@@ -355,6 +464,13 @@ bool ChatHandler::HandleSpecShowCommand(char* args)
         return false;
     }
 
+    if (!IsValidSpecIndex(spec))
+    {
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
     EnsureSpecTables();
 
     uint32 const guidLow = player->GetGUIDLow();
@@ -409,6 +525,13 @@ bool ChatHandler::HandleSpecBarsCommand(char* args)
         return false;
     }
 
+    if (!IsValidSpecIndex(spec))
+    {
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
     EnsureSpecTables();
 
     std::vector<StoredButton> buttons;
@@ -456,9 +579,16 @@ bool ChatHandler::HandleSpecLoadCommand(char* args)
         return false;
     }
 
-    if (player->IsInCombat())
+    if (!IsValidSpecIndex(spec))
     {
-        SendSysMessage("Not while in combat.");
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (char const* blocker = SpecMutationBlocker(player))
+    {
+        SendSysMessage(blocker);
         SetSentErrorMessage(true);
         return false;
     }
@@ -496,7 +626,150 @@ bool ChatHandler::HandleSpecLoadCommand(char* args)
         PSendSysMessage("|cffff8080%u talents could not be applied|r - stale build, or the "
                         "stored points exceed this character's level.", failed);
 
-    SendSysMessage("The client is about to clear buttons for the spells it just unlearned, "
-                   "and those clears will delete restored buttons. Run '.spec bars <n>' now.");
+    // The old advice to run '.spec bars <n>' here is gone: MSUI_DualSpec's
+    // Bars.lua now places buttons client-side after the client's clears land,
+    // and those PlaceAction calls emit ordinary CMSG_SET_ACTION_BUTTON, so
+    // character_action ends up correct without a second command. Leaving the
+    // message in would just spam a player's chat on every swap.
+    return true;
+}
+
+// ############################################################################
+// .spec init <from> <to>
+// ############################################################################
+// One atomic setup step, replacing the addon's old three-command chain:
+// snapshot the live build into <from>, wipe talents for free, claim <to>.
+//
+// Refuses when <to> already holds a build, so it can only run once per empty
+// slot. That guard is what keeps this from being a free-respec command.
+bool ChatHandler::HandleSpecInitCommand(char* args)
+{
+    Player* player = m_session ? m_session->GetPlayer() : nullptr;
+    if (!player)
+    {
+        SendSysMessage("This command must be run in-game.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    MasterPlayer* master = m_session->GetMasterPlayer();
+
+    uint32 from = 0;
+    uint32 to = 0;
+    if (!ExtractUInt32(&args, from) || !ExtractUInt32(&args, to))
+    {
+        SendSysMessage("Syntax: .spec init <from> <to>");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (!IsValidSpecIndex(from) || !IsValidSpecIndex(to))
+    {
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (from == to)
+    {
+        SendSysMessage("Source and target spec must differ.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (char const* blocker = SpecMutationBlocker(player))
+    {
+        SendSysMessage(blocker);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    EnsureSpecTables();
+
+    uint32 const guidLow = player->GetGUIDLow();
+
+    if (SpecHasStoredBuild(guidLow, to))
+    {
+        PSendSysMessage("Spec %u already has a stored build. Use .spec respec %u instead.", to, to);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    CharacterDatabase.BeginTransaction(guidLow);
+
+    uint32 outgoingButtons = 0;
+    uint32 const outgoingTalents =
+        WriteSpecSnapshot(player, master, guidLow, from, outgoingButtons);
+
+    // Free respec. ResetTalents returns false when nothing was spent, which is
+    // not a failure -- an unspent character setting up a second spec is normal.
+    player->ResetTalents(true);
+
+    uint32 incomingButtons = 0;
+    WriteSpecSnapshot(player, master, guidLow, to, incomingButtons);
+
+    CharacterDatabase.CommitTransaction();
+
+    PSendSysMessage("Spec %u initialised. Stored %u talents into spec %u.",
+                    to, outgoingTalents, from);
+    return true;
+}
+
+// ############################################################################
+// .spec respec <n>
+// ############################################################################
+// Wipe the live talents and clear whatever was stored for <n>, leaving the slot
+// claimed but empty so the points can be spent again. This is the addon's
+// per-card Reset button.
+//
+// This IS a free respec by design -- re-spending a spec is the button's whole
+// purpose. Put the gold cost or the cooldown HERE when the trainer NPC lands,
+// not on .spec load.
+bool ChatHandler::HandleSpecRespecCommand(char* args)
+{
+    Player* player = m_session ? m_session->GetPlayer() : nullptr;
+    if (!player)
+    {
+        SendSysMessage("This command must be run in-game.");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    MasterPlayer* master = m_session->GetMasterPlayer();
+
+    uint32 spec = 0;
+    if (!ExtractUInt32(&args, spec))
+    {
+        SendSysMessage("Syntax: .spec respec <n>");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (!IsValidSpecIndex(spec))
+    {
+        PSendSysMessage("Spec must be 1..%u.", MAX_SPEC_SLOTS);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    if (char const* blocker = SpecMutationBlocker(player))
+    {
+        SendSysMessage(blocker);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    EnsureSpecTables();
+
+    uint32 const guidLow = player->GetGUIDLow();
+
+    player->ResetTalents(true);
+
+    CharacterDatabase.BeginTransaction(guidLow);
+    uint32 buttons = 0;
+    WriteSpecSnapshot(player, master, guidLow, spec, buttons);
+    CharacterDatabase.CommitTransaction();
+
+    PSendSysMessage("Spec %u respecced. Talents reset.", spec);
     return true;
 }

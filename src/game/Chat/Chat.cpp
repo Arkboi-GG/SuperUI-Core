@@ -925,10 +925,12 @@ ChatCommand * ChatHandler::getCommandTable()
 
     static ChatCommand specCommandTable[] =
     {
-        { "save",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecSaveCommand,           "", nullptr },
+        { "save",           SEC_PLAYER,         false, &ChatHandler::HandleSpecSaveCommand,           "", nullptr },
         { "show",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecShowCommand,           "", nullptr },
-        { "load",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecLoadCommand,           "", nullptr },
+        { "load",           SEC_PLAYER,         false, &ChatHandler::HandleSpecLoadCommand,           "", nullptr },
         { "bars",           SEC_GAMEMASTER,     false, &ChatHandler::HandleSpecBarsCommand,           "", nullptr },
+        { "init",           SEC_PLAYER,         false, &ChatHandler::HandleSpecInitCommand,           "", nullptr },
+        { "respec",         SEC_PLAYER,         false, &ChatHandler::HandleSpecRespecCommand,         "", nullptr },
         { nullptr,          0,                  false, nullptr,                                       "", nullptr }
     };
 
@@ -1221,7 +1223,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "quest",          SEC_GAMEMASTER,     false, nullptr,                                        "", questCommandTable    },
         { "reload",         SEC_DEVELOPER,      true, nullptr,                                         "", reloadCommandTable   },
         { "reset",          SEC_GAMEMASTER,     true, nullptr,                                         "", resetCommandTable    },
-        { "spec",           SEC_GAMEMASTER,     false, nullptr,                                       "", specCommandTable     },
+        { "spec",           SEC_PLAYER,     false, nullptr,                                       "", specCommandTable     },
         { "testbars",       SEC_GAMEMASTER,     false, &ChatHandler::HandleTestBarsCommand,           "", nullptr },
         { "server",         SEC_PLAYER,         true, nullptr,                                         "", serverCommandTable   },
         { "tele",           SEC_TICKETMASTER,   true, nullptr,                                         "", teleCommandTable     },

@@ -729,6 +729,16 @@ void AiBotAI::UpdateAI(uint32 const diff)
             UpdateRotationSlate();
     }
 
+    // [TRACE] Movement trace sub-tick (2026-07-20) — the SYMPTOM half of the fly
+    // instrumentation. Placed here for the same reason as the rotation sub-tick above: it must
+    // run AHEAD of the 1s behaviour gate, because 1 Hz is ~7yd of travel per sample at run speed
+    // — far too coarse to resolve a float that opens and closes inside one fillet arc. It
+    // self-throttles to AIBOT_TRACE_SAMPLE_MS internally and returns on the first branch unless
+    // this bot's name is in run/bin/aibot_trace.txt, so an unarmed fleet pays one string compare
+    // per bot per 250ms and emits nothing. Pairs with the dispatch-time [AIBOT-TRACE] WP/PATH
+    // lines from GroundPathPoints — cause and symptom land on one timeline in Server.log.
+    UpdateMovementTrace(diff);
+
     m_updateTimer.Update(diff);
     if (m_updateTimer.Passed())
         m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL);

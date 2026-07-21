@@ -106,6 +106,30 @@
 #define AIBOT_FILLET_MIN_TURN_EPSILON_DEG 5.0f   // below this a vertex is "basically straight" — doesn't start or continue a merge run
 #define AIBOT_FILLET_MAX_WINDOW_POINTS    8       // cap on how many consecutive vertices one run can merge (~40yd at this fork's ~5yd spacing) — generous for a real corner, bounded so a long gentle bend can't get swallowed whole
 
+// ── [GROUND] Per-waypoint grounding + snap sanity (2026-07-20, the fly fix) ──
+// Every point handed to MovebyPath is now re-grounded (GroundPathPoints). These two caps stop
+// a BAD ground reading from turning a 1yd float correction into a cliff drop: a genuine
+// navmesh-over-hull float is sub-yard to a few yards, so a "correction" larger than the cap is a
+// bad measurement (an unmeshed hole, the floor under a bridge, a wrong-floor poly), not a float.
+// Refuse it and log loudly rather than acting on it.
+#define AIBOT_WAYPOINT_GROUND_MAX_DROP  8.0f   // waypoint re-ground: refuse a drop beyond this, keep the Detour Z, log [AIBOT-GROUND] REFUSED
+#define AIBOT_NAVSNAP_MAX_DROP          8.0f   // same cap inside FindNearestNavmeshPointNear's divergence guard (it recorded 159yd "corrections" in the wild)
+// Fillet validation must check Z, not just X/Y. findNearestPoly's search box is 50yd tall, so a
+// candidate can match a poly on an entirely different floor and pass a 1yd 2D test — the exact
+// defect that got the wide bow rolled back on 2026-07-01, still live in the shipped fillet until now.
+#define AIBOT_FILLET_VALIDATE_Z_YARDS   3.0f   // |matched poly Z - candidate Z| beyond this = reject the fillet, keep the raw run
+
+// ── [TRACE] Per-bot movement trace (2026-07-20) ──
+// Opt-in, per-bot, file-armed — see AiBotTraceIsArmed() in AiBotAIMovement.cpp. Off = zero cost
+// beyond one string compare per dispatch. Two halves on ONE timeline: dispatch-time per-waypoint
+// dz (the CAUSE — what Z we told the spline to fly, vs the floor) and a 4 Hz position sampler
+// (the SYMPTOM — where the bot actually is, vs the floor).
+#define AIBOT_TRACE_LIST_FILE      "aibot_trace.txt"  // cwd = run/bin. one bot name per line; "*" = whole fleet. re-read every AIBOT_TRACE_LIST_RELOAD_SEC.
+#define AIBOT_TRACE_LIST_RELOAD_SEC 10                // arm/disarm live by editing the file — no restart, no deploy
+#define AIBOT_TRACE_SAMPLE_MS       250               // position sampler cadence (1 Hz is 7yd of travel — far too coarse to see a fillet arc)
+#define AIBOT_TRACE_FLOAT_YARDS     1.5f              // |pos.z - floor| at or above this = a float incident (open/close logged, not every sample)
+#define AIBOT_TRACE_WAYPOINT_DZ     0.5f              // per-waypoint dz at or above this gets its own line; everything else rolls into the PATH summary
+
 
 // Combat-stalemate breaker (in-combat, neither side dealing damage — navmesh seam / unreachable mob)
 #define AIBOT_STALEMATE_NUDGE_MS      3000   // no-damage-in-combat time before each nudge
@@ -523,7 +547,17 @@ public:
     // fix). Called before EVERY NearTeleportTo so a bot can't be planted on a floating
     // navmesh poly (Recast lays the walkable surface ABOVE the collision hull on steep
     // slopes). Snap-down-only so it can never shove a bot up into geometry.
-    void ReGroundZ(float x, float y, float& z, const char* tag = nullptr);
+    // maxDrop: refuse (and log) a downward snap larger than this. 0.0f = unlimited, which is the
+    // pre-2026-07-20 behaviour every existing teleport call site keeps by omission.
+    void ReGroundZ(float x, float y, float& z, const char* tag = nullptr, float maxDrop = 0.0f);
+    // [GROUND] Re-ground EVERY point in a path before it reaches the spline. THE fly fix:
+    // MovebyPath flies the array verbatim, and raw Detour points carry the navmesh poly surface,
+    // which Recast lays ABOVE the collision hull. Before this, only accepted fillet candidates
+    // were ever grounded — every straight-run waypoint (the overwhelming majority) went out raw.
+    void GroundPathPoints(PointsArray& pts, const char* tag);
+    // [TRACE] 4 Hz position sampler — the symptom half of the movement trace. Call once per
+    // behaviour tick from UpdateAI with the same diff; it self-throttles to AIBOT_TRACE_SAMPLE_MS.
+    void UpdateMovementTrace(uint32 diff);
     // Pin run speed on a MovePoint so the spline never takes MoveSplineInit's velocity==0
     // inflated-spline fallback (~52yd/s glide + the model floating off slopes). The two travel
     // splines pin this already; every OTHER mover routes through here so none can forget.
@@ -713,6 +747,15 @@ public:
     float m_lastDispatchedDestX, m_lastDispatchedDestY, m_lastDispatchedDestZ;
     bool m_hasDispatchedDest;
     uint32 m_pathJourneySeed;
+
+    // --- [TRACE] Movement trace state (2026-07-20) ---
+    // m_traceSampleMs accumulates diff until AIBOT_TRACE_SAMPLE_MS. m_traceFloating latches an
+    // open float incident so the log carries FLOAT-OPEN / FLOAT-CLOSE pairs (with duration and
+    // peak dz) instead of a 4 Hz firehose of identical samples.
+    uint32 m_traceSampleMs   = 0;
+    bool   m_traceFloating   = false;
+    uint32 m_traceFloatMs    = 0;
+    float  m_traceFloatPeak  = 0.0f;
 
     // --- Bridge state ---
     BridgeSocket m_bridgeSocket;

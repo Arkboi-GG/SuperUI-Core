@@ -55,6 +55,81 @@
 #include "Bag.h"
 #include "PathFinder.h"
 #include "MoveMap.h"   // MMAP::MMapFactory for the navmesh nearest-poly query
+#include <ctime>
+#include <set>
+#include <string>
+#include <fstream>
+#include <algorithm>
+
+// ============================================================
+// [TRACE] Per-bot movement trace arming — file-driven, deliberately dependency-free.
+//
+// Reads AIBOT_TRACE_LIST_FILE (cwd = run/bin) at most once every
+// AIBOT_TRACE_LIST_RELOAD_SEC: one bot name per line, "*" on a line arms the whole fleet,
+// blank lines and lines starting with '#' ignored, matching case-insensitive. Missing file
+// = nothing armed = zero trace output, which is the shipped default.
+//
+// WHY A FILE and not a bridge command: it needs no C#, no BridgeHandle*, no protocol change
+// and no restart — arm a bot with `echo Gerkoxyx > run/bin/aibot_trace.txt`, disarm with
+// `: > run/bin/aibot_trace.txt`, both live. The bridge command can come later and just
+// write the same file; the read side never changes.
+// ============================================================
+namespace
+{
+    std::set<std::string> s_aibotTraceNames;
+    bool   s_aibotTraceAll  = false;
+    time_t s_aibotTraceLoad = 0;
+
+    std::string AiBotTraceLower(std::string v)
+    {
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)::tolower(c); });
+        return v;
+    }
+
+    void AiBotTraceReloadIfStale()
+    {
+        time_t const now = time(nullptr);
+        if (s_aibotTraceLoad != 0 && (now - s_aibotTraceLoad) < AIBOT_TRACE_LIST_RELOAD_SEC)
+            return;
+        s_aibotTraceLoad = now;
+
+        s_aibotTraceNames.clear();
+        s_aibotTraceAll = false;
+
+        std::ifstream in(AIBOT_TRACE_LIST_FILE);
+        if (!in.is_open())
+            return;   // no file = nothing armed. Not an error, it is the default.
+
+        std::string line;
+        while (std::getline(in, line))
+        {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            size_t const first = line.find_first_not_of(" \t");
+            if (first == std::string::npos)
+                continue;
+            line = line.substr(first);
+            if (line[0] == '#')
+                continue;
+            if (line == "*")
+            {
+                s_aibotTraceAll = true;
+                continue;
+            }
+            s_aibotTraceNames.insert(AiBotTraceLower(line));
+        }
+    }
+
+    bool AiBotTraceIsArmed(char const* botName)
+    {
+        AiBotTraceReloadIfStale();
+        if (s_aibotTraceAll)
+            return true;
+        if (!botName || !*botName || s_aibotTraceNames.empty())
+            return false;
+        return s_aibotTraceNames.find(AiBotTraceLower(botName)) != s_aibotTraceNames.end();
+    }
+}
 
 void AiBotAI::StopMoving()
 {
@@ -687,7 +762,14 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // Corner smoothing (tight fillet only) — one pass, feeds both branches below. Endpoints are
     // never moved; only sharp corners are touched, and only after every candidate point is
     // confirmed on-mesh. See SmoothPathCorners.
-    PointsArray const smoothed = SmoothPathCorners(points);
+    PointsArray smoothed = SmoothPathCorners(points);
+
+    // ── [GROUND] 2026-07-20 — THE FLY FIX ──
+    // Ground EVERY point before it reaches the spline. Placed here rather than inside
+    // SmoothPathCorners deliberately: this covers both dispatch branches below AND the
+    // size<3 early-return inside SmoothPathCorners, so there is no path from a Detour
+    // point to MovebyPath that skips grounding. See GroundPathPoints for the full why.
+    GroundPathPoints(smoothed, "path-waypoint");
 
     // ── Complete + short path: smoothed MovePoint straight to dest ──
     if (!isPartial && totalDist <= AIBOT_PATH_CHUNK_DIST)
@@ -759,12 +841,28 @@ bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float quer
     {
         float ground = outZ;
         me->UpdateAllowedPositionZ(outX, outY, ground);
-        if (ground < outZ - 0.5f)
+        float const drop = outZ - ground;
+        if (drop > 0.5f)
         {
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT-GROUND] %s: navmesh poly floats — snap Z %.1f -> %.1f (%.1fyd) @ (%.1f, %.1f)",
-                me->GetName(), outZ, ground, outZ - ground, outX, outY);
-            outZ = ground;
+            // [GROUND] 2026-07-20 — CAP THE SNAP. A genuine navmesh-over-hull float is sub-yard
+            // to a few yards; the live log carried 12.3yd, 41.7yd and 159yd "corrections", and a
+            // 159yd snap is not float correction, it is dropping a bot off a cliff. Beyond the cap
+            // the ground reading itself is untrustworthy (unmeshed hole, floor under a bridge,
+            // wrong-floor poly) — keep the poly Z, which is recoverable, and log it LOUDLY so the
+            // bad geometry is one grep. This is the guard that never existed.
+            if (drop > AIBOT_NAVSNAP_MAX_DROP)
+            {
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-GROUND] %s: navsnap REFUSED — floor reads %.1fyd below poly (Z %.1f -> %.1f, cap %.1f) @ (%.1f, %.1f) map=%u — suspect geometry, keeping poly Z",
+                    me->GetName(), drop, outZ, ground, AIBOT_NAVSNAP_MAX_DROP, outX, outY, me->GetMapId());
+            }
+            else
+            {
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-GROUND] %s: navmesh poly floats — snap Z %.1f -> %.1f (%.1fyd) @ (%.1f, %.1f)",
+                    me->GetName(), outZ, ground, drop, outX, outY);
+                outZ = ground;
+            }
         }
     }
 
@@ -799,7 +897,7 @@ bool AiBotAI::FindNearestNavmeshPoint(float& outX, float& outY, float& outZ, flo
 // KEEP the request — never shove the bot up into geometry. Logged either way so a
 // misbehaving site is one grep on the first run.
 // ============================================================
-void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag)
+void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDrop)
 {
     if (!me || !me->GetMap())
         return;
@@ -810,11 +908,26 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag)
     // Core ground-snap (vmap-aware, z-hint bounded search). In-place float& z.
     me->UpdateAllowedPositionZ(x, y, ground);
 
-    if (ground < zReq - 0.5f)
+    float const drop = zReq - ground;
+
+    if (drop > 0.5f)
     {
+        // [GROUND] 2026-07-20 — maxDrop guard. 0.0f preserves the original unlimited behaviour
+        // for every teleport call site (they pass a deliberate destination and want it grounded
+        // whatever the distance). The WAYPOINT path passes a real cap, because there a huge
+        // "correction" means the floor reading is wrong, not that the bot is 40yd in the air —
+        // and silently yanking a waypoint 40yd down builds a path that dives through terrain.
+        if (maxDrop > 0.0f && drop > maxDrop)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-GROUND] %s: %s REFUSED re-ground — floor %.1fyd below request (z %.1f -> %.1f, cap %.1f) @ (%.1f, %.1f) map=%u — keeping request",
+                me->GetName(), tag ? tag : "?", drop, zReq, ground, maxDrop, x, y, me->GetMapId());
+            return;
+        }
+
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUND] %s: %s re-grounded z %.1f -> %.1f (dropped %.1fyd) @ (%.1f, %.1f)",
-            me->GetName(), tag ? tag : "?", zReq, ground, zReq - ground, x, y);
+            me->GetName(), tag ? tag : "?", zReq, ground, drop, x, y);
         z = ground;
     }
     else if (ground > zReq + 25.0f)
@@ -823,6 +936,161 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUND] %s: %s kept z %.1f (floor %.1f, +%.1f above — cave/bridge?) @ (%.1f, %.1f)",
             me->GetName(), tag ? tag : "?", zReq, ground, ground - zReq, x, y);
+    }
+}
+
+// ============================================================
+// GroundPathPoints — [GROUND] THE FLY FIX (2026-07-20).
+//
+// Re-ground EVERY point of a path before it reaches the spline.
+//
+// WHY THIS DID NOT EXIST, and why that stopped being safe: ReGroundZ's own header note says
+// "MovePoint sites already re-ground implicitly (GetRandomPoint runs the same
+// UpdateAllowedPositionZ); only the teleports decouple Z from terrain." That was TRUE when it
+// was written — travel dispatched MotionMaster::MovePoint(..., MOVE_PATHFINDING, ...), and
+// MoveSplineInit::MoveTo built its own PathFinder and re-ran calculate(). The 2026-07-01
+// smoothed-dispatch change (Step A) replaced BOTH travel sites with
+// AiBotMovementIssuer::IssueSmoothedPath -> MoveSplineInit::MovebyPath, which feeds the point
+// array to the spline VERBATIM: no internal re-pathfind, and no grounding. The premise the whole
+// ReGroundZ scoping decision rested on went stale that day, silently, and nobody re-read the note.
+//
+// So until now the ONLY points on a travel path that ever got grounded were accepted fillet
+// candidates (a handful per leg). Every straight-run waypoint — the overwhelming majority, since
+// this fork resamples the whole path at ~5yd — went to the spline carrying the raw Detour polygon
+// surface Z. Recast lays that walkable surface ABOVE the collision hull, and nothing downstream
+// corrects it: a server-driven spline does not ground-follow, so whatever Z is in the array is
+// flown for the entire segment. That is systemic, fleet-wide, and matches "many bots in many
+// places are not walking on the ground."
+//
+// Cost: one UpdateAllowedPositionZ per waypoint per DISPATCH (~50 per leg, once) — not per tick.
+// Every drop is capped at AIBOT_WAYPOINT_GROUND_MAX_DROP; see ReGroundZ for why a big
+// "correction" is a bad reading rather than a big float.
+// ============================================================
+void AiBotAI::GroundPathPoints(PointsArray& pts, const char* tag)
+{
+    if (!me || !me->GetMap() || pts.empty())
+        return;
+
+    bool const traced = AiBotTraceIsArmed(me->GetName());
+
+    uint32 grounded = 0, refused = 0;
+    float maxDrop = 0.0f, sumDrop = 0.0f;
+
+    for (uint32 i = 0; i < (uint32)pts.size(); ++i)
+    {
+        float const zBefore = pts[i].z;
+        ReGroundZ(pts[i].x, pts[i].y, pts[i].z, tag, AIBOT_WAYPOINT_GROUND_MAX_DROP);
+        float const drop = zBefore - pts[i].z;
+
+        if (drop > 0.01f)
+        {
+            ++grounded;
+            sumDrop += drop;
+            if (drop > maxDrop)
+                maxDrop = drop;
+        }
+        else if (zBefore == pts[i].z)
+        {
+            // ReGroundZ refuses past the cap and leaves z alone; we can't distinguish "no float"
+            // from "refused" here without re-querying, so the REFUSED line in ReGroundZ is the
+            // authoritative count. This branch stays cheap on purpose.
+        }
+
+        if (traced && drop >= AIBOT_TRACE_WAYPOINT_DZ)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-TRACE] %s: WP i=%u z=%.2f -> %.2f dz=%.2f @ (%.1f, %.1f)",
+                me->GetName(), i, zBefore, pts[i].z, drop, pts[i].x, pts[i].y);
+        }
+    }
+
+    (void)refused;
+
+    if (traced)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRACE] %s: PATH %s pts=%u grounded=%u maxdz=%.2f meandz=%.2f map=%u",
+            me->GetName(), tag ? tag : "?", (uint32)pts.size(), grounded, maxDrop,
+            grounded ? (sumDrop / (float)grounded) : 0.0f, me->GetMapId());
+    }
+}
+
+// ============================================================
+// UpdateMovementTrace — [TRACE] the SYMPTOM half (2026-07-20).
+//
+// GroundPathPoints logs what Z we TOLD the spline to fly. This logs where the bot ACTUALLY is,
+// against the same floor function, at 4 Hz. Both land in Server.log under [AIBOT-TRACE] on one
+// timeline, so a flight incident can be attributed instead of theorised: if the WP lines were
+// clean and the POS lines float anyway, the waypoints are fine and the spline/interpolation is
+// the producer; if the WP lines already carried dz, the path was built wrong.
+//
+// Emits INCIDENTS, not samples: FLOAT-OPEN when dz crosses AIBOT_TRACE_FLOAT_YARDS, FLOAT-CLOSE
+// when it drops back with duration + peak. A bot walking normally produces zero lines.
+//
+// WIRING: call once per behaviour tick from AiBotAI::UpdateAI with the same diff — it
+// self-throttles to AIBOT_TRACE_SAMPLE_MS internally. 1 Hz alone is ~7yd of travel per sample,
+// far too coarse to resolve a fillet arc, which is why this runs on its own sub-tick (the
+// ShortTimeTracker idiom the rotation slate already proved, done with a plain accumulator here
+// so it costs nothing when no bot is armed).
+// ============================================================
+void AiBotAI::UpdateMovementTrace(uint32 diff)
+{
+    if (!me || !me->IsInWorld() || !me->GetMap())
+        return;
+
+    m_traceSampleMs += diff;
+    if (m_traceSampleMs < AIBOT_TRACE_SAMPLE_MS)
+        return;
+    m_traceSampleMs = 0;
+
+    if (!AiBotTraceIsArmed(me->GetName()))
+    {
+        // Disarmed mid-incident: drop the latch silently so a later arm starts clean.
+        m_traceFloating  = false;
+        m_traceFloatMs   = 0;
+        m_traceFloatPeak = 0.0f;
+        return;
+    }
+
+    // Taxi flight is legitimately airborne — exclude it rather than chase it. (Transport/boat and
+    // a dead-bot exclusion are the obvious next two; add them once the accessors are confirmed
+    // in-tree rather than assumed — house rule.)
+    MovementGeneratorType const genType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+    if (genType == FLIGHT_MOTION_TYPE)
+        return;
+
+    float const px = me->GetPositionX();
+    float const py = me->GetPositionY();
+    float const pz = me->GetPositionZ();
+
+    float ground = pz;
+    me->UpdateAllowedPositionZ(px, py, ground);
+    float const dz = pz - ground;
+
+    if (dz >= AIBOT_TRACE_FLOAT_YARDS)
+    {
+        m_traceFloatMs += AIBOT_TRACE_SAMPLE_MS;
+        if (dz > m_traceFloatPeak)
+            m_traceFloatPeak = dz;
+
+        if (!m_traceFloating)
+        {
+            m_traceFloating = true;
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-TRACE] %s: FLOAT-OPEN dz=%.2f z=%.2f floor=%.2f moving=%d gen=%u @ (%.1f, %.1f) map=%u",
+                me->GetName(), dz, pz, ground, me->IsMoving() ? 1 : 0, (uint32)genType, px, py, me->GetMapId());
+        }
+        return;
+    }
+
+    if (m_traceFloating)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-TRACE] %s: FLOAT-CLOSE peak=%.2f held=%ums dz=%.2f @ (%.1f, %.1f) map=%u",
+            me->GetName(), m_traceFloatPeak, m_traceFloatMs, dz, px, py, me->GetMapId());
+        m_traceFloating  = false;
+        m_traceFloatMs   = 0;
+        m_traceFloatPeak = 0.0f;
     }
 }
 
@@ -1019,9 +1287,34 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
                 allValid = false;
                 break;
             }
+
+            // [GROUND] 2026-07-20 — VALIDATE Z TOO. findNearestPoly's search box is
+            // { searchYards, 50.0f, searchYards }: fifty yards tall. Until now navZ was computed
+            // and thrown away, and acceptance turned on a 2D distance alone — so a fillet point
+            // beside a building or on stairs could match a polygon on an entirely different floor,
+            // clear the 1yd 2D test, and be spliced into the path. This is EXACTLY the defect that
+            // got the wide bow rolled back on 2026-07-01; the file header claims the tight fillet
+            // "doesn't have this exposure" because it is triangle-bounded, which is true in X/Y and
+            // false in Z. The fillet's own Z is a straight Bezier chord across a run that can span
+            // AIBOT_FILLET_MAX_WINDOW_POINTS vertices (~40yd), so on a crest or a ramp it is
+            // legitimately wrong even when the poly match is right. Reject either way: a rejected
+            // fillet falls back to the run's raw points, which is never worse than not smoothing.
+            float const zOff = fabsf(navZ - p.z);
+            if (zOff > AIBOT_FILLET_VALIDATE_Z_YARDS)
+            {
+                if (AiBotTraceIsArmed(me->GetName()))
+                {
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                        "[AIBOT-TRACE] %s: FILLET REJECT z — candidate z=%.2f poly z=%.2f dz=%.2f (cap %.1f) @ (%.1f, %.1f)",
+                        me->GetName(), p.z, navZ, zOff, AIBOT_FILLET_VALIDATE_Z_YARDS, p.x, p.y);
+                }
+                allValid = false;
+                break;
+            }
+
             p.x = navX;
             p.y = navY;
-            ReGroundZ(p.x, p.y, p.z, "fillet-validate");
+            ReGroundZ(p.x, p.y, p.z, "fillet-validate", AIBOT_WAYPOINT_GROUND_MAX_DROP);
         }
 
         if (allValid)
