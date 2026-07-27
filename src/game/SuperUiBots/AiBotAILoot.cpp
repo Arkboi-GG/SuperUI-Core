@@ -104,6 +104,33 @@ uint32 AiBotAI::ChooseQuestReward(Quest const* pQuest) const
 }
 
 // ============================================================
+// QuestRequiredCountFor — how many of an item the bot's active quests still call for.
+// Caps looting (below) and vendors surplus (AiBotAIBridge sell path). Counts INCOMPLETE and
+// COMPLETE quests — a complete quest can still be handed in, so its items are not surplus yet.
+// Source items are not ReqItems, so they return 0 and are never cut.
+// ============================================================
+uint32 AiBotAI::QuestRequiredCountFor(uint32 itemId) const
+{
+    if (!me || itemId == 0)
+        return 0;
+    uint32 maxNeeded = 0;
+    const auto& questMap = me->GetQuestStatusMap();
+    for (const auto& pair : questMap)
+    {
+        if (pair.second.m_status != QUEST_STATUS_INCOMPLETE &&
+            pair.second.m_status != QUEST_STATUS_COMPLETE)
+            continue;
+        Quest const* q = sObjectMgr.GetQuestTemplate(pair.first);
+        if (!q)
+            continue;
+        for (int j = 0; j < QUEST_OBJECTIVES_COUNT; ++j)
+            if (q->ReqItemId[j] == itemId && q->ReqItemCount[j] > maxNeeded)
+                maxNeeded = q->ReqItemCount[j];
+    }
+    return maxNeeded;
+}
+
+// ============================================================
 // AUTO-LOOT — walk to corpse, generate loot, take gold + items + equip + selling + bags
 // ============================================================
 
@@ -220,6 +247,33 @@ void AiBotAI::DoAutoLoot(ObjectGuid creatureGuid)
 
     // --- Take items ---
     me->AutoStoreLoot(creature->loot);
+
+    // --- Cap quest-gather items at the requirement (the boar-ribs over-loot fix) ---
+    // A normal white/food item a quest wants N of keeps dropping as ordinary loot; without a
+    // cap the bot hoards dozens it cannot vendor (the sell path protects quest items). Trim each
+    // stored quest item back to what the active quests still need. DestroyItemCount is the same
+    // stock primitive the sell path uses, so we don't reimplement AutoStoreLoot's placement.
+    // Runs every loot, so it also self-heals dozens already hoarded — the next kill trims them
+    // with no vendor trip. Destroying surplus above the requirement never lowers quest credit
+    // (progress = min(have, req); have stays >= req). A repeated itemId across loot slots is a
+    // cheap no-op on later passes (have <= need once trimmed), so no dedup is needed.
+    for (size_t i = 0; i < creature->loot.items.size(); ++i)
+    {
+        uint32 itemId = creature->loot.items[i].itemid;
+        if (itemId == 0)
+            continue;
+        uint32 need = QuestRequiredCountFor(itemId);
+        if (need == 0)
+            continue;
+        uint32 have = me->GetItemCount(itemId, false);
+        if (have <= need)
+            continue;
+        uint32 surplus = have - need;
+        me->DestroyItemCount(itemId, surplus, true);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-LOOT] %s: quest-cap itemId=%u kept %u, dropped %u surplus",
+            me->GetName(), itemId, need, surplus);
+    }
 
     // --- Build loot summary for bridge event ---
     std::string lootData = "gold=" + std::to_string(gold);

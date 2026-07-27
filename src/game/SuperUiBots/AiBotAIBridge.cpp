@@ -2054,6 +2054,33 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     uint32 totalCopper = 0;
     uint32 soldCount = 0;
 
+    // --- Vendor surplus quest-gather items (over-loot cleanup) ---
+    // Keep exactly what the active quests still need, sell the rest. Source items are not
+    // ReqItems, so QuestRequiredCountFor returns 0 for them and they are never touched here.
+    // questItemIds was built above from every active quest's ReqItemId + SrcItemId.
+    for (uint32 qItemId : questItemIds)
+    {
+        uint32 need = QuestRequiredCountFor(qItemId);
+        if (need == 0)
+            continue;
+        uint32 have = me->GetItemCount(qItemId, false);
+        if (have <= need)
+            continue;
+        uint32 surplus = have - need;
+        ItemPrototype const* sp = sObjectMgr.GetItemPrototype(qItemId);
+        uint32 money = (sp ? sp->SellPrice : 0) * surplus;
+        if (money)
+        {
+            me->ModifyMoney((int32)money);
+            totalCopper += money;
+        }
+        me->DestroyItemCount(qItemId, surplus, true);
+        soldCount += surplus;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s:   quest-surplus [%s] (id=%u) kept %u, sold %u for %uc",
+            me->GetName(), sp && sp->Name1 ? sp->Name1 : "?", qItemId, need, surplus, money);
+    }
+
     // --- Sell helper: checks one item, sells if appropriate ---
     auto trySellItem = [&](uint8 bag, uint8 slot)
     {

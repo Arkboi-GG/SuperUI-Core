@@ -619,6 +619,10 @@ public:
     int32  m_lootTimer = 0;           // Countdown to auto-loot after kill (humanization delay)
     ObjectGuid m_lootTargetGuid;      // GUID of creature to loot
     uint32 ChooseQuestReward(Quest const* pQuest) const; // helper for choosing quest reward
+    // Largest count the bot's ACTIVE quests still ask for of this item (0 = none). Only ReqItem
+    // gather slots count; source items given on accept are excluded, so they are never surplus.
+    // Defined in AiBotAILoot.cpp; used by the loot cap there and the sell surplus-trim in Bridge.
+    uint32 QuestRequiredCountFor(uint32 itemId) const;
 
     // --- State ---
     ShortTimeTracker m_updateTimer;
