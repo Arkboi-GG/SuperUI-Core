@@ -1,5 +1,4 @@
-[![CI Build](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/ci-build.yaml/badge.svg)](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/ci-build.yaml)
-
+- [![Linux Development Build](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/linux-development-release.yaml/badge.svg?branch=main)](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/linux-development-release.yaml) Current development build status
 # SuperUI-Core
 
 **SuperUI-Core** is a customized fork of [VMaNGOS](https://github.com/vmangos/core), designed to work alongside **MangosSuperUI**.
@@ -93,7 +92,7 @@ Custom gameplay behavior should generally be controlled through configuration op
 
 ## Downloads
 
-- [![Linux Development Build](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/ci-build.yaml/badge.svg)](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/ci-build.yaml) Current development build status
+- [![Linux Development Build](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/linux-development-release.yaml/badge.svg?branch=main)](https://github.com/Yafrovon/SuperUI-Core/actions/workflows/linux-development-release.yaml) Current development build status
 - [Development database and installation information](https://github.com/vmangos/core)
 
 Precompiled releases may not always be available while the project is under active development.
