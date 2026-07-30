@@ -112,7 +112,7 @@
 // navmesh-over-hull float is sub-yard to a few yards, so a "correction" larger than the cap is a
 // bad measurement (an unmeshed hole, the floor under a bridge, a wrong-floor poly), not a float.
 // Refuse it and log loudly rather than acting on it.
-#define AIBOT_WAYPOINT_GROUND_MAX_DROP  8.0f   // waypoint re-ground: refuse a drop beyond this, keep the Detour Z, log [AIBOT-GROUND] REFUSED
+#define AIBOT_WAYPOINT_GROUND_MAX_DROP  200.0f   // waypoint re-ground: refuse a drop beyond this, keep the Detour Z, log [AIBOT-GROUND] REFUSED
 #define AIBOT_NAVSNAP_MAX_DROP          8.0f   // same cap inside FindNearestNavmeshPointNear's divergence guard (it recorded 159yd "corrections" in the wild)
 // Fillet validation must check Z, not just X/Y. findNearestPoly's search box is 50yd tall, so a
 // candidate can match a poly on an entirely different floor and pass a 1yd 2D test — the exact
@@ -172,6 +172,9 @@
 #define AIBOT_PULL_MIN_HP     70.0f   // never INITIATE a new pull below this (solo doctrine only)
 #define AIBOT_PULL_MIN_MANA   50.0f
 
+// SELLING STUFF THRESHOLD
+#define AIBOT_SELL_KEEP_UPGRADE_LEVELS  5   // keep an unusable gear drop only if it becomes usable within this many levels (grow-into); else sell regardless of quality
+#define AIBOT_CONSUMABLE_STALE_LEVELS  12   // a non-food consumable (potion/elixir/scroll/bandage) is "too weak" and sells once the bot outlevels its RequiredLevel by more than this; level-appropriate ones are kept (staged for future potion use). Food & drink always sells — bots have unlimited/conjured food.
 
 // Spell / item ids referenced across the combat + self-maintenance methods.
 // (Moved here from AiBotAI.cpp at the file split so every TU — combat, movement,

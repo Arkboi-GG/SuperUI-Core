@@ -1920,17 +1920,22 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
 }
 
 // ============================================================
-// UPDATED BridgeHandleSellItems — v2 (Session 12)
+// BridgeHandleSellItems — v4 (2026-07-28: consumable policy — food dumps, weak pots sell)
 //
-// CHANGES from v1:
-//   1. Excess consumables are now vendorable. Keeps up to MAX_KEEP_PER_CONSUMABLE
-//      (40) of each consumable item ID. Sells the rest.
-//   2. Unequipped bags (containers sitting in inventory, not in bag equip slots)
-//      are now vendorable IF they aren't an upgrade over any equipped bag.
-//   3. Reports "nothing_to_sell" in SELL_ACK data when sold=0 AND freeSlots=0,
-//      so C# can set a vendoring cooldown and stop the critical trigger loop.
+// CHANGE from v3:
+//   The v2/v3 "keep up to MAX_KEEP_PER_CONSUMABLE(40) of each item-id" rule kept every
+//   distinct food/drink/potion stack, so a bag with 30 different half-stacks freed nothing.
+//   Replaced with a role split:
+//     - FOOD & DRINK (subclass FOOD): the bot has unlimited food (autonomous DrinkAndEat
+//       conjures/uses its own), so looted food is never needed → SELL ALL, any level.
+//     - POTIONS / elixirs / scrolls / bandages: not consumed by the bot YET, but keep the
+//       level-appropriate ones staged for when potion-use lands. Sell only ranks the bot has
+//       outgrown — RequiredLevel more than AIBOT_CONSUMABLE_STALE_LEVELS below current level.
 //
-// REPLACES: The entire BridgeHandleSellItems method in AiBotAI.cpp
+// CHANGES from v2/v3 (retained): gear sold on UPGRADE status not rarity (v3); non-upgrade bags
+// vendorable; quest/consumable protections; "nothing_to_sell" flag in SELL_ACK.
+//
+// REQUIRES: AIBOT_SELL_KEEP_UPGRADE_LEVELS 5, AIBOT_CONSUMABLE_STALE_LEVELS 12  in AiBotAIMain.h
 // ============================================================
 
 void AiBotAI::BridgeHandleSellItems(const char* json)
@@ -1998,34 +2003,6 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
             questItemIds.insert(pQuest->GetSrcItemId());
     }
 
-    // --- Pre-scan: count consumables by itemId so we can sell excess ---
-    // Also find the smallest equipped bag size for bag-selling logic.
-    static const uint32 MAX_KEEP_PER_CONSUMABLE = 40; // ~2 stacks of 20
-
-    std::map<uint32, uint32> consumableCounts; // itemId → total count across all bags
-    // First pass: count all consumables
-    auto countConsumable = [&](uint8 bag, uint8 slot)
-    {
-        Item* pItem = me->GetItemByPos(bag, slot);
-        if (!pItem) return;
-        ItemPrototype const* proto = pItem->GetProto();
-        if (!proto) return;
-        if (proto->Class == ITEM_CLASS_CONSUMABLE)
-            consumableCounts[proto->ItemId] += pItem->GetCount();
-    };
-    for (int i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
-        countConsumable(INVENTORY_SLOT_BAG_0, (uint8)i);
-    for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
-    {
-        Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
-        if (!pBag || pBag->GetProto()->Class != ITEM_CLASS_CONTAINER) continue;
-        for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
-            countConsumable((uint8)b, (uint8)j);
-    }
-
-    // Track how many of each consumable we've kept so far during selling
-    std::map<uint32, uint32> consumableKept;
-
     // Find the largest equipped bag size (for bag-selling: only sell bags
     // that are NOT bigger than any equipped bag, i.e. not an upgrade)
     uint32 largestEquippedBagSize = 0;
@@ -2055,9 +2032,6 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     uint32 soldCount = 0;
 
     // --- Vendor surplus quest-gather items (over-loot cleanup) ---
-    // Keep exactly what the active quests still need, sell the rest. Source items are not
-    // ReqItems, so QuestRequiredCountFor returns 0 for them and they are never touched here.
-    // questItemIds was built above from every active quest's ReqItemId + SrcItemId.
     for (uint32 qItemId : questItemIds)
     {
         uint32 need = QuestRequiredCountFor(qItemId);
@@ -2090,8 +2064,6 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
         ItemPrototype const* proto = pItem->GetProto();
         if (!proto) return;
 
-        // Keep: quality at or above threshold (green+ gear)
-        if (proto->Quality >= (uint32)keepQuality) return;
         // Keep: no sell price (hearthstone, etc.)
         if (proto->SellPrice == 0) return;
         // Keep: quest-class items
@@ -2103,35 +2075,68 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
         // --- BAGS: sell unequipped bags that aren't upgrades ---
         if (proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_QUIVER)
         {
-            // If there's an empty bag equip slot, keep this bag (TryAutoEquipBags will use it)
             if (hasEmptyBagSlot) return;
-            // If this bag is bigger than our largest equipped bag, it's a potential upgrade — keep it
             if (proto->ContainerSlots > largestEquippedBagSize) return;
-            // Otherwise it's a duplicate/downgrade sitting in inventory — sell it
-            // (fall through to sell logic below)
+            // else: duplicate/downgrade bag → sell
         }
-        // --- CONSUMABLES: keep up to MAX_KEEP_PER_CONSUMABLE, sell excess ---
+        // --- CONSUMABLES: food dumps, weak potions sell, current-rank potions kept (v4) ---
         else if (proto->Class == ITEM_CLASS_CONSUMABLE)
         {
-            uint32 totalOfThis = consumableCounts[proto->ItemId];
-            if (totalOfThis <= MAX_KEEP_PER_CONSUMABLE) return; // total is fine, keep all
-
-            uint32 alreadyKept = consumableKept[proto->ItemId];
-            uint32 thisStack = pItem->GetCount();
-
-            if (alreadyKept < MAX_KEEP_PER_CONSUMABLE)
+            // Food & drink (subclass FOOD): the bot has unlimited food (autonomous DrinkAndEat),
+            // so looted food is never needed → sell all, any level. (§verify subclass FOOD == 5.)
+            if (proto->SubClass == 5)   // 5 = Food & Drink (1.12 consumable subclass DBC id; this fork defines no ITEM_SUBCLASS_FOOD name)
             {
-                // We still need to keep some — this stack is a "keep" stack
-                consumableKept[proto->ItemId] += thisStack;
-                return;
+                // fall through to sell
             }
-            // We've already kept enough of this item — sell this stack
-            // (fall through to sell logic below)
+            else
+            {
+                // Potions / elixirs / scrolls / bandages — not consumed by the bot YET. Keep the
+                // level-appropriate ones staged for when potion-use lands; sell only ranks the bot
+                // has outgrown. This is the "don't sell EVERYTHING" guard — the current tier stays.
+                if (me->GetLevel() <= proto->RequiredLevel + AIBOT_CONSUMABLE_STALE_LEVELS)
+                    return;   // level-appropriate → keep
+                // else: superseded rank → sell (fall through)
+            }
         }
+        // --- GEAR (weapons/armor): UPGRADE-AWARE, quality-blind (v3) ---
+        else if (proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR)
+        {
+            // Keep 1: epics+ — rare, high value, never vendor-trash a purple.
+            if (proto->Quality >= (uint32)ITEM_QUALITY_EPIC) return;
+
+            uint16 dest = 0;
+            InventoryResult can = me->CanEquipItem(NULL_SLOT, dest, pItem, true);
+            if (can == EQUIP_ERR_OK)
+            {
+                // Usable now — sell UNLESS it out-scores what's worn (safety net for a real upgrade
+                // that slipped past TryAutoEquip when bags were full).
+                uint8 tgt = (uint8)(dest & 0xFF);
+                Item* worn = me->GetItemByPos(INVENTORY_SLOT_BAG_0, tgt);
+                float newS = ScoreItem(proto, tgt);
+                float oldS = worn ? ScoreItem(worn->GetProto(), tgt) : 0.0f;
+                if (newS > oldS) return;   // Keep 2: genuine upgrade
+                // else: usable non-upgrade → sell
+            }
+            else
+            {
+                // Keep 3: grow-into upgrade — right class/proficiency, under-level, usable within
+                // AIBOT_SELL_KEEP_UPGRADE_LEVELS. (RequiredLevel — verify the field name on this core.)
+                if (proto->RequiredLevel > me->GetLevel() &&
+                    proto->RequiredLevel <= me->GetLevel() + AIBOT_SELL_KEEP_UPGRADE_LEVELS)
+                    return;
+                // else: never-usable (wrong class/prof/race) or too far off → sell
+            }
+        }
+        // --- MISC / trade goods / recipes: keep the quality threshold (conservative — see note) ---
+        // NOTE (2026-07-28): recipes (ITEM_CLASS_RECIPE), trade goods (ITEM_CLASS_TRADE_GOODS) and
+        // unopenable lockboxes still fall here and are kept by rarity. A combat grind bot never
+        // crafts/enchants, so these are pure fodder — but they're also exactly what an AH would list
+        // for real value, so the sell-vs-hold call is deferred to the AH-value model (see
+        // SuperUiBots_ARCHITECTURE, the AH warning). Flip to sell-by-default here when that lands (or
+        // sooner, if slots beat the lost AH value).
         else
         {
-            // Normal item (weapons, armor, misc, etc.) — original logic
-            // Already filtered by quality and quest protection above
+            if (proto->Quality >= (uint32)keepQuality) return;
         }
 
         uint32 money = proto->SellPrice * pItem->GetCount();
