@@ -1,5 +1,5 @@
-# Build and publish the Windows development release on pushes to development.
-name: Windows Development Release
+# Build and publish the Linux development release on pushes to development.
+name: Linux Development Release
 
 on:
   push:
@@ -18,50 +18,78 @@ on:
       - 'sql/**'
 
 concurrency:
-  group: windows-development-release-${{ github.ref }}
+  group: linux-development-release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Windows development release
-    runs-on: windows-2022
+    name: Build Linux development release
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
-      - name: Build release binaries
-        shell: bash # Windows runners default to PowerShell.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libace-dev \
+            libboost-all-dev \
+            libbz2-dev \
+            libmariadb-dev \
+            libmariadb-dev-compat \
+            libreadline-dev \
+            libssl-dev \
+            libtbb-dev \
+            zlib1g-dev \
+            zip
+
+      - name: Configure release build
         run: |
           set -euo pipefail
-          mkdir -p build
-          cd build
-          cmake -DBUILD_EXTRACTORS=1 -G "Visual Studio 17 2022" -A x64 ..
-          "/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe" "MaNGOS.sln" //p:Platform=x64 //p:Configuration=Release //m
+
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install" \
+            -DBUILD_EXTRACTORS=1
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Install release files
+        run: |
+          set -euo pipefail
+          cmake --install build
 
       - name: Set release archive filename
         run: |
-          echo "ARCHIVE_FILENAME=dev-$(git rev-parse --short HEAD).zip" >> $env:GITHUB_ENV
+          echo "ARCHIVE_FILENAME=dev-$(git rev-parse --short HEAD).zip" >> "$GITHUB_ENV"
 
       - name: Create release archive
         run: |
-          Set-StrictMode -Version Latest
-          Set-Location "${{ github.workspace }}/bin"
-          Copy-Item -Force "${{ github.workspace }}/dep/windows/lib/x64_release/libmySQL.dll" "${{ github.workspace }}/bin/Release/libmySQL.dll"
-          Copy-Item -Force "${{ github.workspace }}/dep/windows/lib/x64_release/libeay32.dll" "${{ github.workspace }}/bin/Release/libeay32.dll"
+          set -euo pipefail
 
-          7z a -tzip "${{ env.ARCHIVE_FILENAME }}" Release
+          cd "${{ github.workspace }}/install"
+          zip -r "${{ github.workspace }}/${{ env.ARCHIVE_FILENAME }}" .
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7
         with:
-          name: windows-development-build
-          path: "${{ github.workspace }}/bin/${{ env.ARCHIVE_FILENAME }}"
+          name: linux-development-build
+          path: "${{ github.workspace }}/${{ env.ARCHIVE_FILENAME }}"
+          if-no-files-found: error
 
   publish:
-    name: Publish Windows development release
+    name: Publish Linux development release
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -76,11 +104,15 @@ jobs:
       - name: Download release artifact
         uses: actions/download-artifact@v8
         with:
-          pattern: windows-development-build
+          pattern: linux-development-build
           merge-multiple: true
           path: release-assets
 
       - name: Publish release snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./.github/scripts/publish-moving-release.sh latest "Development Build" release-assets
+        run: |
+          ./.github/scripts/publish-moving-release.sh \
+            latest \
+            "Linux Development Build" \
+            release-assets
