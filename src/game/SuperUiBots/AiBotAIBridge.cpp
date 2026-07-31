@@ -584,6 +584,8 @@ void AiBotAI::BridgeProcessLine(const char* line)
         BridgeHandleTrain(line);
     else if (strcmp(msgType, "USE_GAMEOBJECT") == 0)
         BridgeHandleUseGameObject(line);
+    else if (strcmp(msgType, "QUEST_CAST") == 0)
+        BridgeHandleQuestCast(line);
     else if (strcmp(msgType, "FORM_GROUP") == 0)
        BridgeHandleFormGroup(line);
     else if (strcmp(msgType, "DISBAND_GROUP") == 0)
@@ -2367,6 +2369,14 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
         return;
     }
 
+    // [GO-INTERACT CREDIT] Credit any GO-interact quest objective for this GO (a negative
+    // ReqCreatureOrGO). Looting alone NEVER fires this — a pure-interact GO (lever, brazier,
+    // fire) advances only via CastedCreatureOrGO. Harmless for non-interact GOs: if no quest
+    // in the log requires this GO entry, it's a no-op.
+    // NOTE: verify the CastedCreatureOrGO signature against your Player.h (this core:
+    //   void Player::CastedCreatureOrGO(uint32 entry, ObjectGuid guid, uint32 spell_id)).
+    me->CastedCreatureOrGO(obj->GetEntry(), obj->GetObjectGuid(), 0);
+
     // Get loot template ID from GO info
     uint32 lootId = obj->GetGOInfo()->GetLootId();
     if (!lootId)
@@ -2435,6 +2445,110 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-GO] %s: === DONE === %u items stored, %u copper, GO despawned",
         me->GetName(), itemsLooted, gold);
+}
+
+// ============================================================
+// BridgeHandleQuestCast — [CLASS-QUEST] cast a quest spell on a target creature.
+//
+// Drives "cast spell S on creature C" objectives (quest_template ReqSpellCast) — the
+// priest heal-an-NPC, and the same shape for other class-quest "do X to this NPC" steps.
+//   payload: { spell_id, entry (creature_template to find nearby) | guid, count?, radius? }
+//
+// The bot casts through the REAL spell path (me->CastSpell), so — because the bot is a
+// real Player — the core's quest hook should credit the objective exactly as it does for a
+// human. This handler only STARTS the cast + ACKs; the C# planner confirms completion by
+// re-syncing the quest log on the next STATE (same as a grind leg).
+//
+// If a live test shows the cast alone does NOT credit (the same surprise USE_GAMEOBJECT had
+// with GO-interact), uncomment the explicit CastedCreatureOrGO line below.
+//
+// DISPATCH: BridgeProcessLine -> else if (strcmp(msgType,"QUEST_CAST")==0) BridgeHandleQuestCast(line);
+// HEADER:   void BridgeHandleQuestCast(const char* json);
+// ============================================================
+void AiBotAI::BridgeHandleQuestCast(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    int spellIdInt = 0, entryInt = 0, guidInt = 0, countInt = 1;
+    float radius = 15.0f;
+    JsonExtractInt(payload, "spell_id", spellIdInt);
+    JsonExtractInt(payload, "entry", entryInt);
+    JsonExtractInt(payload, "guid", guidInt);
+    JsonExtractInt(payload, "count", countInt);
+    JsonExtractFloat(payload, "radius", radius);
+
+    uint32 spellId = (uint32)spellIdInt;
+    if (!spellId)
+    {
+        BridgeSendEvent("QUEST_CAST_FAIL", "reason=bad_payload");
+        return;
+    }
+    if (radius <= 0.0f || radius > 60.0f)
+        radius = 15.0f;
+
+    // --- Resolve the target: by guid if the planner gave one, else nearest ALIVE of `entry`. ---
+    Creature* pTarget = nullptr;
+    if (guidInt > 0)
+    {
+        pTarget = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(guidInt)));
+    }
+    else if (entryInt > 0)
+    {
+        std::list<Creature*> creatureList;
+        me->GetCreatureListWithEntryInGrid(creatureList, (uint32)entryInt, radius);
+        float closest = 999.0f;
+        for (auto* c : creatureList)
+        {
+            if (!c || !c->IsAlive())
+                continue;
+            float d = me->GetDistance(c);
+            if (d < closest)
+            {
+                closest = d;
+                pTarget = c;
+            }
+        }
+    }
+
+    if (!pTarget)
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "reason=target_not_found|entry=%d|spell=%u", entryInt, spellId);
+        BridgeSendEvent("QUEST_CAST_FAIL", buf);
+        return;
+    }
+
+    // --- Range / LOS guard: the planner should have walked us in first; don't cast blind. ---
+    float dist = me->GetDistance(pTarget);
+    if (dist > 30.0f || !me->IsWithinLOSInMap(pTarget))
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "reason=too_far|entry=%d|spell=%u|dist=%d", entryInt, spellId, (int)dist);
+        BridgeSendEvent("QUEST_CAST_FAIL", buf);
+        return;
+    }
+
+    // --- Cast. Trigger the cast when the bot doesn't "know" the spell (item-granted quest
+    //     spells, e.g. a provided rod); otherwise cast it for real so cast time / cost apply.
+    //     Called as a plain statement so it compiles whether CastSpell returns void or a result. ---
+    me->StopMoving();
+    me->SetFacingToObject(pTarget);
+
+    bool triggered = !me->HasSpell(spellId);
+    me->CastSpell(pTarget, spellId, triggered);
+
+    // If the live test shows the cast alone doesn't credit the objective, uncomment:
+    // me->CastedCreatureOrGO(pTarget->GetEntry(), pTarget->GetObjectGuid(), spellId);
+
+    char ack[160];
+    snprintf(ack, sizeof(ack), "entry=%u|spell=%u|guid=%u",
+        pTarget->GetEntry(), spellId, pTarget->GetGUIDLow());
+    BridgeSendEvent("QUEST_CAST_ACK", ack);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-QCAST] %s: cast spell %u on %s (entry=%u, dist=%.1f) — objective should credit on cast complete",
+        me->GetName(), spellId, pTarget->GetName(), pTarget->GetEntry(), dist);
 }
 
 // ============================================================

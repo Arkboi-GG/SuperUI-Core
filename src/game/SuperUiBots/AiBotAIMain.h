@@ -391,6 +391,14 @@ public:
     }
 
     bool OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess) override;
+
+    // Quick-spawn name override for the ".bot addai <class> [race] [name]" path.
+    // When non-empty, OnSessionLoaded renames the freshly-created player to this
+    // instead of the ObjectMgr auto-generated name. Empty = keep the generated
+    // name (old behaviour). The persistent Load() path sets m_spawnName from the
+    // playerbot.name column; this setter is for the on-the-fly command path.
+    void SetSpawnName(std::string const& name) { m_spawnName = name; }
+
     // --- Lifecycle ---
     void OnPlayerLogin() override;
     void UpdateAI(uint32 const diff) override;
@@ -582,6 +590,7 @@ public:
     void BridgeHandleTrain(const char* json);
     void BridgeHandleQueryQuestStatus(const char* json);
     void BridgeHandleUseGameObject(const char* json);
+    void BridgeHandleQuestCast(const char* json);   // [CLASS-QUEST] cast a quest spell on a target creature
     void BridgeHandleFormGroup(const char* json);
     void BridgeHandleDisbandGroup(const char* json);
     void BridgeHandleSetEscort(const char* json);   // [FOLLOW-CMD] "{bot} follow {player}" — sets/clears m_escortOverrideName

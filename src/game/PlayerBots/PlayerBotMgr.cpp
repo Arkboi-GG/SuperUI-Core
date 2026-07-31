@@ -673,33 +673,111 @@ bool ChatHandler::HandleBotReloadCommand(char * args)
     return true;
 }
 
+// Map a lowercase race token to its RACE_* id. Returns false for an unknown token.
+// Aliases cover the common spellings the web UI / operators use.
+static bool ResolveBotRaceToken(std::string const& token, uint8& outRace)
+{
+    if (token == "human")                                          { outRace = RACE_HUMAN;         return true; }
+    if (token == "orc")                                            { outRace = RACE_ORC;           return true; }
+    if (token == "dwarf")                                          { outRace = RACE_DWARF;         return true; }
+    if (token == "nightelf" || token == "night_elf" || token == "nelf") { outRace = RACE_NIGHTELF; return true; }
+    if (token == "undead"   || token == "forsaken" || token == "scourge") { outRace = RACE_UNDEAD; return true; }
+    if (token == "tauren")                                         { outRace = RACE_TAUREN;        return true; }
+    if (token == "gnome")                                          { outRace = RACE_GNOME;         return true; }
+    if (token == "troll")                                          { outRace = RACE_TROLL;         return true; }
+    return false;
+}
+
+// .bot addai <class> [race] [name]
+//   class            - required; one of the nine class tokens below.
+//   race (optional)  - when given, overrides the class's historical default race.
+//                      Any race legal for the class is accepted; illegal combos
+//                      (e.g. human shaman) are rejected by the GetPlayerInfo gate.
+//   name (optional)  - single word (<=12 chars for 1.12). When given, the bot is
+//                      renamed to this on first spawn instead of a generated name.
+//
+// The starting position is NO LONGER hardcoded to Northshire. It is read from
+// PlayerInfo for the (race, class) pair -- the same playercreateinfo data the real
+// character-create screen uses -- so every race spawns in its own starting zone.
 bool ChatHandler::HandleBotAddAiCommand(char* args)
 {
     uint8 botClass = CLASS_WARRIOR;
-    uint8 botRace = RACE_HUMAN;
+    uint8 botRace  = RACE_HUMAN;
+    std::string botName;
 
-    if (char* arg1 = strtok((char*)args, " "))
+    // Tokenise: <class> [race] [name]
+    char* tokClass = strtok((char*)args, " ");
+    char* tokRace  = strtok(nullptr, " ");
+    char* tokName  = strtok(nullptr, " ");
+
+    // 1) class (+ its historical default race, used when no explicit race follows)
+    if (tokClass)
     {
-        std::string option = arg1;
-        if (option == "warrior") { botClass = CLASS_WARRIOR; botRace = RACE_HUMAN; }
-        else if (option == "mage") { botClass = CLASS_MAGE; botRace = RACE_GNOME; }
-        else if (option == "priest") { botClass = CLASS_PRIEST; botRace = RACE_HUMAN; }
-        else if (option == "hunter") { botClass = CLASS_HUNTER; botRace = RACE_NIGHTELF; }
-        else if (option == "rogue") { botClass = CLASS_ROGUE; botRace = RACE_HUMAN; }
-        else if (option == "warlock") { botClass = CLASS_WARLOCK; botRace = RACE_HUMAN; }
-        else if (option == "druid") { botClass = CLASS_DRUID; botRace = RACE_NIGHTELF; }
-        else if (option == "paladin") { botClass = CLASS_PALADIN; botRace = RACE_HUMAN; }
-        else if (option == "shaman") { botClass = CLASS_SHAMAN; botRace = RACE_ORC; }
+        std::string option = tokClass;
+        if      (option == "warrior") { botClass = CLASS_WARRIOR; botRace = RACE_HUMAN;    }
+        else if (option == "mage")    { botClass = CLASS_MAGE;    botRace = RACE_GNOME;    }
+        else if (option == "priest")  { botClass = CLASS_PRIEST;  botRace = RACE_HUMAN;    }
+        else if (option == "hunter")  { botClass = CLASS_HUNTER;  botRace = RACE_NIGHTELF; }
+        else if (option == "rogue")   { botClass = CLASS_ROGUE;   botRace = RACE_HUMAN;    }
+        else if (option == "warlock") { botClass = CLASS_WARLOCK; botRace = RACE_HUMAN;    }
+        else if (option == "druid")   { botClass = CLASS_DRUID;   botRace = RACE_NIGHTELF; }
+        else if (option == "paladin") { botClass = CLASS_PALADIN; botRace = RACE_HUMAN;    }
+        else if (option == "shaman")  { botClass = CLASS_SHAMAN;  botRace = RACE_ORC;      }
+        else
+        {
+            PSendSysMessage("[AiBot] Unknown class '%s'.", tokClass);
+            SetSentErrorMessage(true);
+            return false;
+        }
     }
 
-    // Northshire Abbey
-    float x = -8949.95f, y = -132.493f, z = 83.5312f, o = 0.0f;
-    uint32 mapId = 0;
+    // 2) explicit race overrides the class default
+    if (tokRace)
+    {
+        uint8 parsedRace = 0;
+        if (!ResolveBotRaceToken(tokRace, parsedRace))
+        {
+            PSendSysMessage("[AiBot] Unknown race '%s'.", tokRace);
+            SetSentErrorMessage(true);
+            return false;
+        }
+        botRace = parsedRace;
+    }
+
+    // 3) optional name
+    if (tokName && *tokName)
+        botName = tokName;
+
+    // 4) validate the combo AND fetch the race-correct start location in one step.
+    //    GetPlayerInfo returns null for an illegal race/class pair, so this both
+    //    gates the combo and yields the starting map/position.
+    //    NOTE: PlayerInfo field names below (mapId / positionX / positionY /
+    //    positionZ / orientation) are the canonical VMaNGOS ObjectMgr.h struct --
+    //    verify once against your ObjectMgr.h if the build errors on a field name.
+    PlayerInfo const* info = sObjectMgr.GetPlayerInfo(botRace, botClass);
+    if (!info)
+    {
+        PSendSysMessage("[AiBot] Invalid race/class combination (race=%u class=%u).", botRace, botClass);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    float  x = info->positionX;
+    float  y = info->positionY;
+    float  z = info->positionZ;
+    float  o = info->orientation;
+    uint32 mapId = info->mapId;
     uint32 instanceId = sMapMgr.GetContinentInstanceId(mapId, x, y);
 
     AiBotAI* ai = new AiBotAI(botRace, botClass, 1, mapId, instanceId, x, y, z, o);
+    if (!botName.empty())
+        ai->SetSpawnName(botName);
+
     if (sPlayerBotMgr.AddBot(ai))
-        PSendSysMessage("[AiBot] Spawned %s at Northshire Abbey.", args && *args ? args : "warrior");
+    {
+        PSendSysMessage("[AiBot] Spawned %s (race=%u class=%u) at its starting zone (map %u).",
+            botName.empty() ? "bot" : botName.c_str(), botRace, botClass, mapId);
+    }
     else
     {
         delete ai;
