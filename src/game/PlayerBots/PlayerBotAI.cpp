@@ -74,19 +74,25 @@ enum
 };
 
 
-bool PlayerBotAI::SpawnNewPlayer(WorldSession* sess, uint8 class_, uint32 race_, uint32 mapId, uint32 instanceId, float x, float y, float z, float o, Player* pClone)
+// ============================================================================
+// Two edits vs the original:
+//   1) new trailing parameter `std::string const& spawnName`
+//   2) set the real name right after Create(), BEFORE InsertPlayerInCache /
+//      sObjectAccessor.AddObject, so the bot is registered under its final name
+//      and /w + /invite resolve it (was registered under the generated name,
+//      renamed too late).
+// ============================================================================
+bool PlayerBotAI::SpawnNewPlayer(WorldSession* sess, uint8 class_, uint32 race_, uint32 mapId, uint32 instanceId, float x, float y, float z, float o, Player* pClone, std::string const& spawnName)
 {
     ASSERT(botEntry);
     std::string name = sObjectMgr.GenerateFreePlayerName();
     normalizePlayerName(name);
-
     uint8 gender;
     uint8 skin;
     uint8 face;
     uint8 hairStyle;
     uint8 hairColor;
     uint8 facialHair;
-
     if (pClone)
     {
         gender = pClone->GetByteValue(UNIT_FIELD_BYTES_0, UNIT_BYTES_0_OFFSET_GENDER);
@@ -101,7 +107,6 @@ bool PlayerBotAI::SpawnNewPlayer(WorldSession* sess, uint8 class_, uint32 race_,
         gender = urand(0, 1);
         Player::SelectRandomAppearance(race_, gender, hairStyle, hairColor, face, facialHair, skin);
     }
-
     Player* newChar = new Player(sess);
     uint32 guid = botEntry->playerGUID;
     if (!newChar->Create(guid, name, race_, class_, gender, skin, face, hairStyle, hairColor, facialHair))
@@ -110,6 +115,16 @@ bool PlayerBotAI::SpawnNewPlayer(WorldSession* sess, uint8 class_, uint32 race_,
         delete newChar;
         return false;
     }
+
+    // Apply the bot's real spawn name UP FRONT — before InsertPlayerInCache / AddObject below —
+    // so the name->player registration is keyed to it and /w and /invite resolve the bot.
+    // Registering under the generated name and renaming afterward (in AiBotAI::OnSessionLoaded)
+    // is exactly why fresh-spawned bots were unfindable while reloaded (LoginPlayer) ones worked.
+    // Kept verbatim (NOT normalizePlayerName'd) so intentional pool casing like "ArcaneMage" is
+    // preserved — the same string the reload path stores and resolves fine.
+    if (!spawnName.empty())
+        newChar->SetName(spawnName);
+
     newChar->SetLocationMapId(mapId);
     newChar->SetLocationInstanceId(instanceId);
     newChar->SetAutoInstanceSwitch(false);

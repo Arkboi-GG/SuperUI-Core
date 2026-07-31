@@ -103,12 +103,19 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
     m_freshSpawn = true;
 
     if (!SpawnNewPlayer(sess, m_spawnClass, m_spawnRace, m_spawnMapId,
-        m_spawnInstanceId, m_spawnX, m_spawnY, m_spawnZ, m_spawnO))
+        m_spawnInstanceId, m_spawnX, m_spawnY, m_spawnZ, m_spawnO, nullptr, m_spawnName))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT] SpawnNewPlayer FAILED for GUID=%u", entry->playerGUID);
         return false;
     }
+
+    // First-spawn bots skip OnPlayerLogin (that path is LoginPlayer-only), so its
+    // SetAcceptWhispers never runs here — set it now so a fresh bot is whisperable
+    // immediately. (This is the WHISPER half; the name-lookup half is fixed by creating
+    // the character under m_spawnName above, so it registers correctly for /w AND /invite.)
+    if (me)
+        me->SetAcceptWhispers(true);
 
     if (!m_spawnName.empty() && me)
     {
