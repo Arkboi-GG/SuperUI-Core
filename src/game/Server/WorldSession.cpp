@@ -37,6 +37,7 @@
 #include "SocialMgr.h"
 #include "PlayerBotMgr.h"
 #include "PlayerBotAI.h"
+#include "SuiPossess.h"
 #include "Anticheat.h"
 #include "Language.h"
 #include "Chat.h"
@@ -649,6 +650,10 @@ void WorldSession::LogoutPlayer(bool Save)
     m_idleTime = WorldTimer::getMSTime();
     m_playerLogout = true;
     m_playerSave = Save;
+
+    // Break any SUI possession pair in either direction: this session was
+    // driving a bot, or this session's player IS a bot someone was driving.
+    SuiPossess::OnLogout(this);
 
     if (_player)
     {

@@ -714,72 +714,11 @@ void AiBotAI::DoPartyFollow()
 // The kobold-camp self-unstick, doctrine dispatch, [GRAVE-SELFREZ], and §4 blocks are
 // carried verbatim from the deployed build.
 // ============================================================
-void AiBotAI::UpdateAI(uint32 const diff)
+// Bridge connect/recv/state/flush on the 1 Hz cadence. Factored out of UpdateAI
+// so the possessed short-circuit keeps the bridge (and the C# brain's view of
+// this bot) alive while every behaviour tick is suspended.
+void AiBotAI::UpdateBridgeTick()
 {
-    // Handle pending teleports from base class
-    PlayerBotAI::UpdateAI(diff);
-
-    // [ROTATION] Combat sub-tick (2026-07-16): with a slate loaded, evaluate it at 4 Hz
-    // AHEAD of the 1s behaviour gate — the 1 Hz loop can't weave a GCD, and its wand
-    // autorepeat early-return silences a wanding bot's spell evaluation entirely. This
-    // runs ONLY the cast attempt; every behaviour decision (tasks, doctrine, bridge,
-    // loot, kill detection) stays on the 1s tick below. Slate-less bots skip in one
-    // branch — vanilla cadence bit-for-bit.
-    m_rotationSubTick.Update(diff);
-    if (m_rotationSubTick.Passed())
-    {
-        m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
-        if (!m_rotation.empty() && me && me->IsInWorld() && !me->IsBeingTeleported()
-            && me->IsAlive() && me->IsInCombat()
-            && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
-            && !me->IsNonMeleeSpellCasted(false, false, true))
-            UpdateRotationSlate();
-    }
-
-    // [TRACE] Movement trace sub-tick (2026-07-20) — the SYMPTOM half of the fly
-    // instrumentation. Placed here for the same reason as the rotation sub-tick above: it must
-    // run AHEAD of the 1s behaviour gate, because 1 Hz is ~7yd of travel per sample at run speed
-    // — far too coarse to resolve a float that opens and closes inside one fillet arc. It
-    // self-throttles to AIBOT_TRACE_SAMPLE_MS internally and returns on the first branch unless
-    // this bot's name is in run/bin/aibot_trace.txt, so an unarmed fleet pays one string compare
-    // per bot per 250ms and emits nothing. Pairs with the dispatch-time [AIBOT-TRACE] WP/PATH
-    // lines from GroundPathPoints — cause and symptom land on one timeline in Server.log.
-    UpdateMovementTrace(diff);
-
-    m_updateTimer.Update(diff);
-    if (m_updateTimer.Passed())
-        m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL);
-    else
-        return;
-
-    if (!me->IsInWorld() || me->IsBeingTeleported())
-        return;
-
-    // Decrement wander/patrol timer
-    if (m_wanderTimer > AIBOT_UPDATE_INTERVAL)
-        m_wanderTimer -= AIBOT_UPDATE_INTERVAL;
-    else
-        m_wanderTimer = 0;
-
-    // §4 approach-scan throttle
-    if (m_approachScanTimer > AIBOT_UPDATE_INTERVAL)
-        m_approachScanTimer -= AIBOT_UPDATE_INTERVAL;
-    else
-        m_approachScanTimer = 0;
-
-    // [ADDED] Combat-stalemate ignore set: tick down per-guid cooldowns
-    for (auto it = m_combatIgnore.begin(); it != m_combatIgnore.end(); )
-    {
-        if (it->second <= AIBOT_UPDATE_INTERVAL)
-            it = m_combatIgnore.erase(it);
-        else { it->second -= AIBOT_UPDATE_INTERVAL; ++it; }
-    }
-
-    // [DOCTRINE] Resolve which engagement doctrine governs this tick (Solo / TeamAuto / Directed)
-    // and swap on change, before any acquisition or combat decision below consults m_doctrine.
-    RefreshDoctrine();
-
-    // --- Bridge: connect + recv + periodic state ---
     if (!m_bridgeConnected)
     {
         if (m_bridgeReconnectTimer <= AIBOT_UPDATE_INTERVAL)
@@ -815,6 +754,113 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
         BridgeFlush();   // Session 36: drain bytes deferred by a prior partial/blocked write
     }
+}
+
+// SUI possession toggle (SuiPossess.cpp). On: freeze in place — the human's
+// client is about to take over the mover; any in-flight spline or task motion
+// would fight it. Off: resume on a fresh 1s tick so the accumulated diff of a
+// long possession doesn't fire one giant catch-up tick, and let RefreshDoctrine
+// re-resolve naturally on that tick.
+void AiBotAI::SetPossessed(bool on)
+{
+    if (m_possessed == on)
+        return;
+    m_possessed = on;
+    if (on)
+    {
+        if (me)
+        {
+            StopMoving();
+            me->GetMotionMaster()->MoveIdle();
+        }
+    }
+    else
+    {
+        m_updateTimer.Reset(1000);
+    }
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[AIBOT] %s possession %s",
+        me ? me->GetName() : "<no player>", on ? "BEGIN" : "END");
+}
+
+void AiBotAI::UpdateAI(uint32 const diff)
+{
+    // Handle pending teleports from base class
+    PlayerBotAI::UpdateAI(diff);
+
+    // [ROTATION] Combat sub-tick (2026-07-16): with a slate loaded, evaluate it at 4 Hz
+    // AHEAD of the 1s behaviour gate — the 1 Hz loop can't weave a GCD, and its wand
+    // autorepeat early-return silences a wanding bot's spell evaluation entirely. This
+    // runs ONLY the cast attempt; every behaviour decision (tasks, doctrine, bridge,
+    // loot, kill detection) stays on the 1s tick below. Slate-less bots skip in one
+    // branch — vanilla cadence bit-for-bit.
+    m_rotationSubTick.Update(diff);
+    if (m_rotationSubTick.Passed())
+    {
+        m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
+        if (!m_possessed
+            && !m_rotation.empty() && me && me->IsInWorld() && !me->IsBeingTeleported()
+            && me->IsAlive() && me->IsInCombat()
+            && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
+            && !me->IsNonMeleeSpellCasted(false, false, true))
+            UpdateRotationSlate();
+    }
+
+    // [TRACE] Movement trace sub-tick (2026-07-20) — the SYMPTOM half of the fly
+    // instrumentation. Placed here for the same reason as the rotation sub-tick above: it must
+    // run AHEAD of the 1s behaviour gate, because 1 Hz is ~7yd of travel per sample at run speed
+    // — far too coarse to resolve a float that opens and closes inside one fillet arc. It
+    // self-throttles to AIBOT_TRACE_SAMPLE_MS internally and returns on the first branch unless
+    // this bot's name is in run/bin/aibot_trace.txt, so an unarmed fleet pays one string compare
+    // per bot per 250ms and emits nothing. Pairs with the dispatch-time [AIBOT-TRACE] WP/PATH
+    // lines from GroundPathPoints — cause and symptom land on one timeline in Server.log.
+    if (!m_possessed)
+        UpdateMovementTrace(diff);
+
+    m_updateTimer.Update(diff);
+    if (m_updateTimer.Passed())
+        m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL);
+    else
+        return;
+
+    if (!me->IsInWorld() || me->IsBeingTeleported())
+        return;
+
+    // [SUI] A real player is driving this body (SuiPossess). Every autonomous
+    // behaviour — tasks, doctrine, combat, loot, wander — is suspended; only the
+    // bridge stays alive so the C# brain keeps seeing STATE (possessed:1) and
+    // stands down. SetPossessed(false) resumes on a fresh 1s tick.
+    if (m_possessed)
+    {
+        UpdateBridgeTick();
+        return;
+    }
+
+    // Decrement wander/patrol timer
+    if (m_wanderTimer > AIBOT_UPDATE_INTERVAL)
+        m_wanderTimer -= AIBOT_UPDATE_INTERVAL;
+    else
+        m_wanderTimer = 0;
+
+    // §4 approach-scan throttle
+    if (m_approachScanTimer > AIBOT_UPDATE_INTERVAL)
+        m_approachScanTimer -= AIBOT_UPDATE_INTERVAL;
+    else
+        m_approachScanTimer = 0;
+
+    // [ADDED] Combat-stalemate ignore set: tick down per-guid cooldowns
+    for (auto it = m_combatIgnore.begin(); it != m_combatIgnore.end(); )
+    {
+        if (it->second <= AIBOT_UPDATE_INTERVAL)
+            it = m_combatIgnore.erase(it);
+        else { it->second -= AIBOT_UPDATE_INTERVAL; ++it; }
+    }
+
+    // [DOCTRINE] Resolve which engagement doctrine governs this tick (Solo / TeamAuto / Directed)
+    // and swap on change, before any acquisition or combat decision below consults m_doctrine.
+    RefreshDoctrine();
+
+    // --- Bridge: connect + recv + periodic state ---
+    UpdateBridgeTick();
 
     // One-time log on first successful update tick
     if (!m_loggedFirstUpdate)

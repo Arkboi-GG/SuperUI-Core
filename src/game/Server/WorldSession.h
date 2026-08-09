@@ -58,6 +58,7 @@
 #include "Packets/Quest.h"
 #include "Packets/Skill.h"
 #include "Packets/Spell.h"
+#include "Packets/SuiControl.h"
 #include "Packets/Taxi.h"
 #include "Packets/Trade.h"
 
@@ -306,6 +307,12 @@ class WorldSession
         PlayerBotEntry* GetBot() const { return m_bot.get(); }
         void SetBot(std::shared_ptr<PlayerBotEntry> const& b) { m_bot = b; }
 
+        // SuperUI CRPG/RTS control (SuiPossess.cpp)
+        ObjectGuid const& GetSuiControlledGuid() const { return m_suiControlledGuid; }
+        void SetSuiControlledGuid(ObjectGuid guid) { m_suiControlledGuid = guid; }
+        bool IsSuiCapable() const { return m_suiCapable; }
+        void SetSuiCapable(bool on) { m_suiCapable = on; }
+
         // Warden / Anticheat
         void InitWarden();
         void SetSessionKey(BigNumber const& sessionKey) { m_sessionKey = sessionKey; }
@@ -492,6 +499,10 @@ class WorldSession
         void HandleCharEnum(std::unique_ptr<QueryResult> result);
         void HandlePlayerLogin(LoginQueryHolder* holder);
         void HandlePlayedTime(NullClientPacket const& packet);
+
+        // SuperUI CRPG/RTS control
+        void HandleSuiControlRequestOpcode(WorldPackets::SuiControl::ControlRequest const& packet);
+        void HandleSuiControlReleaseOpcode(WorldPackets::SuiControl::ControlRelease const& packet);
 
         // Movement
         void HandleMoveRootAck(WorldPackets::Movement::MoveRootAck const& packet);
@@ -872,6 +883,8 @@ class WorldSession
         ObjectGuid m_currentPlayerGuid;
         ObjectGuid m_clientMoverGuid;
         uint32 m_moveRejectTime;
+        ObjectGuid m_suiControlledGuid;                     // bot this session drives (SuiPossess)
+        bool m_suiCapable = false;                          // session spoke CMSG_SUI_* - may receive SUI SMSGs
         time_t m_createTime;                                // when session was created
         time_t m_previousPlayTime;                          // play time from previous session less than 5 hours ago
         time_t m_logoutTime;                                // when its time to log out character

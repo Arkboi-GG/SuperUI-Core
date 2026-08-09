@@ -825,5 +825,17 @@ enum OpcodesList
     SMSG_CHARACTER_PROFILE                 = 824,
     SMSG_CHARACTER_PROFILE_REALM_CONNECTED = 825,
     SMSG_DEFENSE_MESSAGE                   = 827,
-    NUM_MSG_TYPES                          = 828
+
+    // ── SuperUI protocol extension (CRPG/RTS control) ─────────────────────────
+    // Only MSUIClient speaks these; a vanilla 1.12 client never emits opcodes
+    // above 827, and the SMSGs are only ever sent to sessions that asked for
+    // SUI control. See docs: SUI_WIRE_PROTOCOL.md.
+    CMSG_SUI_CONTROL_REQUEST               = 828,
+    CMSG_SUI_CONTROL_RELEASE               = 829,
+    CMSG_SUI_ORDER                         = 830,
+    SMSG_SUI_CONTROL_ROSTER                = 831,
+    SMSG_SUI_CONTROL_ACK                   = 832,
+    SMSG_SUI_PROXY                         = 833,
+    SMSG_SUI_SNAPSHOT                      = 834,
+    NUM_MSG_TYPES                          = 835
 };
