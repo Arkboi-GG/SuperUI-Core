@@ -10,6 +10,7 @@
 #include "SuiPossess.h"
 
 #include "AiBotAIMain.h"
+#include "Bag.h"
 #include "Chat.h"
 #include "Group.h"
 #include "MasterPlayer.h"
@@ -21,6 +22,8 @@
 
 namespace SuiPossess
 {
+
+static void SendSnapshot(WorldSession* to, Player* bot);   // defined with the M4 block below
 
 static void SendAck(WorldSession* session, ObjectGuid guid, AckResult result, Player* positionOf)
 {
@@ -174,6 +177,7 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
         bot->SendInitialSpells();
         if (MasterPlayer* master = bot->GetSession()->GetMasterPlayer())
             master->SendInitialActionButtons();
+        SendSnapshot(session, bot);
         if (Group* group = session->GetPlayer()->GetGroup())
             BroadcastRoster(group);
     }
@@ -290,10 +294,70 @@ void BroadcastRoster(Group* group)
 
 } // namespace SuiPossess
 
-// ── Owner-data mirror (M3) ───────────────────────────────────────────────────
+// ── Owner-data mirror (M3) + inventory/talent snapshot (M4) ──────────────────
 
 namespace SuiPossess
 {
+
+static void AppendSnapshotItem(WorldPacket& data, uint8 bag, uint8 slot, Item* item)
+{
+    data << uint8(bag);
+    data << uint8(slot);
+    data << uint64(item->GetObjectGuid().GetRawValue());
+    data << uint32(item->GetEntry());
+    data << uint32(item->GetCount());
+    uint8 bagSlots = 0;
+    if (ItemPrototype const* proto = item->GetProto())
+        if (proto->Class == ITEM_CLASS_CONTAINER)
+            bagSlots = (uint8)((Bag*)item)->GetBagSize();
+    data << bagSlots;
+}
+
+/// Read-only bags + talent points for the possessed bot, pushed once per grant.
+/// bag 255 = character-held (equipment 0-18, bag slots 19-22, backpack 23-38,
+/// keyring 81+ — one contiguous slot numbering); bag 19-22 = inside that
+/// equipped bag. Bag rows precede their contents by construction.
+static void SendSnapshot(WorldSession* to, Player* bot)
+{
+    if (!to->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_SNAPSHOT, 4096);
+    data << uint64(bot->GetObjectGuid().GetRawValue());
+    data << uint32(bot->GetUInt32Value(PLAYER_CHARACTER_POINTS1));
+    data << uint32(bot->GetMoney());
+    size_t countPos = data.wpos();
+    data << uint16(0);
+    uint16 count = 0;
+
+    for (uint8 i = EQUIPMENT_SLOT_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+        if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            AppendSnapshotItem(data, 255, i, item);
+            ++count;
+        }
+    for (uint8 i = KEYRING_SLOT_START; i < KEYRING_SLOT_END; ++i)
+        if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            AppendSnapshotItem(data, 255, i, item);
+            ++count;
+        }
+    for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        if (Item* bagItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot))
+            if (ItemPrototype const* proto = bagItem->GetProto())
+                if (proto->Class == ITEM_CLASS_CONTAINER)
+                {
+                    Bag* pBag = (Bag*)bagItem;
+                    for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
+                        if (Item* item = pBag->GetItemByPos((uint8)j))
+                        {
+                            AppendSnapshotItem(data, bagSlot, (uint8)j, item);
+                            ++count;
+                        }
+                }
+
+    data.put<uint16>(countPos, count);
+    to->SendPacket(&data);
+}
 
 void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
 {
