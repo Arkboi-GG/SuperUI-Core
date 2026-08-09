@@ -26,6 +26,8 @@
 #include "Common.h"
 #include "ObjectGuid.h"
 
+#include <vector>
+
 class Player;
 class Unit;
 class WorldSession;
@@ -80,6 +82,14 @@ namespace SuiPossess
 
     /// Voluntary release (client asked). Safe to call when nothing is possessed.
     void HandleRelease(WorldSession* session, uint8 mode);
+
+    /// RTS order from the free camera: move/attack/stop for the group's AiBots
+    /// (explicit subject list, or empty = every controllable bot). Reuses the
+    /// bridge command paths so ordered movement/attack behaves exactly like a
+    /// brain-issued command.
+    void HandleOrder(WorldSession* session, uint8 orderType,
+        std::vector<ObjectGuid> const& subjects, ObjectGuid targetGuid,
+        float x, float y, float z);
 
     /// Forced release with a reason code; no-op when the session possesses nothing.
     /// Server-initiated paths open the movement drain window (m_moveRejectTime) so

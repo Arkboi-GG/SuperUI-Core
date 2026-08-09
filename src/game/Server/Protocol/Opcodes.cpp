@@ -938,7 +938,7 @@ Handlers BuildOpcodeList()
     // SuperUI CRPG/RTS control extension (MSUIClient only; see SuiPossess.cpp)
     DEFINE_HANDLER(CMSG_SUI_CONTROL_REQUEST,          STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiControlRequestOpcode);
     DEFINE_HANDLER(CMSG_SUI_CONTROL_RELEASE,          STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiControlReleaseOpcode);
-    INVALID_PACKET(CMSG_SUI_ORDER,                    UnhandleReason::Unhandled);
+    DEFINE_HANDLER(CMSG_SUI_ORDER,                    STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiOrderOpcode);
     INVALID_PACKET(SMSG_SUI_CONTROL_ROSTER,           UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_CONTROL_ACK,              UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_PROXY,                    UnhandleReason::SendByServer);

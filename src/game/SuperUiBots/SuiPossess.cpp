@@ -259,6 +259,70 @@ void ForceRelease(WorldSession* session, AckResult reason)
     DoRelease(session, reason, true);
 }
 
+void HandleOrder(WorldSession* session, uint8 orderType,
+    std::vector<ObjectGuid> const& subjects, ObjectGuid targetGuid,
+    float x, float y, float z)
+{
+    session->SetSuiCapable(true);
+    Player* player = session->GetPlayer();
+    if (!player || session->GetBot())
+        return;
+    Group* group = player->GetGroup();
+    if (!group)
+        return;
+
+    auto orderBot = [&](Player* pMember)
+    {
+        if (!pMember || pMember->GetGroup() != group || pMember == player)
+            return;
+        if (!pMember->GetSession() || !pMember->GetSession()->GetBot())
+            return;
+        AiBotAI* ai = dynamic_cast<AiBotAI*>(pMember->AI());
+        if (!ai || ai->IsPossessed())
+            return;
+
+        // Reuse the bridge command paths verbatim — ordered behaviour is then
+        // bit-identical to a brain-issued MOVE_TO / ATTACK_TARGET, including the
+        // chunked pathfinding and the in-combat MOVE_TO deferral. The PlayerParty
+        // escort loop yields to an active TASK_MOVE_TO, so orders are not
+        // formation-snapped on the next tick.
+        char json[192];
+        switch (orderType)
+        {
+            case ORDER_MOVE:
+                snprintf(json, sizeof(json),
+                    "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+                    pMember->GetMapId(), x, y, z);
+                ai->BridgeProcessLine(json);
+                break;
+            case ORDER_ATTACK:
+                if (targetGuid.IsCreature())
+                {
+                    snprintf(json, sizeof(json),
+                        "{\"type\":\"ATTACK_TARGET\",\"payload\":{\"guid\":%u}}",
+                        targetGuid.GetCounter());
+                    ai->BridgeProcessLine(json);
+                }
+                break;
+            case ORDER_STOP:
+                ai->StopMoving();
+                pMember->AttackStop();
+                ai->m_currentTask.type = TASK_IDLE;
+                pMember->GetMotionMaster()->MoveIdle();
+                break;
+            default:
+                break;
+        }
+    };
+
+    if (!subjects.empty())
+        for (ObjectGuid guid : subjects)
+            orderBot(sObjectMgr.GetPlayer(guid));
+    else
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            orderBot(itr->getSource());
+}
+
 // ── Hooks ────────────────────────────────────────────────────────────────────
 
 void OnPlayerRemovedFromGroup(Player* player)
@@ -480,6 +544,12 @@ void WorldSession::HandleSuiControlRequestOpcode(WorldPackets::SuiControl::Contr
 void WorldSession::HandleSuiControlReleaseOpcode(WorldPackets::SuiControl::ControlRelease const& packet)
 {
     SuiPossess::HandleRelease(this, packet.mode);
+}
+
+void WorldSession::HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& packet)
+{
+    SuiPossess::HandleOrder(this, packet.orderType, packet.subjects,
+        packet.targetGuid, packet.x, packet.y, packet.z);
 }
 
 // ── GM commands (stock-client testable: .sui possess <name> / .sui release) ──

@@ -504,6 +504,7 @@ class WorldSession
         // SuperUI CRPG/RTS control
         void HandleSuiControlRequestOpcode(WorldPackets::SuiControl::ControlRequest const& packet);
         void HandleSuiControlReleaseOpcode(WorldPackets::SuiControl::ControlRelease const& packet);
+        void HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& packet);
 
         // Movement
         void HandleMoveRootAck(WorldPackets::Movement::MoveRootAck const& packet);
