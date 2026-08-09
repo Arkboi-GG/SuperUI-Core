@@ -188,7 +188,8 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
         possessor->SetMover(nullptr);           // resolves to self
         possessor->SetClientControl(possessor, 1);
         // Manual control resumes — except into the free camera, where the own
-        // character stays autonomous (anchor: whatever the group offers next tick).
+        // character stays autonomous. Its anchor remains the just-released bot
+        // (still a valid group member); it only re-points on the next possess.
         if (reason != RELEASED_FREECAM)
             DetachUnattendedAI(possessor);
     }
