@@ -15,6 +15,7 @@
 #include "AiBotAIMain.h"
 #include "Server/Packet.h"   // NullClientPacket — the typed empty client packet the group accept/decline handlers take
 #include "AiBotAITeamPlay.h"   // [TEAMPLAY] ResolveCombatTarget — the group focus-fire resolver
+#include "SuiPossess.h"      // [SUI] possessed-bot-as-boss precedence in FindPartyBoss
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -546,6 +547,17 @@ Player* AiBotAI::FindPartyBoss() const
     Group* pGroup = me->GetGroup();
     if (!pGroup)
         return nullptr;
+
+    // [SUI] A group member currently DRIVEN by a real player outranks every other
+    // candidate — the pack follows the character the human is actually playing,
+    // not the human's abandoned (AI-run) body. Full pre-pass so a real leader
+    // earlier in iteration order can't shadow a possessed bot later in it.
+    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* pMember = itr->getSource();
+        if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
+            return pMember;
+    }
 
     Player* firstReal = nullptr;
     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())

@@ -18,6 +18,7 @@
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
+#include "SuiUnattendedAI.h"
 #include "World.h"
 
 namespace SuiPossess
@@ -72,6 +73,44 @@ static AiBotAI* BotAiOf(Player* bot)
     return bot ? dynamic_cast<AiBotAI*>(bot->AI()) : nullptr;
 }
 
+// ── Own-character autonomy (M5) ──────────────────────────────────────────────
+// While the human drives a bot or the free camera, their real character runs
+// SuiUnattendedAI (PartyBotAI behaviour minus the fabricated-bot init). Never
+// stomps a foreign AI (mind control), and deletion is explicit — this AI is
+// owned here, not by a PlayerBotEntry.
+
+static void AttachUnattendedAI(Player* owner, Player* anchor)
+{
+    if (!owner || !owner->IsInWorld())
+        return;
+    if (SuiUnattendedAI* existing = dynamic_cast<SuiUnattendedAI*>(owner->AI()))
+    {
+        existing->SetAnchor(anchor);
+        return;
+    }
+    if (owner->AI())
+        return;   // charmed/controlled by something else — leave it alone
+    owner->SetAI(new SuiUnattendedAI(owner, anchor));
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s now runs unattended AI (anchor %s)",
+        owner->GetName(), anchor ? anchor->GetName() : "none");
+}
+
+static void DetachUnattendedAI(Player* owner)
+{
+    if (!owner)
+        return;
+    SuiUnattendedAI* ai = dynamic_cast<SuiUnattendedAI*>(owner->AI());
+    if (!ai)
+        return;
+    owner->SetAI(nullptr);
+    delete ai;
+    owner->StopMoving();
+    owner->GetMotionMaster()->Clear(false, true);
+    owner->GetMotionMaster()->MoveIdle();
+    owner->AttackStop();
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s back under manual control", owner->GetName());
+}
+
 /// Everything except the ACK — shared by the wire handler and the GM command.
 static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player** grantedBot)
 {
@@ -118,6 +157,9 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     possessor->SetMover(bot);
     possessor->SetClientControl(bot, 1);
 
+    // The abandoned real character follows and assists whoever the human drives.
+    AttachUnattendedAI(possessor, bot);
+
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s now possesses bot %s",
         possessor->GetName(), bot->GetName());
     if (grantedBot)
@@ -145,6 +187,10 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
         possessor->GetCamera().ResetView();
         possessor->SetMover(nullptr);           // resolves to self
         possessor->SetClientControl(possessor, 1);
+        // Manual control resumes — except into the free camera, where the own
+        // character stays autonomous (anchor: whatever the group offers next tick).
+        if (reason != RELEASED_FREECAM)
+            DetachUnattendedAI(possessor);
     }
     if (serverInitiated)
         // In-flight MSG_MOVE_* still carry bot coordinates; without the drain
@@ -189,9 +235,20 @@ void HandleRelease(WorldSession* session, uint8 mode)
     AckResult reason = mode == RELEASE_TO_FREECAM ? RELEASED_FREECAM : RELEASED;
     if (!DoRelease(session, reason, false))
     {
-        // Nothing possessed: this is the freecam enter/leave path from the own
-        // character (M5 attaches/detaches the unattended AI here). Ack so the
-        // client state machine resolves either way.
+        // Nothing possessed: the freecam enter/leave path from the own character.
+        if (Player* player = session->GetPlayer())
+        {
+            if (mode == RELEASE_TO_FREECAM)
+            {
+                Player* anchor = nullptr;
+                if (Group* group = player->GetGroup())
+                    anchor = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+                AttachUnattendedAI(player, anchor && anchor != player ? anchor : nullptr);
+            }
+            else
+                DetachUnattendedAI(player);
+        }
+        // Ack so the client state machine resolves either way.
         SendAck(session, session->GetPlayer() ? session->GetPlayer()->GetObjectGuid() : ObjectGuid(),
             reason, session->GetPlayer());
     }
@@ -236,10 +293,15 @@ void OnLogout(WorldSession* session)
 {
     // Session was possessing someone → clean release.
     DoRelease(session, RELEASED_LOGOUT, true);
-    // Session's player IS a possessed bot (bot despawn path) → release its human.
     if (Player* player = session->GetPlayer())
+    {
+        // Freecam logout: the unattended AI is owned here, not by a bot entry —
+        // reclaim it before Player teardown.
+        DetachUnattendedAI(player);
+        // Session's player IS a possessed bot (bot despawn path) → release its human.
         if (Player* possessor = GetPossessor(player))
             ForceRelease(possessor->GetSession(), RELEASED_LOGOUT);
+    }
 }
 
 // ── Roster ───────────────────────────────────────────────────────────────────

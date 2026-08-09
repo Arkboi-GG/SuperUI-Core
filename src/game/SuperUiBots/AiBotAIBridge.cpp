@@ -1956,6 +1956,18 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     if (!me || !me->IsAlive() || !me->IsInWorld())
         return;
 
+    // [SUI] Never autosell a REAL account's character. AiBotAI is only ever
+    // attached to socket-less bot sessions, and possessed bots reject bridge
+    // commands upstream — but this is the requirement's hard wall: any unit
+    // whose session has a live client keeps its inventory untouchable.
+    if (me->GetSession() && !me->GetSession()->GetBot())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s: refused — real account character", me->GetName());
+        BridgeSendEvent("SELL_FAIL", "reason=real_account_protected");
+        return;
+    }
+
     int npcEntry = 0, keepQuality = 0;
     JsonExtractInt(json, "npc_entry", npcEntry);
     JsonExtractInt(json, "keep_quality", keepQuality);
