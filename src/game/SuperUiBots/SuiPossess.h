@@ -29,6 +29,7 @@
 class Player;
 class Unit;
 class WorldSession;
+class WorldPacket;
 class Group;
 
 namespace SuiPossess
@@ -103,6 +104,12 @@ namespace SuiPossess
     void SendRoster(Player* realPlayer);
     /// Push the roster to every real-session member of a group.
     void BroadcastRoster(Group* group);
+
+    // ── Owner-data mirror (M3) ────────────────────────────────────────────────
+    /// Wrap whitelisted owner-only packets of a possessed bot's socket-less
+    /// session into SMSG_SUI_PROXY toward the possessor. Called from
+    /// WorldSession::SendPacket; no-op unless possessed and whitelisted.
+    void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet);
 }
 
 #endif

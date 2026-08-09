@@ -266,16 +266,20 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
     if (!spellInfo)
         return;
 
+    // SUI possession: the cast is performed BY the possessed bot from ITS
+    // spellbook. Identical to _player when not possessing.
+    Player* pActor = GetSuiActor();
+
     // not have spell in spellbook or spell passive and not casted by client
-    if (!_player->HasActiveSpell(packet.spellId) || spellInfo->IsPassiveSpell())
+    if (!pActor->HasActiveSpell(packet.spellId) || spellInfo->IsPassiveSpell())
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "World: Player %u casts spell %u which he shouldn't have", _player->GetGUIDLow(), packet.spellId);
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "World: Player %u casts spell %u which he shouldn't have", pActor->GetGUIDLow(), packet.spellId);
         //cheater? kick? ban?
         return;
     }
 
     // client provided targets
-    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(_player);
+    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pActor);
     SpellEntry const* originalSpellInfo = spellInfo;
 
     // auto-selection buff level base at target level (in spellInfo)
@@ -283,7 +287,7 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
     {
         // Cannot cast negative spells on yourself. Handle it here since casting negative
         // spells on yourself is frequently used within the core itself for certain mechanics.
-        if (target == _player && IsExplicitlySelectedUnitTarget(spellInfo->EffectImplicitTargetA[0]) && !spellInfo->IsPositiveSpell(_player, target))
+        if (target == pActor && IsExplicitlySelectedUnitTarget(spellInfo->EffectImplicitTargetA[0]) && !spellInfo->IsPositiveSpell(pActor, target))
         {
             WorldPacket data(SMSG_CAST_RESULT, (4 + 1 + 1));
             data << uint32(packet.spellId);
@@ -298,14 +302,15 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
             spellInfo = actualSpellInfo;
     }
 
-    // Casting spells interrupts looting
+    // Casting spells interrupts looting (the session owner's loot window; a
+    // possessed bot's loot was force-released at possession time)
     if (_player->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_LOOTING))
     {
         if (ObjectGuid lootGuid = GetPlayer()->GetLootGuid())
             DoLootRelease(lootGuid);
     }
 
-    Spell* spell = new Spell(_player, spellInfo, false, ObjectGuid(), nullptr, packet.targets.getUnitTarget());
+    Spell* spell = new Spell(pActor, spellInfo, false, ObjectGuid(), nullptr, packet.targets.getUnitTarget());
 
     // Spell has been down-ranked, remember what client wanted to cast.
     if (spellInfo != originalSpellInfo)
@@ -318,16 +323,18 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
 
 void WorldSession::HandleCancelCastOpcode(WorldPackets::Spell::CancelCast const& packet)
 {
-    // ignore for remote control state (for player case)
+    // ignore for remote control state (for player case) — except when the
+    // remote player IS our SUI-possessed bot, whose casts we legitimately drive
+    Player* pActor = GetSuiActor();
     Unit* mover = _player->GetMover();
-    if (mover != _player && mover->GetTypeId() == TYPEID_PLAYER)
+    if (mover != _player && mover != pActor && mover->GetTypeId() == TYPEID_PLAYER)
         return;
 
-    if (_player->IsNonMeleeSpellCasted(false))
-        _player->InterruptNonMeleeSpells(false, packet.spellId);
+    if (pActor->IsNonMeleeSpellCasted(false))
+        pActor->InterruptNonMeleeSpells(false, packet.spellId);
 
-    if (_player->IsNextSwingSpellCasted())
-        _player->InterruptSpell(CURRENT_MELEE_SPELL);
+    if (pActor->IsNextSwingSpellCasted())
+        pActor->InterruptSpell(CURRENT_MELEE_SPELL);
 }
 
 void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spell::CancelAura const& packet)
@@ -350,10 +357,14 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spell::CancelAura const&
     if (spellInfo->IsPassiveSpell())
         return;
 
+    // SUI possession acts on the bot's auras; otherwise identical to before.
+    Player* pActor = GetSuiActor();
+    bool suiActing = pActor != _player;
+
     if (!IsPositiveSpell(packet.spellId))
     {
-        // ignore for remote control state
-        if (!_player->IsSelfMover())
+        // ignore for remote control state (SUI possession counts as self-control)
+        if (!_player->IsSelfMover() && !suiActing)
         {
             // except own aura spells
             bool allow = false;
@@ -388,20 +399,20 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spell::CancelAura const&
     // channeled spell case (it currently casted then)
     if (spellInfo->IsChanneledSpell())
     {
-        if (Spell* curSpell = _player->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+        if (Spell* curSpell = pActor->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             if (curSpell->m_spellInfo->Id == packet.spellId)
-                _player->InterruptSpell(CURRENT_CHANNELED_SPELL);
+                pActor->InterruptSpell(CURRENT_CHANNELED_SPELL);
         return;
     }
 
-    SpellAuraHolder* holder = _player->GetSpellAuraHolder(packet.spellId);
+    SpellAuraHolder* holder = pActor->GetSpellAuraHolder(packet.spellId);
 
     // not own area auras can't be cancelled (note: maybe need to check for aura on holder and not general on spell)
-    if (holder && holder->GetCasterGuid() != _player->GetObjectGuid() && holder->GetSpellProto()->HasAreaAuraEffect())
+    if (holder && holder->GetCasterGuid() != pActor->GetObjectGuid() && holder->GetSpellProto()->HasAreaAuraEffect())
         return;
 
     // non channeled case
-    _player->RemoveAurasDueToSpellByCancel(packet.spellId);
+    pActor->RemoveAurasDueToSpellByCancel(packet.spellId);
 }
 
 void WorldSession::HandlePetCancelAuraOpcode(WorldPackets::Pet::PetCancelAura const& packet)
@@ -445,16 +456,17 @@ void WorldSession::HandleCancelAutoRepeatSpellOpcode(NullClientPacket const& /*p
 
 void WorldSession::HandleCancelChanneling(WorldPackets::Spell::CancelChanneling const& /*packet*/)
 {
-    // ignore for remote control state (for player case)
+    // ignore for remote control state (for player case) — except our SUI bot
+    Player* pActor = GetSuiActor();
     Unit* mover = _player->GetMover();
-    if (mover != _player && mover->GetTypeId() == TYPEID_PLAYER)
+    if (mover != _player && mover != pActor && mover->GetTypeId() == TYPEID_PLAYER)
         return;
 
-    if (Spell* spell = _player->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+    if (Spell* spell = pActor->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
     {
         if (spell->IsTriggered())
             return;
-        _player->InterruptSpell(CURRENT_CHANNELED_SPELL);
+        pActor->InterruptSpell(CURRENT_CHANNELED_SPELL);
     }
 }
 

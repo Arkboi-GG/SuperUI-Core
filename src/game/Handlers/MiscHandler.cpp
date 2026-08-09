@@ -399,10 +399,13 @@ void WorldSession::HandleZoneUpdateOpcode(WorldPackets::Misc::ZoneUpdate const& 
 
 void WorldSession::HandleSetSelectionOpcode(WorldPackets::Misc::SetSelection const& packet)
 {
-    _player->SetSelectionGuid(packet.guid);
+    // SUI possession: selection drives the possessed bot's UNIT_FIELD_TARGET
+    // (its melee/assist logic keys off it); reputation stays the session's.
+    Player* pActor = GetSuiActor();
+    pActor->SetSelectionGuid(packet.guid);
 
     // update reputation list if need
-    Unit* unit = ObjectAccessor::GetUnit(*_player, packet.guid);   // can select group members at diff maps
+    Unit* unit = ObjectAccessor::GetUnit(*pActor, packet.guid);   // can select group members at diff maps
 
     if (unit)
         if (FactionTemplateEntry const* factionTemplateEntry = unit->GetFactionTemplateEntry())
@@ -411,20 +414,20 @@ void WorldSession::HandleSetSelectionOpcode(WorldPackets::Misc::SetSelection con
 
     // Drop combo points only for rogues and druids
     // Warriors use combo points internally, do no reset for everyone
-    if ((_player->GetClass() == CLASS_ROGUE || _player->GetClass() == CLASS_DRUID) && unit && packet.guid != _player->GetComboTargetGuid())
-        _player->ClearComboPoints();
+    if ((pActor->GetClass() == CLASS_ROGUE || pActor->GetClass() == CLASS_DRUID) && unit && packet.guid != pActor->GetComboTargetGuid())
+        pActor->ClearComboPoints();
 
     // Update autoshot if need
-    if (Spell* pSpell = _player->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
+    if (Spell* pSpell = pActor->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
     {
-        if (!unit || !_player->IsValidAttackTarget(unit))
+        if (!unit || !pActor->IsValidAttackTarget(unit))
         {
             pSpell->m_targets.setUnitTarget(nullptr);
             pSpell->cancel();
             return;
         }
 
-        if (!unit->IsInWorld() || unit->GetMap() != _player->GetMap())
+        if (!unit->IsInWorld() || unit->GetMap() != pActor->GetMap())
             return;
 
         pSpell->m_targets.setUnitTarget(unit);

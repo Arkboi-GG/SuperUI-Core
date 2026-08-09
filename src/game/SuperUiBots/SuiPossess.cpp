@@ -12,6 +12,7 @@
 #include "AiBotAIMain.h"
 #include "Chat.h"
 #include "Group.h"
+#include "MasterPlayer.h"
 #include "ObjectMgr.h"
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
@@ -166,8 +167,13 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
     SendAck(session, targetGuid, result, bot);
     if (result == ACK_OK && bot)
     {
-        // M3 follows the grant with proxied SMSG_INITIAL_SPELLS /
-        // SMSG_ACTION_BUTTONS and the SMSG_SUI_SNAPSHOT.
+        // Owner data follows the grant, deliberately routed through the BOT's
+        // own (socket-less) session: the SendPacket mirror wraps each packet in
+        // SMSG_SUI_PROXY with the right source guid. Mid-session re-sends of
+        // both packets are proven safe in this fork (SpecCommands .testbars).
+        bot->SendInitialSpells();
+        if (MasterPlayer* master = bot->GetSession()->GetMasterPlayer())
+            master->SendInitialActionButtons();
         if (Group* group = session->GetPlayer()->GetGroup())
             BroadcastRoster(group);
     }
@@ -284,7 +290,61 @@ void BroadcastRoster(Group* group)
 
 } // namespace SuiPossess
 
+// ── Owner-data mirror (M3) ───────────────────────────────────────────────────
+
+namespace SuiPossess
+{
+
+void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
+{
+    // Whitelist first: this sits on every socket-less SendPacket, keep it cheap.
+    // Mirroring everything would double-deliver broadcasts the possessor already
+    // receives; these are the strictly owner-only spell/bar/cooldown packets.
+    switch (packet->GetOpcode())
+    {
+        case SMSG_ACTION_BUTTONS:
+        case SMSG_INITIAL_SPELLS:
+        case SMSG_LEARNED_SPELL:
+        case SMSG_SUPERCEDED_SPELL:
+        case SMSG_REMOVED_SPELL:
+        case SMSG_SPELL_COOLDOWN:
+        case SMSG_COOLDOWN_EVENT:
+        case SMSG_CLEAR_COOLDOWN:
+        case SMSG_CAST_RESULT:
+            break;
+        default:
+            return;
+    }
+
+    Player* bot = botSession->GetPlayer();
+    if (!bot)
+        return;
+    Player* possessor = GetPossessor(bot);
+    if (!possessor || !possessor->GetSession() || !possessor->GetSession()->IsSuiCapable())
+        return;
+
+    WorldPacket data(SMSG_SUI_PROXY, 8 + 2 + packet->size());
+    data << uint64(bot->GetObjectGuid().GetRawValue());
+    data << uint16(packet->GetOpcode());
+    if (packet->size() > 0)
+        data.append(packet->contents(), packet->size());
+    possessor->GetSession()->SendPacket(&data);
+}
+
+} // namespace SuiPossess
+
 // ── Wire handlers ────────────────────────────────────────────────────────────
+
+Player* WorldSession::GetSuiActor()
+{
+    // The unit the session's gameplay input acts as: the possessed bot while
+    // driving one, else the session's own player. Threaded through the
+    // cast/target/melee handler family — bit-identical when not possessing.
+    if (!m_suiControlledGuid.IsEmpty())
+        if (Player* bot = SuiPossess::GetControlledBot(this))
+            return bot;
+    return _player;
+}
 
 void WorldSession::HandleSuiControlRequestOpcode(WorldPackets::SuiControl::ControlRequest const& packet)
 {

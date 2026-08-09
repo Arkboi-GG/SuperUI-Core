@@ -312,6 +312,7 @@ class WorldSession
         void SetSuiControlledGuid(ObjectGuid guid) { m_suiControlledGuid = guid; }
         bool IsSuiCapable() const { return m_suiCapable; }
         void SetSuiCapable(bool on) { m_suiCapable = on; }
+        Player* GetSuiActor();                              // possessed bot while driving one, else _player
 
         // Warden / Anticheat
         void InitWarden();

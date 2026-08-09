@@ -123,6 +123,11 @@ void WorldSession::SendPacket(WorldPacket const* packet)
 
     if (!m_socket)
     {
+        // SUI possession mirror: owner-only packets of a possessed bot (action
+        // buttons, spellbook, cooldowns, cast results) ALSO go to the driving
+        // human, wrapped in SMSG_SUI_PROXY. Never instead of the AI hook below —
+        // the bot's teleport-ack/rez/roll self-service must keep firing.
+        SuiPossess::MirrorOwnerPacket(this, packet);
         if (GetBot() && GetBot()->ai)
             GetBot()->ai->OnPacketReceived(packet);
         return;
