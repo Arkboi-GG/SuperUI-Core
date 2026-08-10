@@ -34,7 +34,9 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
     if (!packet.targetGuid.IsUnit())
         return;
 
-    Unit* pEnemy = _player->GetMap()->GetUnit(packet.targetGuid);
+    // SUI possession: melee is the possessed bot's, on the bot's map.
+    Player* pActor = GetSuiActor();
+    Unit* pEnemy = pActor->GetMap()->GetUnit(packet.targetGuid);
 
     if (!pEnemy)
     {
@@ -43,7 +45,7 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
         return;
     }
 
-    if (_player->IsFriendlyTo(pEnemy) || pEnemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SPAWNING | UNIT_FLAG_NOT_SELECTABLE))
+    if (pActor->IsFriendlyTo(pEnemy) || pEnemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SPAWNING | UNIT_FLAG_NOT_SELECTABLE))
     {
         // stop attack state at client
         SendAttackStop(pEnemy);
@@ -58,12 +60,12 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
         return;
     }
 
-    _player->Attack(pEnemy, true);
+    pActor->Attack(pEnemy, true);
 }
 
 void WorldSession::HandleAttackStopOpcode(NullClientPacket const& /*packet*/)
 {
-    GetPlayer()->AttackStop();
+    GetSuiActor()->AttackStop();
 
     /*
     I wanted to take a moment to provide some clarification around what changed in 1.13.3 with Reckoning.
@@ -74,7 +76,7 @@ void WorldSession::HandleAttackStopOpcode(NullClientPacket const& /*packet*/)
     However, both of these behaviors were correct behaviors in the 1.12 reference client and as such are considered bug fixes.
     https://us.forums.blizzard.com/en/wow/t/reckoning-is-broken-after-yesterdays-patch/386476/123
     */
-    GetPlayer()->ResetExtraAttacks();
+    GetSuiActor()->ResetExtraAttacks();
 }
 
 void WorldSession::HandleSetSheathedOpcode(WorldPackets::Combat::SetSheathed const& packet)

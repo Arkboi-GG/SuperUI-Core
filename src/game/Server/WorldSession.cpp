@@ -37,6 +37,7 @@
 #include "SocialMgr.h"
 #include "PlayerBotMgr.h"
 #include "PlayerBotAI.h"
+#include "SuiPossess.h"
 #include "Anticheat.h"
 #include "Language.h"
 #include "Chat.h"
@@ -122,6 +123,11 @@ void WorldSession::SendPacket(WorldPacket const* packet)
 
     if (!m_socket)
     {
+        // SUI possession mirror: owner-only packets of a possessed bot (action
+        // buttons, spellbook, cooldowns, cast results) ALSO go to the driving
+        // human, wrapped in SMSG_SUI_PROXY. Never instead of the AI hook below —
+        // the bot's teleport-ack/rez/roll self-service must keep firing.
+        SuiPossess::MirrorOwnerPacket(this, packet);
         if (GetBot() && GetBot()->ai)
             GetBot()->ai->OnPacketReceived(packet);
         return;
@@ -649,6 +655,10 @@ void WorldSession::LogoutPlayer(bool Save)
     m_idleTime = WorldTimer::getMSTime();
     m_playerLogout = true;
     m_playerSave = Save;
+
+    // Break any SUI possession pair in either direction: this session was
+    // driving a bot, or this session's player IS a bot someone was driving.
+    SuiPossess::OnLogout(this);
 
     if (_player)
     {

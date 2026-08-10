@@ -92,6 +92,13 @@ ChatCommand * ChatHandler::getCommandTable()
         { nullptr,      0,                      false, nullptr,                                        "", nullptr },
     };
 
+    static ChatCommand suiCommandTable[] =
+    {
+        { "possess",    SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiPossessCommand,          "", nullptr },
+        { "release",    SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiReleaseCommand,          "", nullptr },
+        { nullptr,      0,                      false, nullptr,                                        "", nullptr },
+    };
+
     static ChatCommand partyBotCommandTable[] =
     {
         { "add",        SEC_ADMINISTRATOR,      false, &ChatHandler::HandlePartyBotAddCommand,         "", nullptr },
@@ -1234,6 +1241,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "ahbot",          SEC_ADMINISTRATOR,  true, nullptr,                            "Manage AH bot", ahbotCommandTable    },
         { "partybot",       SEC_ADMINISTRATOR,  false, nullptr,                       "Manage party bots", partyBotCommandTable },
         { "battlebot",      SEC_ADMINISTRATOR,  true, nullptr,                      "Manage battle bots", battleBotCommandTable},
+        { "sui",            SEC_ADMINISTRATOR,  false, nullptr,          "SuperUI CRPG/RTS control", suiCommandTable      },
         { "world",          SEC_ADMINISTRATOR,  false, nullptr,                                        "", worldCommandTable    },
         { "possess",        SEC_GAMEMASTER,     false, &ChatHandler::HandlePossessCommand,             "", nullptr              },
         { "cinematic",      SEC_DEVELOPER,      false, nullptr,                                        "", cinematicCommandTable},

@@ -23,6 +23,7 @@
 #include "Pet.h"
 #include "Totem.h"
 #include "Player.h"
+#include "SuiPossess.h"
 #include "Log.h"
 #include "Opcodes.h"
 #include "WorldPacket.h"
@@ -11129,6 +11130,11 @@ void Unit::UpdateControl()
         if (Player* charmerPlayer = charmer->ToPlayer())
             if (charmerPlayer->GetCharmGuid() == GetObjectGuid())
                 charmerPlayer->SetClientControl(this, !HasUnitState(UNIT_STATE_FLEEING | UNIT_STATE_CONFUSED));
+    // SUI possession is not charm-linked, so the charmer branch above never
+    // fires for it: if a real player drives this bot, mirror the same
+    // control-loss propagation (fear/confuse must yank the human's control).
+    if (Player* suiPossessor = SuiPossess::GetPossessor(this))
+        suiPossessor->SetClientControl(this, !HasUnitState(UNIT_STATE_FLEEING | UNIT_STATE_CONFUSED));
     // Inform myself
     if (mePlayer)
     {
@@ -11139,6 +11145,10 @@ void Unit::UpdateControl()
                 mePlayer->SetClientControl(possessed, !possessed->HasUnitState(UNIT_STATE_FLEEING | UNIT_STATE_CONFUSED));
                 return;
             }
+        // SUI-possessing a bot: the client's mover is the bot, not this body;
+        // never send a self-control update that would fight that.
+        if (SuiPossess::GetControlledBot(mePlayer->GetSession()))
+            return;
         mePlayer->SetClientControl(mePlayer, !HasUnitState(UNIT_STATE_POSSESSED | UNIT_STATE_FLEEING | UNIT_STATE_CONFUSED) && !GetCharmerGuid());
     }
 }

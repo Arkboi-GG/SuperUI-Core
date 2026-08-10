@@ -406,7 +406,7 @@ void AiBotAI::BridgeSendState()
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
         "\"quests\":\"%s\","
-        "\"questId\":%u,\"questStatus\":%u}}",
+        "\"questId\":%u,\"questStatus\":%u,\"possessed\":%u}}",
         me->GetGUIDLow(),
         me->GetHealth(), me->GetMaxHealth(),
         me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA),
@@ -421,7 +421,7 @@ void AiBotAI::BridgeSendState()
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
         questBlob.c_str(),
-        m_trackedQuestId, questStatus);
+        m_trackedQuestId, questStatus, m_possessed ? 1u : 0u);
 
     BridgeSend(json);
 }
@@ -549,6 +549,17 @@ void AiBotAI::BridgeProcessLine(const char* line)
     if (!JsonExtractString(line, "type", msgType, sizeof(msgType)))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: no 'type' in message", me->GetName());
+        return;
+    }
+
+    // [SUI] While a real player drives this bot every mutating command would
+    // execute under the human's feet (MOVE_TO would yank the mover). Drop with
+    // an event so the C# supervisor sees an explicit answer, not a stall.
+    if (m_possessed && strcmp(msgType, "PING") != 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (possessed)",
+            me->GetName(), msgType);
+        BridgeSendEvent("POSSESSED_DROP", msgType);
         return;
     }
 
@@ -1944,6 +1955,18 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
 {
     if (!me || !me->IsAlive() || !me->IsInWorld())
         return;
+
+    // [SUI] Never autosell a REAL account's character. AiBotAI is only ever
+    // attached to socket-less bot sessions, and possessed bots reject bridge
+    // commands upstream — but this is the requirement's hard wall: any unit
+    // whose session has a live client keeps its inventory untouchable.
+    if (me->GetSession() && !me->GetSession()->GetBot())
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-SELL] %s: refused — real account character", me->GetName());
+        BridgeSendEvent("SELL_FAIL", "reason=real_account_protected");
+        return;
+    }
 
     int npcEntry = 0, keepQuality = 0;
     JsonExtractInt(json, "npc_entry", npcEntry);

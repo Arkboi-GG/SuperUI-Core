@@ -31,6 +31,7 @@
 #include "Formulas.h"
 #include "ObjectAccessor.h"
 #include "BattleGround.h"
+#include "SuiPossess.h"
 #include "MapManager.h"
 #include "MapPersistentStateMgr.h"
 #include "Util.h"
@@ -437,6 +438,12 @@ bool Group::AddMember(ObjectGuid guid, char const* name, uint8 joinMethod)
 
 uint32 Group::RemoveMember(ObjectGuid guid, uint8 removeMethod)
 {
+    // SUI possession cannot outlive shared group membership: if the leaver is
+    // the possessed bot or the possessor, break the pair before the roster
+    // changes underneath them.
+    if (Player* removed = sObjectMgr.GetPlayer(guid))
+        SuiPossess::OnPlayerRemovedFromGroup(removed);
+
     // remove member and change leader (if need) only if strong more 2 members _before_ member remove
     if (GetMembersCount() > GetMembersMinCount())
     {
@@ -554,6 +561,9 @@ void Group::Disband(bool hideDestroy, ObjectGuid initiator)
         player = sObjectMgr.GetPlayer(itr.guid);
         if (!player)
             continue;
+
+        // Disband bypasses RemoveMember; break any SUI possession pair here.
+        SuiPossess::OnPlayerRemovedFromGroup(player);
 
         //we cannot call _removeMember because it would invalidate member iterator
         //if we are removing player from battleground raid
@@ -1402,6 +1412,10 @@ void Group::SendUpdate()
             player->GetSession()->SendPacket(markedTargets.get());
 #endif
     }
+
+    // Every roster change re-pushes the SUI control roster (which party members
+    // are possessable bots) to SUI-capable clients. No-op for everyone else.
+    SuiPossess::BroadcastRoster(this);
 }
 
 void Group::UpdatePlayerOutOfRange(Player* pPlayer)

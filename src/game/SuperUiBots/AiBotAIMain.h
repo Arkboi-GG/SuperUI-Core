@@ -405,6 +405,15 @@ public:
     void OnPacketReceived(WorldPacket const* packet) override;
     void MovementInform(uint32 MovementType, uint32 Data = 0) override;
 
+    // --- SUI possession (SuiPossess.cpp) ---
+    // While a real player drives this bot, every autonomous behaviour is
+    // suspended: the rotation/movement sub-ticks, the 1 Hz behaviour body, and
+    // all mutating bridge commands. The bridge connection itself stays alive so
+    // the C# brain keeps receiving STATE (with possessed:1) and stands down.
+    void SetPossessed(bool on);
+    bool IsPossessed() const { return m_possessed; }
+    void UpdateBridgeTick();   // bridge connect/recv/state/flush, shared by both tick paths
+
     // --- Combat (from BattleBotAI) ---
     bool AttackStart(Unit* pVictim);
     Unit* SelectAttackTarget(Unit* pExcept = nullptr) const;
@@ -642,6 +651,7 @@ public:
     bool m_wasDead = false;
     bool m_loggedFirstUpdate = false;
     bool m_freshSpawn = false;
+    bool m_possessed = false;         // SUI possession: autonomous behaviour suspended
     uint32 m_wanderTimer = 0;
     uint32 m_lastKnownLevel = 0;
     uint32 m_trackedQuestId = 0;

@@ -26,6 +26,7 @@
 #include "Player.h"
 #include "Bag.h"
 #include "Language.h"
+#include "SuiPossess.h"
 #include "Database/DatabaseEnv.h"
 #include "Log.h"
 #include "Opcodes.h"
@@ -1510,6 +1511,10 @@ void Player::SetDeathState(DeathState s)
 
     if (s == JUST_DIED && cur)
     {
+        // A dying possessed bot force-releases its human (RELEASED_DEATH); the
+        // bot's own death pipeline (brain rez flow) then resumes untouched.
+        SuiPossess::OnPlayerDeath(this);
+
         ResetExtraAttacks(); // Plus de charges de retribution par exemple
 
         // drunken state is cleared on death
@@ -1862,6 +1867,11 @@ bool Player::TeleportTo(uint32 mapId, float x, float y, float z, float orientati
         return false;
 
     sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "Player %s will teleported to map %u", GetName(), mapId);
+
+    // Cross-map camera/mover state is undefined under SUI possession: break the
+    // pair (either side) before the teleport machinery runs. Near teleports
+    // release too — cheap, correct, and rare while possessed.
+    SuiPossess::OnPlayerTeleport(this);
 
     // if we were on a transport, leave
     if (!(options & TELE_TO_NOT_LEAVE_TRANSPORT) && m_transport)
