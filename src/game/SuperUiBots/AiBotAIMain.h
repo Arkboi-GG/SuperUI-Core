@@ -51,6 +51,8 @@
 
 #ifdef _WIN32
   #include <winsock2.h>
+#include <deque>
+#include <array>
   #include <ws2tcpip.h>
   #pragma comment(lib, "ws2_32.lib")
   typedef SOCKET BridgeSocket;
@@ -429,6 +431,12 @@ public:
     void SetPossessed(bool on);
     bool IsPossessed() const { return m_possessed; }
     void UpdateBridgeTick();   // bridge connect/recv/state/flush, shared by both tick paths
+
+    // [SUI] RTS waypoint chain (Ctrl+RightClick in the free view). ORDER_MOVE_QUEUE
+    // appends; arrival chains into the next leg; ORDER_MOVE / ORDER_STOP clear it.
+    void SuiQueueWaypoint(float x, float y, float z);
+    void SuiClearWaypoints() { m_suiWaypoints.clear(); }
+    std::deque<std::array<float, 3>> m_suiWaypoints;
 
     // The REAL character's autonomy while its human drives a bot or the free camera
     // (SuiPossess Attach/DetachUnattendedAI). The character runs this same fleet AI —

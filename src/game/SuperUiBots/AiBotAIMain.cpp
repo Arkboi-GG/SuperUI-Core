@@ -68,6 +68,23 @@ void AiBotAI::OnPlayerLogin()
         me->SaveToDB();
 }
 
+// [SUI] Ctrl+RightClick waypoint chain. An idle bot starts the first leg right
+// away through the normal bridge MOVE_TO path (chunked pathfinding included); a
+// bot already walking an ordered leg appends, and arrival chains the next leg.
+void AiBotAI::SuiQueueWaypoint(float x, float y, float z)
+{
+    if (m_currentTask.type == TASK_MOVE_TO)
+    {
+        m_suiWaypoints.push_back({x, y, z});
+        return;
+    }
+    char json[160];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+        me->GetMapId(), x, y, z);
+    BridgeProcessLine(json);
+}
+
 AiBotAI* AiBotAI::AttachToRealCharacter(Player* owner)
 {
     if (!owner || !owner->IsInWorld())
@@ -524,6 +541,20 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             BridgeSendEvent("TASK_COMPLETE", arrBuf);
             m_currentTask.Clear();
             ClearStoredPath();
+
+            // [SUI] Queued RTS waypoints: chain into the next leg from inside the
+            // motion callback — MoveToDestination with stopCurrentMovement=false,
+            // the same rule the PARTIAL-leg continuation above follows.
+            if (!m_suiWaypoints.empty())
+            {
+                std::array<float, 3> next = m_suiWaypoints.front();
+                m_suiWaypoints.pop_front();
+                m_currentTask.type = TASK_MOVE_TO;
+                m_currentTask.x = next[0];
+                m_currentTask.y = next[1];
+                m_currentTask.z = next[2];
+                MoveToDestination(next[0], next[1], next[2], false);
+            }
         }
         else if (Data == AIBOT_POINT_GRIND_PATROL)
         {

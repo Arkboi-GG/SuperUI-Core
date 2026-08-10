@@ -68,6 +68,7 @@ namespace SuiPossess
         ORDER_MOVE   = 0,
         ORDER_ATTACK = 1,
         ORDER_STOP   = 2,
+        ORDER_MOVE_QUEUE = 3,   // append a waypoint; arrival chains the next leg
     };
 
     // SMSG_SUI_CONTROL_ROSTER member flags

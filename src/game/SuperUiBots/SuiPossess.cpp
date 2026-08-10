@@ -292,6 +292,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         switch (orderType)
         {
             case ORDER_MOVE:
+                ai->SuiClearWaypoints();   // a plain move order replaces any chain
                 snprintf(json, sizeof(json),
                     "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
                     pMember->GetMapId(), x, y, z);
@@ -306,7 +307,11 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                     ai->BridgeProcessLine(json);
                 }
                 break;
+            case ORDER_MOVE_QUEUE:
+                ai->SuiQueueWaypoint(x, y, z);
+                break;
             case ORDER_STOP:
+                ai->SuiClearWaypoints();
                 ai->StopMoving();
                 pMember->AttackStop();
                 ai->m_currentTask.type = TASK_IDLE;
