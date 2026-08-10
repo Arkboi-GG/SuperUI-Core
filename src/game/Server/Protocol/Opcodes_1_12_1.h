@@ -837,5 +837,6 @@ enum OpcodesList
     SMSG_SUI_CONTROL_ACK                   = 832,
     SMSG_SUI_PROXY                         = 833,
     SMSG_SUI_SNAPSHOT                      = 834,
-    NUM_MSG_TYPES                          = 835
+    CMSG_SUI_CAM                           = 835,
+    NUM_MSG_TYPES                          = 836
 };

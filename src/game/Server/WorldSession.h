@@ -505,6 +505,7 @@ class WorldSession
         void HandleSuiControlRequestOpcode(WorldPackets::SuiControl::ControlRequest const& packet);
         void HandleSuiControlReleaseOpcode(WorldPackets::SuiControl::ControlRelease const& packet);
         void HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& packet);
+        void HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packet);
 
         // Movement
         void HandleMoveRootAck(WorldPackets::Movement::MoveRootAck const& packet);

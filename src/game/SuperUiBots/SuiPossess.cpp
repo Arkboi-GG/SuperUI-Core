@@ -8,6 +8,8 @@
  */
 
 #include "SuiPossess.h"
+#include <unordered_map>
+#include <cmath>
 
 #include "AiBotAIMain.h"
 #include "Bag.h"
@@ -167,6 +169,61 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
 }
 
 /// Shared release path. Safe against a despawned bot or a tearing-down session.
+// ── Freecam eye ──────────────────────────────────────────────────────────────
+// The free view must LOAD what it overflies. Visibility/grid streaming follows
+// the player's Camera, so while in the free view the camera rides an invisible
+// World Trigger summon (active object: keeps its grid ticking) that the client
+// repositions with CMSG_SUI_CAM. Torn down on every path that leaves the view.
+static std::unordered_map<uint64, uint64> s_freecamEyes;
+
+static Creature* FreecamEyeOf(Player* player)
+{
+    auto it = s_freecamEyes.find(player->GetObjectGuid().GetRawValue());
+    if (it == s_freecamEyes.end())
+        return nullptr;
+    return player->GetMap()->GetCreature(ObjectGuid(it->second));
+}
+
+static void EnsureFreecamEye(Player* player)
+{
+    if (!player || !player->IsInWorld())
+        return;
+    if (Creature* existing = FreecamEyeOf(player))
+    {
+        player->GetCamera().SetView(existing);
+        return;
+    }
+    Creature* eye = player->SummonCreature(15384 /* World Trigger, invisible model */,
+        player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), 0.0f,
+        TEMPSUMMON_MANUAL_DESPAWN, 0, true /* active object */);
+    if (!eye)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "[SUI] %s: freecam eye summon failed",
+            player->GetName());
+        return;
+    }
+    eye->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE);
+    s_freecamEyes[player->GetObjectGuid().GetRawValue()] = eye->GetObjectGuid().GetRawValue();
+    player->GetCamera().SetView(eye);
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s: freecam eye up", player->GetName());
+}
+
+static void RemoveFreecamEye(Player* player)
+{
+    if (!player)
+        return;
+    auto it = s_freecamEyes.find(player->GetObjectGuid().GetRawValue());
+    if (it == s_freecamEyes.end())
+        return;
+    if (player->IsInWorld())
+        if (Creature* eye = player->GetMap()->GetCreature(ObjectGuid(it->second)))
+        {
+            player->GetCamera().ResetView();
+            eye->AddObjectToRemoveList();
+        }
+    s_freecamEyes.erase(it);
+}
+
 static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitiated)
 {
     ObjectGuid botGuid = session->GetSuiControlledGuid();
@@ -190,7 +247,12 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
         // character stays autonomous. Its anchor remains the just-released bot
         // (still a valid group member); it only re-points on the next possess.
         if (reason != RELEASED_FREECAM)
+        {
             DetachUnattendedAI(possessor);
+            RemoveFreecamEye(possessor);
+        }
+        else
+            EnsureFreecamEye(possessor);
     }
     if (serverInitiated)
         // In-flight MSG_MOVE_* still carry bot coordinates; without the drain
@@ -211,6 +273,8 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
 void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
 {
     session->SetSuiCapable(true);
+    if (Player* requester = session->GetPlayer())
+        RemoveFreecamEye(requester);   // possess overrides the free-camera view
     Player* bot = nullptr;
     AckResult result = TryBegin(session, targetGuid, &bot);
     SendAck(session, targetGuid, result, bot);
@@ -229,6 +293,17 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
     }
 }
 
+void HandleCam(WorldSession* session, float x, float y, float z)
+{
+    Player* player = session->GetPlayer();
+    if (!player || !player->IsInWorld())
+        return;
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        return;
+    if (Creature* eye = FreecamEyeOf(player))
+        eye->NearTeleportTo(x, y, z, 0.0f);
+}
+
 void HandleRelease(WorldSession* session, uint8 mode)
 {
     session->SetSuiCapable(true);
@@ -244,9 +319,13 @@ void HandleRelease(WorldSession* session, uint8 mode)
                 if (Group* group = player->GetGroup())
                     anchor = sObjectMgr.GetPlayer(group->GetLeaderGuid());
                 AttachUnattendedAI(player, anchor && anchor != player ? anchor : nullptr);
+                EnsureFreecamEye(player);
             }
             else
+            {
                 DetachUnattendedAI(player);
+                RemoveFreecamEye(player);
+            }
         }
         // Ack so the client state machine resolves either way.
         SendAck(session, session->GetPlayer() ? session->GetPlayer()->GetObjectGuid() : ObjectGuid(),
@@ -369,6 +448,7 @@ void OnLogout(WorldSession* session)
         // Freecam logout: the unattended AI is owned here, not by a bot entry —
         // reclaim it before Player teardown.
         DetachUnattendedAI(player);
+        RemoveFreecamEye(player);
         // Session's player IS a possessed bot (bot despawn path) → release its human.
         if (Player* possessor = GetPossessor(player))
             ForceRelease(possessor->GetSession(), RELEASED_LOGOUT);
@@ -557,6 +637,11 @@ void WorldSession::HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& p
 {
     SuiPossess::HandleOrder(this, packet.orderType, packet.subjects,
         packet.targetGuid, packet.x, packet.y, packet.z);
+}
+
+void WorldSession::HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packet)
+{
+    SuiPossess::HandleCam(this, packet.x, packet.y, packet.z);
 }
 
 // ── GM commands (stock-client testable: .sui possess <name> / .sui release) ──

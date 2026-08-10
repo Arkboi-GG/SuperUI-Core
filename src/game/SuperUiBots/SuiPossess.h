@@ -84,6 +84,11 @@ namespace SuiPossess
     /// Voluntary release (client asked). Safe to call when nothing is possessed.
     void HandleRelease(WorldSession* session, uint8 mode);
 
+    // CMSG_SUI_CAM: reposition the freecam eye so grid/visibility streaming
+    // follows the free camera instead of the abandoned body. No-op outside
+    // the free view.
+    void HandleCam(WorldSession* session, float x, float y, float z);
+
     /// RTS order from the free camera: move/attack/stop for the group's AiBots
     /// (explicit subject list, or empty = every controllable bot). Reuses the
     /// bridge command paths so ordered movement/attack behaves exactly like a

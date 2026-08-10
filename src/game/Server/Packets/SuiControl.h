@@ -63,6 +63,18 @@ namespace WorldPackets
                 recv_data >> x >> y >> z;
             }
         };
+
+        class Cam final : public ClientPacket
+        {
+        public:
+            float x = 0, y = 0, z = 0;  // free-camera position (raw WoW map coords)
+
+            explicit Cam() : ClientPacket(CMSG_SUI_CAM) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                recv_data >> x >> y >> z;
+            }
+        };
     }
 }
 
