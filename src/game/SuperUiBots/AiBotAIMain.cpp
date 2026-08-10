@@ -549,6 +549,8 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             {
                 std::array<float, 3> next = m_suiWaypoints.front();
                 m_suiWaypoints.pop_front();
+                if (m_suiPatrolLoop)
+                    m_suiWaypoints.push_back(next);   // patrol: the route cycles
                 m_currentTask.type = TASK_MOVE_TO;
                 m_currentTask.x = next[0];
                 m_currentTask.y = next[1];

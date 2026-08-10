@@ -435,8 +435,9 @@ public:
     // [SUI] RTS waypoint chain (Ctrl+RightClick in the free view). ORDER_MOVE_QUEUE
     // appends; arrival chains into the next leg; ORDER_MOVE / ORDER_STOP clear it.
     void SuiQueueWaypoint(float x, float y, float z);
-    void SuiClearWaypoints() { m_suiWaypoints.clear(); }
+    void SuiClearWaypoints() { m_suiWaypoints.clear(); m_suiPatrolLoop = false; }
     std::deque<std::array<float, 3>> m_suiWaypoints;
+    bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
 
     // The REAL character's autonomy while its human drives a bot or the free camera
     // (SuiPossess Attach/DetachUnattendedAI). The character runs this same fleet AI —

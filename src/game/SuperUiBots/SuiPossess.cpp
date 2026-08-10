@@ -389,6 +389,13 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             case ORDER_MOVE_QUEUE:
                 ai->SuiQueueWaypoint(x, y, z);
                 break;
+            case ORDER_PATROL:
+                // Convert the queued chain into a loop. The coordinate in the
+                // packet joins the route as its final point (a bare patrol
+                // click with no chain gives a two-point there-and-back).
+                ai->SuiQueueWaypoint(x, y, z);
+                ai->m_suiPatrolLoop = true;
+                break;
             case ORDER_STOP:
                 ai->SuiClearWaypoints();
                 ai->StopMoving();
