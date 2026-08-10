@@ -1272,30 +1272,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 return;
             }
 
-            // [SPREAD] Anti-convergence (FINDING_005): don't add to a dogpile. For a SOLO FILLER
-            // grind (entry==0), if AIBOT_SPREAD_BOT_CAP+ other independent bots are already grinding
-            // within AIBOT_SPREAD_RADIUS, patrol out instead of engaging — landing no kills here lets
-            // the C# no-progress breaker relocate us to a less-crowded camp, so the fleet spreads
-            // instead of 8 bots piling one camp into a 48-attacker overpull. Quests (shared mobs) and
-            // groups (meant to stack + focus-fire) are exempt; the grid-search runs only for the solo
-            // filler case. m_spreadDeferred logs the defer once per episode, not every tick.
-            uint32 const nearbyBots =
-                (m_doctrineKind == DoctrineKind::Solo && m_currentTask.creatureEntry == 0 && !me->GetGroup())
-                ? CountNearbyBots(me, AIBOT_SPREAD_RADIUS) : 0;
-            if (nearbyBots >= AIBOT_SPREAD_BOT_CAP)
-            {
-                if (!m_spreadDeferred)
-                {
-                    m_spreadDeferred = true;
-                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT-SPREAD] %s: %u other bots grinding within %.0fyd (cap %u) — patrolling out to spread",
-                        me->GetName(), nearbyBots, AIBOT_SPREAD_RADIUS, AIBOT_SPREAD_BOT_CAP);
-                }
-                DoGrindPatrol();
-                return;
-            }
-            m_spreadDeferred = false;
-
             // [DOCTRINE] Acquisition + pull discipline are the doctrine's; the freeze / GRIND_BLOCKED
             // / patrol bookkeeping stays here in the spine. AcquireTarget returns the mob to pull, or
             // nullptr to hold/patrol. A nullptr that is a DELIBERATE TeamAuto wait-for-anchor hold (B3

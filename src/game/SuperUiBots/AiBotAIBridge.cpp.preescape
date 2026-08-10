@@ -1733,40 +1733,6 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK IDLE (clearing task)", me->GetName());
     }
-    else if (strcmp(taskType, "PORT_HOME") == 0)
-    {
-        // [ESCAPE] (FINDING_010) Living-bot stranded escape. The C# wedge-streak escalation asks
-        // for a port to the racial start when a bot has proven it can neither kill nor quest where
-        // it stands (Everlook L18 / Badlands L21 census — the park→local-relocate ladder shuffles
-        // it ~50yd forever). The DEAD path is FINDING_008's ghost port; this one is alive-only and
-        // refuses in combat (threat/aggro transfer). Same-map uses the proven NearTeleportTo seam;
-        // cross-continent uses the full Player::TeleportTo far-teleport (bots are real in-core
-        // players, same machinery as any player worldport).
-        float hx = 0.0f, hy = 0.0f, hz = 0.0f; int hmap = -1;
-        bool haveHome = JsonExtractFloat(payload, "home_x", hx) && JsonExtractFloat(payload, "home_y", hy) &&
-                        JsonExtractFloat(payload, "home_z", hz) && JsonExtractInt(payload, "home_map", hmap);
-        if (haveHome && hmap >= 0 && me->IsAlive() && !me->IsInCombat())
-        {
-            float fx = me->GetPositionX(), fy = me->GetPositionY(), fz = me->GetPositionZ();
-            uint32 fmap = me->GetMapId();
-            m_currentTask.Clear();
-            StopMoving();
-            if ((int)me->GetMapId() == hmap)
-            {
-                ReGroundZ(hx, hy, hz, "port-home");
-                me->NearTeleportTo(hx, hy, hz, me->GetOrientation());
-            }
-            else
-                me->TeleportTo((uint32)hmap, hx, hy, hz, me->GetOrientation());
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s PORT_HOME (stranded escape): (%.1f, %.1f, %.1f) map=%u -> (%.1f, %.1f, %.1f) map=%d",
-                me->GetName(), fx, fy, fz, fmap, hx, hy, hz, hmap);
-        }
-        else
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s PORT_HOME refused (home=%d map=%d alive=%d combat=%d)",
-                me->GetName(), haveHome ? 1 : 0, hmap, me->IsAlive() ? 1 : 0, me->IsInCombat() ? 1 : 0);
-    }
     else
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,

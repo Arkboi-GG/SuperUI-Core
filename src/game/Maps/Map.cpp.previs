@@ -1066,19 +1066,9 @@ void Map::Update(uint32 t_diff)
             (sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_TICK_LOWER_VISIBILITY_DISTANCE) &&
             updateMapTime > sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_TICK_LOWER_VISIBILITY_DISTANCE)))
         {
-            // [FINDING_012] HARD floor under the config floor. With MapUpdate.MinVisibilityDistance
-            // = 0 (the shipped default), sustained overload legally shrank a continent's visibility
-            // to ZERO — every NPC "despawned" client-side for real players (observed 2026-08-09:
-            // a 97-bot pileup at Northshire dragged map 0 to the floor). Degrading below humanoid
-            // interaction range is never a useful trade: the world reads as broken, and the update
-            // cost of a sub-40yd bubble is negligible anyway. Config may still RAISE the floor.
-            static constexpr float MIN_DYNAMIC_VISIBILITY_DISTANCE = 40.0f;
-            float visFloor = (float)sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_MIN_VISIBILITY_DISTANCE);
-            if (visFloor < MIN_DYNAMIC_VISIBILITY_DISTANCE)
-                visFloor = MIN_DYNAMIC_VISIBILITY_DISTANCE;
             --m_visibilityDistance;
-            if (m_visibilityDistance < visFloor)
-                m_visibilityDistance = visFloor;
+            if (m_visibilityDistance < sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_MIN_VISIBILITY_DISTANCE))
+                m_visibilityDistance = sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_MIN_VISIBILITY_DISTANCE);
         }
         else if (sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_TICK_INCREASE_VISIBILITY_DISTANCE) && updateMapTime < sWorld.getConfig(CONFIG_UINT32_MAPUPDATE_TICK_INCREASE_VISIBILITY_DISTANCE))
         {

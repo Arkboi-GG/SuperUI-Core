@@ -109,40 +109,6 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
     return count;
 }
 
-// ============================================================================
-// [SPREAD] CountNearbyBots — anti-convergence primitive (FINDING_005)
-//
-// Counts OTHER AI bots within `radius` of a center — the signal that a grind spot is a dogpile
-// (8 bots on the Dragonmaw camp → 20-48-attacker overpulls). Excludes self and our own
-// groupmates (a GROUP is SUPPOSED to stack + focus-fire; only INDEPENDENT solo bots converging is
-// the problem). Real players never count. Used by the TASK_GRIND engage gate to defer a solo
-// filler grind out of an over-subscribed camp so the no-kill breaker relocates us elsewhere.
-// ============================================================================
-uint32 AiBotAI::CountNearbyBots(Unit* pCenter, float radius) const
-{
-    if (!pCenter)
-        return 0;
-
-    std::list<Player*> players;
-    MaNGOS::AnyPlayerInObjectRangeCheck check(pCenter, radius);
-    MaNGOS::PlayerListSearcher<MaNGOS::AnyPlayerInObjectRangeCheck> searcher(players, check);
-    Cell::VisitWorldObjects(pCenter, searcher, radius);
-
-    Group* pMyGroup = me->GetGroup();
-    uint32 count = 0;
-    for (Player* p : players)
-    {
-        if (!p || p == me)
-            continue;
-        if (!p->IsBot())               // real players are not convergence
-            continue;
-        if (pMyGroup && pMyGroup->IsMember(p->GetObjectGuid()))
-            continue;                  // groupmates are meant to stack
-        ++count;
-    }
-    return count;
-}
-
 
 
 // ============================================================================
