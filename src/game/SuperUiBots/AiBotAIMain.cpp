@@ -111,6 +111,26 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
     if (result)
     {
+        // [SUI] HARD WALL: never adopt a character owned by a REAL account. The
+        // brain auto-register once swallowed an enrolled real character
+        // (Tesfff, 2026-08-10); logging it in on a synthetic bot account lets
+        // SaveToDB stamp that account over the owner and the character
+        // vanishes from their account list. Whatever a registry row says, a
+        // real-account character is refused here.
+        if (auto acctResult = CharacterDatabase.PQuery(
+                "SELECT `account` FROM `characters` WHERE `guid` = '%u'", entry->playerGUID))
+        {
+            uint32 ownerAccount = acctResult->Fetch()[0].GetUInt32();
+            if (LoginDatabase.PQuery(
+                    "SELECT 1 FROM `account` WHERE `id` = '%u'", ownerAccount))
+            {
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "[AIBOT] REFUSING to spawn guid %u as a bot: character belongs to REAL account %u",
+                    entry->playerGUID, ownerAccount);
+                return false;
+            }
+        }
+
         // RESTART PATH: character exists with gear/spells/skills intact
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT] Existing character found for GUID=%u, using LoginPlayer",
@@ -774,6 +794,15 @@ void AiBotAI::DoPartyFollow()
 // this bot) alive while every behaviour tick is suspended.
 void AiBotAI::UpdateBridgeTick()
 {
+    // [SUI] An enrolled REAL character never talks to the brain. The brain
+    // auto-registers every HELLO into characters.playerbot for restart
+    // persistence -- which adopted a real character into the fleet, respawned
+    // it on a synthetic account after a restart, and stole it from its owner
+    // (Tesfff, 2026-08-10). Doctrine + explicit CMSG_SUI_ORDER injections are
+    // the whole control surface for an unattended real character.
+    if (m_ownedDummyEntry)
+        return;
+
     if (!m_bridgeConnected)
     {
         if (m_bridgeReconnectTimer <= AIBOT_UPDATE_INTERVAL)
