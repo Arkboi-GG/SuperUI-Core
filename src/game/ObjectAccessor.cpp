@@ -297,25 +297,38 @@ void ObjectAccessor::RemoveOldCorpses()
 ObjectAccessor::NameToPlayerPtr ObjectAccessor::playerNameToPlayerPointer;
 ObjectAccessor::NameToMasterPlayerPtr ObjectAccessor::playerNameToMasterPlayerPointer;
 
+// Both name maps are queried through normalizePlayerName'd strings (FindPlayerByName /
+// FindMasterPlayer), so the stored KEY must be normalized too. AiBots keep pool display
+// casing like "FrostTiger", which used to become the literal key — findable in /who
+// (guid-map iteration) but never via /invite or /w ("Cannot find 'Frosttiger'"). The
+// player's displayed name is untouched; only the lookup key is canonicalized.
+static std::string NormalizedNameKey(char const* name)
+{
+    std::string key(name);
+    if (!normalizePlayerName(key))
+        return name; // pathological names keep their raw key rather than colliding on ""
+    return key;
+}
+
 void ObjectAccessor::AddObject(Player* player)
 {
     HashMapHolder<Player>::Insert(player);
-    playerNameToPlayerPointer[player->GetName()] = player;
+    playerNameToPlayerPointer[NormalizedNameKey(player->GetName())] = player;
 }
 void ObjectAccessor::RemoveObject(Player* player)
 {
     HashMapHolder<Player>::Remove(player);
-    playerNameToPlayerPointer.erase(player->GetName());
+    playerNameToPlayerPointer.erase(NormalizedNameKey(player->GetName()));
 }
 void ObjectAccessor::AddObject(MasterPlayer* player)
 {
     HashMapHolder<MasterPlayer>::Insert(player);
-    playerNameToMasterPlayerPointer[player->GetName()] = player;
+    playerNameToMasterPlayerPointer[NormalizedNameKey(player->GetName())] = player;
 }
 void ObjectAccessor::RemoveObject(MasterPlayer* player)
 {
     HashMapHolder<MasterPlayer>::Remove(player);
-    playerNameToMasterPlayerPointer.erase(player->GetName());
+    playerNameToMasterPlayerPointer.erase(NormalizedNameKey(player->GetName()));
 }
 // Define the static member of HashMapHolder
 
