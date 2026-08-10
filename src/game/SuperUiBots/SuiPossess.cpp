@@ -273,10 +273,12 @@ void HandleOrder(WorldSession* session, uint8 orderType,
 
     auto orderBot = [&](Player* pMember)
     {
-        if (!pMember || pMember->GetGroup() != group || pMember == player)
+        if (!pMember || pMember->GetGroup() != group)
             return;
-        if (!pMember->GetSession() || !pMember->GetSession()->GetBot())
-            return;
+        // AI-attached is the real gate: fabricated bots always are; the human's
+        // own character only while unattended (possession/freecam), which is
+        // exactly when it must obey RTS orders alongside the bots. A manually
+        // driven character has no AiBotAI, and the possessed bot stays excluded.
         AiBotAI* ai = dynamic_cast<AiBotAI*>(pMember->AI());
         if (!ai || ai->IsPossessed())
             return;

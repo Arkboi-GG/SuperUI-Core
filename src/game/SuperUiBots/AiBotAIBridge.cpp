@@ -323,6 +323,14 @@ void AiBotAI::BridgeSendState()
         pparty = 1u;
         ppdist = (pBoss->GetMapId() == me->GetMapId()) ? (int)me->GetDistance(pBoss) : 99999;
     }
+    else if (me->GetSession() && !me->GetSession()->GetBot())
+    {
+        // [SUI] Enrolled REAL character with no boss to key on: its human is in
+        // the free camera. Owner decree (2026-08-10): the personal party is
+        // non-autonomous unless made explicit later — echo pparty=1 so the C#
+        // brain holds Idle; movement comes only from CMSG_SUI_ORDER commands.
+        pparty = 1u;
+    }
 
     // --- Active quest status from server (authoritative) ---
     uint32 questStatus = 0;  // 0 = no tracked quest
