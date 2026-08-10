@@ -622,6 +622,19 @@ Player* AiBotAI::FindEscortBoss() const
     if (!pGroup)
         return nullptr;
 
+    // [SUI] Mirror FindPartyBoss's pre-pass: the group member the human actually
+    // DRIVES outranks every real-session candidate. This function feeds the STATE
+    // pparty echo and the formation target; without the pre-pass the enrolled own
+    // character reads pparty=0 (no OTHER real player in its group) so the brain
+    // sends it questing, and every bot keeps formation on the abandoned (AI-run)
+    // body instead of the character the human is playing.
+    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* pMember = itr->getSource();
+        if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
+            return pMember;
+    }
+
     std::vector<Player*> reals;
     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
     {
