@@ -188,14 +188,9 @@ void ChaseMovementGenerator<T>::_setTargetLocation(T &owner)
     if (pathType == PATHFIND_NOPATH)
         return;
 
-    // [BOT WALL-CLIP] (FINDING_011) AI bots are PLAYERS — they must never move through geometry
-    // a real player couldn't. Scope the pet-style honesty checks to them too, and below, deny
-    // them the "no LOS → move anyway on a degenerate path" fall-through that mobs keep.
-    bool const isBotPlayer = owner.IsPlayer() && static_cast<Player const*>(static_cast<Unit const*>(&owner))->IsBot();
-
-    if (owner.IsPet() || isBotPlayer)
+    if (owner.IsPet())
     {
-        // prevent pets (and bot players) from going through closed doors
+        // prevent pets from going through closed doors
         path.CutPathWithDynamicLoS();
         if (path.getPath().size() == 2 && path.Length() < 0.1f)
         {
@@ -208,7 +203,7 @@ void ChaseMovementGenerator<T>::_setTargetLocation(T &owner)
         m_bReachable = true;
 
     m_bRecalculateTravel = false;
-    if (!transport && owner.HasDistanceCasterMovement() &&
+    if (!transport && owner.HasDistanceCasterMovement() && 
         path.UpdateForCaster(i_target.getTarget(), owner.GetMinChaseDistance(i_target.getTarget())))
     {
         if (!owner.movespline->Finalized())
@@ -225,15 +220,6 @@ void ChaseMovementGenerator<T>::_setTargetLocation(T &owner)
         if (!losChecked)
             losResult = owner.IsWithinLOSInMap(i_target.getTarget());
         if (losResult)
-        {
-            if (!owner.movespline->Finalized())
-                owner.StopMoving();
-            return;
-        }
-        // [BOT WALL-CLIP] (FINDING_011) mobs fall through here and move on the degenerate path
-        // (vanilla anti-exploit: no LOS + unreachable → walk through the wall to the target).
-        // A bot player HOLDS instead — its C# brain owns unreachable-target recovery.
-        if (isBotPlayer)
         {
             if (!owner.movespline->Finalized())
                 owner.StopMoving();
@@ -653,28 +639,15 @@ void FollowMovementGenerator<T>::_setTargetLocation(T &owner)
     PathFinder path(&owner);
 
     // allow pets following their master to cheat while generating paths
-    // [BOT WALL-CLIP] (FINDING_011) — but NOT bot players. forceDest=true stamps DEST_FORCED on a
-    // BuildShortcut straight line, so an unpathable follow leg walks the follower clean through
-    // geometry (grouped bots trailing their anchor were the visible offenders). A bot computes an
-    // HONEST path (forceDest=false) and, if there is none, HOLDS — the C# group coordinator owns
-    // stuck-follower recovery (gate liveness / regroup). Pets and charmed mobs keep the cheat.
-    bool const isBotPlayer = owner.IsPlayer() && static_cast<Player const*>(static_cast<Unit const*>(&owner))->IsBot();
     Movement::MoveSplineInit init(owner, "FollowMovementGenerator<T>::_setTargetLocation");
     path.SetTransport(transport);
-    path.calculate(x, y, z, !isBotPlayer);
+    path.calculate(x, y, z, true);
 
     PathType pathType = path.getPathType();
     m_bReachable = pathType & (PATHFIND_NORMAL | PATHFIND_DEST_FORCED);
 
     if (!m_bReachable && !!(pathType & PATHFIND_INCOMPLETE) && owner.HasUnitState(UNIT_STATE_ALLOW_INCOMPLETE_PATH))
         m_bReachable = true;
-
-    if (isBotPlayer && ((pathType & PATHFIND_NOPATH) || !m_bReachable))
-    {
-        if (!owner.movespline->Finalized())
-            owner.StopMoving();
-        return;
-    }
 
     m_bRecalculateTravel = false;
 

@@ -86,7 +86,6 @@
 #define AIBOT_POINT_TAXI_APPROACH   103
 #define AIBOT_POINT_STALEMATE_NUDGE 104  // short hop to break an in-combat stalemate
 #define AIBOT_POINT_OVERPULL_FLEE   105  // retreat hop away from a too-dense pull
-#define AIBOT_POINT_PULL_RETREAT    106  // proactive pull: drag a freshly-tagged mob back to open ground
 #define AIBOT_ARRIVE_JITTER_MIN 0.2f     // never path to the EXACT dest coord (it can land on a bad poly / seam edge → off-mesh).
 #define AIBOT_ARRIVE_JITTER_MAX 2.0f     //   instead resolve to a validated point this far out, random angle — fans bots out + dodges the bad poly.
 #define AIBOT_ARRIVE_JITTER_TRIES 16     // ring samples to try before giving up and using the exact coord (lets a real no_path surface).
@@ -172,20 +171,6 @@
 #define AIBOT_EAT_EXIT_MANA   85.0f
 #define AIBOT_PULL_MIN_HP     70.0f   // never INITIATE a new pull below this (solo doctrine only)
 #define AIBOT_PULL_MIN_MANA   50.0f
-
-// [PULL] Proactive pull-and-retreat (FINDING_005 anti-overpull, 2026-08-06). A fresh grind
-// engagement TAGS the mob then drags it back to open ground so only it (+ tight neighbours)
-// follows, instead of body-diving the camp.
-#define AIBOT_PULL_RETREAT_DIST     20.0f  // how far back toward open ground to drag a freshly-tagged mob
-#define AIBOT_PULL_RETREAT_HOLD_MS  2000   // let the retreat hop run uninterrupted this long
-#define AIBOT_PULL_MELEE_TAG_RANGE   6.0f  // melee: combat-dist within this = tagged → break off + retreat
-#define AIBOT_PULL_RANGED_TAG_RANGE 26.0f  // ranged: within this = tagged (matches the ~25y caster chase)
-#define AIBOT_PULL_ARRIVE_RANGE      9.0f  // back within this of the anchor = stop, turn and fight
-#define AIBOT_PULL_MAX_MS           8000   // abandon the pull sequence after this (fall back to fight-in-place)
-
-// [SPREAD] Anti-convergence (FINDING_005): keep independent solo bots from all dogpiling one camp.
-#define AIBOT_SPREAD_RADIUS   30.0f  // count other bots within this of a candidate grind spot (~one camp)
-#define AIBOT_SPREAD_BOT_CAP  4      // >= this many OTHER solo bots already here → defer + relocate (not join)
 
 // SELLING STUFF THRESHOLD
 #define AIBOT_SELL_KEEP_UPGRADE_LEVELS  5   // keep an unusable gear drop only if it becomes usable within this many levels (grow-into); else sell regardless of quality
@@ -420,15 +405,6 @@ public:
     void OnPacketReceived(WorldPacket const* packet) override;
     void MovementInform(uint32 MovementType, uint32 Data = 0) override;
 
-    // --- SUI possession (SuiPossess.cpp) ---
-    // While a real player drives this bot, every autonomous behaviour is
-    // suspended: the rotation/movement sub-ticks, the 1 Hz behaviour body, and
-    // all mutating bridge commands. The bridge connection itself stays alive so
-    // the C# brain keeps receiving STATE (with possessed:1) and stands down.
-    void SetPossessed(bool on);
-    bool IsPossessed() const { return m_possessed; }
-    void UpdateBridgeTick();   // bridge connect/recv/state/flush, shared by both tick paths
-
     // --- Combat (from BattleBotAI) ---
     bool AttackStart(Unit* pVictim);
     Unit* SelectAttackTarget(Unit* pExcept = nullptr) const;
@@ -459,11 +435,6 @@ public:
     // PullReady: fight-INITIATION readiness (solo). Gates only the start of a new pull at
     // the grind dispatch + approach scan; never gates defense or an in-progress fight.
     bool PullReady() const;
-    // [PULL] Proactive pull-and-retreat (FINDING_005). BeginPull tags the target then arms the
-    // retreat-to-anchor; HandlePullRetreat drives it each in-combat tick and resumes normal
-    // combat once the mob has been dragged clear of the camp.
-    bool BeginPull(Unit* pTarget);
-    bool HandlePullRetreat();
 
     // --- [TEAMPLAY] public seams for the stateless group-combat resolvers ---
     // TeamPlay (AiBotAITeamPlay.cpp) reads this AI but mutates nothing; these two accessors
@@ -671,7 +642,6 @@ public:
     bool m_wasDead = false;
     bool m_loggedFirstUpdate = false;
     bool m_freshSpawn = false;
-    bool m_possessed = false;         // SUI possession: autonomous behaviour suspended
     uint32 m_wanderTimer = 0;
     uint32 m_lastKnownLevel = 0;
     uint32 m_trackedQuestId = 0;
@@ -683,7 +653,6 @@ public:
     uint32 m_spawnMapId;
     uint32 m_spawnInstanceId;
     uint32 CountNearbyHostiles(Unit* pCandidate, float radius) const;
-    uint32 CountNearbyBots(Unit* pCenter, float radius) const;   // [SPREAD] anti-convergence (FINDING_005)
     float m_spawnX, m_spawnY, m_spawnZ, m_spawnO;
     std::string m_spawnName;  // Persisted name from playerbot table (empty = generate random)
 
@@ -718,17 +687,6 @@ public:
     uint32 m_overpullFleeHoldMs = 0;   // mid-retreat hold (suppress re-chase while the hop runs)
     uint8  m_overpullFlees      = 0;   // retreats issued this combat (cap at AIBOT_OVERPULL_MAX_FLEES)
     uint32 m_lastAttackerCount  = 0;   // peak melee attackers this combat — stamped on the DEATH event
-
-    // --- [PULL] Proactive pull-and-retreat state (FINDING_005) ---
-    // A fresh grind engagement TAGS the target then drags it to m_pullAnchor so only it (+ tight
-    // neighbours) follows, instead of body-diving the camp. Solo + TeamAuto anchor both route
-    // through BeginPull (the shared TASK_GRIND engage); followers never self-acquire so never pull.
-    bool       m_pullActive       = false;   // a proactive pull is in progress
-    bool       m_pullTagged       = false;   // target aggroed onto us → retreat phase
-    ObjectGuid m_pullTargetGuid;             // the mob being pulled
-    float      m_pullAnchorX = 0.0f, m_pullAnchorY = 0.0f, m_pullAnchorZ = 0.0f;  // retreat-to spot
-    uint32     m_pullRetreatHoldMs = 0;      // mid-retreat hold (suppress re-chase while the hop runs)
-    uint32     m_pullElapsedMs     = 0;      // safety-timeout accumulator (AIBOT_PULL_MAX_MS)
     // --- Recovery hysteresis latch (2026-07-05) ---
     // Set when HP/mana dips below AIBOT_EAT_ENTER_* OR when a pull is refused
     // under-resourced (PullReady false at an engage site); held until
@@ -744,10 +702,6 @@ public:
     // At AIBOT_GRIND_FREEZE_DWELL we emit GRIND_BLOCKED so C# breaks the freeze with a single
     // unstick kill, then re-issues the objective. Reset to 0 on any successful pull.
     uint32 m_grindFreezeStreak = 0;
-
-    // [SPREAD] Anti-convergence latch (FINDING_005): true while we're deferring a solo filler grind
-    // out of an over-crowded camp. Only used to log the defer ONCE per episode (not every tick).
-    bool m_spreadDeferred = false;
 
     // --- [PLAYERPARTY] Instance-follow dwell (2026-07-08) ---
     // Accumulates while the escort boss is on a DIFFERENT map (and not taxi-flying / on a

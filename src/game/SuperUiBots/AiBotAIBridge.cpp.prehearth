@@ -406,7 +406,7 @@ void AiBotAI::BridgeSendState()
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
         "\"quests\":\"%s\","
-        "\"questId\":%u,\"questStatus\":%u,\"possessed\":%u}}",
+        "\"questId\":%u,\"questStatus\":%u}}",
         me->GetGUIDLow(),
         me->GetHealth(), me->GetMaxHealth(),
         me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA),
@@ -421,7 +421,7 @@ void AiBotAI::BridgeSendState()
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
         questBlob.c_str(),
-        m_trackedQuestId, questStatus, m_possessed ? 1u : 0u);
+        m_trackedQuestId, questStatus);
 
     BridgeSend(json);
 }
@@ -549,17 +549,6 @@ void AiBotAI::BridgeProcessLine(const char* line)
     if (!JsonExtractString(line, "type", msgType, sizeof(msgType)))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: no 'type' in message", me->GetName());
-        return;
-    }
-
-    // [SUI] While a real player drives this bot every mutating command would
-    // execute under the human's feet (MOVE_TO would yank the mover). Drop with
-    // an event so the C# supervisor sees an explicit answer, not a stall.
-    if (m_possessed && strcmp(msgType, "PING") != 0)
-    {
-        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (possessed)",
-            me->GetName(), msgType);
-        BridgeSendEvent("POSSESSED_DROP", msgType);
         return;
     }
 
@@ -1744,40 +1733,6 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK IDLE (clearing task)", me->GetName());
     }
-    else if (strcmp(taskType, "PORT_HOME") == 0)
-    {
-        // [ESCAPE] (FINDING_010) Living-bot stranded escape. The C# wedge-streak escalation asks
-        // for a port to the racial start when a bot has proven it can neither kill nor quest where
-        // it stands (Everlook L18 / Badlands L21 census — the park→local-relocate ladder shuffles
-        // it ~50yd forever). The DEAD path is FINDING_008's ghost port; this one is alive-only and
-        // refuses in combat (threat/aggro transfer). Same-map uses the proven NearTeleportTo seam;
-        // cross-continent uses the full Player::TeleportTo far-teleport (bots are real in-core
-        // players, same machinery as any player worldport).
-        float hx = 0.0f, hy = 0.0f, hz = 0.0f; int hmap = -1;
-        bool haveHome = JsonExtractFloat(payload, "home_x", hx) && JsonExtractFloat(payload, "home_y", hy) &&
-                        JsonExtractFloat(payload, "home_z", hz) && JsonExtractInt(payload, "home_map", hmap);
-        if (haveHome && hmap >= 0 && me->IsAlive() && !me->IsInCombat())
-        {
-            float fx = me->GetPositionX(), fy = me->GetPositionY(), fz = me->GetPositionZ();
-            uint32 fmap = me->GetMapId();
-            m_currentTask.Clear();
-            StopMoving();
-            if ((int)me->GetMapId() == hmap)
-            {
-                ReGroundZ(hx, hy, hz, "port-home");
-                me->NearTeleportTo(hx, hy, hz, me->GetOrientation());
-            }
-            else
-                me->TeleportTo((uint32)hmap, hx, hy, hz, me->GetOrientation());
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s PORT_HOME (stranded escape): (%.1f, %.1f, %.1f) map=%u -> (%.1f, %.1f, %.1f) map=%d",
-                me->GetName(), fx, fy, fz, fmap, hx, hy, hz, hmap);
-        }
-        else
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s PORT_HOME refused (home=%d map=%d alive=%d combat=%d)",
-                me->GetName(), haveHome ? 1 : 0, hmap, me->IsAlive() ? 1 : 0, me->IsInCombat() ? 1 : 0);
-    }
     else
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -1989,18 +1944,6 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
 {
     if (!me || !me->IsAlive() || !me->IsInWorld())
         return;
-
-    // [SUI] Never autosell a REAL account's character. AiBotAI is only ever
-    // attached to socket-less bot sessions, and possessed bots reject bridge
-    // commands upstream — but this is the requirement's hard wall: any unit
-    // whose session has a live client keeps its inventory untouchable.
-    if (me->GetSession() && !me->GetSession()->GetBot())
-    {
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT-SELL] %s: refused — real account character", me->GetName());
-        BridgeSendEvent("SELL_FAIL", "reason=real_account_protected");
-        return;
-    }
 
     int npcEntry = 0, keepQuality = 0;
     JsonExtractInt(json, "npc_entry", npcEntry);
@@ -2847,29 +2790,6 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
     {
         float dx = me->GetPositionX(), dy = me->GetPositionY(), dz = me->GetPositionZ();
         uint32 mapId = me->GetMapId();
-
-        // [HEARTH] (FINDING_008) Optional racial-start override. A persistent death loop the nearest
-        // graveyard can't break (the graveyard is adjacent to the killer camp — SneakyShock's 307-death
-        // Wetlands loop) ports the ghost to the bot's RACIAL START instead. C# only sends this when the
-        // home is on THIS map (same-map NearTeleportTo — identical proven ghost-port seam as below); a
-        // cross-continent home simply omits it and falls through to the normal graveyard logic. Reuses
-        // the whole m_pendingGraveyardRez self-rez path, so the ghost is invulnerable in transit.
-        float hx = 0.0f, hy = 0.0f, hz = 0.0f; int hmap = -1;
-        if (JsonExtractFloat(payload, "home_x", hx) && JsonExtractFloat(payload, "home_y", hy) &&
-            JsonExtractFloat(payload, "home_z", hz) && JsonExtractInt(payload, "home_map", hmap) &&
-            hmap == (int)mapId)
-        {
-            ReGroundZ(hx, hy, hz, "rez-home");
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s HEARTH port (ghost): (%.1f, %.1f, %.1f) -> racial start (%.1f, %.1f, %.1f) map=%u",
-                me->GetName(), dx, dy, dz, hx, hy, hz, mapId);
-            me->NearTeleportTo(hx, hy, hz, me->GetOrientation());
-            m_pendingGraveyardRez = true;
-            m_graveRezX = hx; m_graveRezY = hy; m_graveRezZ = hz;
-            m_graveRezMap = mapId; m_graveRezWaitMs = 8000;
-            BridgeSendEvent("GRAVEYARD_PORT", "");
-            return;
-        }
 
         // Primary: zone-linked nearest graveyard for the death position.
         WorldSafeLocsEntry const* grave = sObjectMgr.GetClosestGraveYard(dx, dy, dz, mapId, me->GetTeam());

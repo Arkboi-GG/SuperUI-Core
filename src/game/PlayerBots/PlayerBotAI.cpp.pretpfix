@@ -40,12 +40,7 @@ void PlayerBotAI::UpdateAI(uint32 const diff)
         WorldPackets::Movement::MoveTeleportAck packet;
         packet.guid = me->GetObjectGuid();
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_9_4
-        // Echo the core's pending-teleport counter, not 0 (MSUIBotTracer FINDING_004). The core
-        // pushed a pending TELEPORT change keyed on this counter in SendTeleportToController; acking
-        // with 0 never matches it → HandleMoveTeleportAck logs "counter 0, no pending teleport found"
-        // (9,400 errors / 626 bots) and the pending change is never erased (it leaks). This is the same
-        // correct counter CombatBotBaseAI already uses for its own MSG_MOVE_TELEPORT_ACK path.
-        packet.movementCounter = me->GetLastCounterForMovementChangeType(TELEPORT);
+        packet.movementCounter = 0;
 #endif
         packet.time = 0;
         me->GetSession()->HandleMoveTeleportAckOpcode(packet);
