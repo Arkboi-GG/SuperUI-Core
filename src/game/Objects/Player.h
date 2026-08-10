@@ -1325,9 +1325,12 @@ class Player final: public Unit
         uint32 m_resurrectionSpellId;
 #endif
         bool IsNeedCastPassiveLikeSpellAtLearn(SpellEntry const* spellInfo) const;
-        void SendInitialSpells() const;
         bool AddSpell(uint32 spellId, bool active, bool learning, bool dependent, bool disabled);
     public:
+        // Public for SuiPossess::HandleRequest — the possession grant re-sends the bot's
+        // spell list through its session's SMSG_SUI_PROXY mirror (a const resend, same
+        // family as MasterPlayer::SendInitialActionButtons which .testbars re-sends).
+        void SendInitialSpells() const;
         bool HasSpell(uint32 spell) const override;
         bool HasActiveSpell(uint32 spell) const;            // show in spellbook
         TrainerSpellState GetTrainerSpellState(TrainerSpell const* pTrainerSpell) const;
