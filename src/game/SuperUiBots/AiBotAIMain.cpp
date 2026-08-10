@@ -68,6 +68,36 @@ void AiBotAI::OnPlayerLogin()
         me->SaveToDB();
 }
 
+AiBotAI* AiBotAI::AttachToRealCharacter(Player* owner)
+{
+    if (!owner || !owner->IsInWorld())
+        return nullptr;
+
+    AiBotAI* ai = new AiBotAI(owner->GetRace(), owner->GetClass(), owner->GetLevel(),
+        owner->GetMapId(), owner->GetInstanceId(),
+        owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ(),
+        owner->GetOrientation());
+    ai->SetPlayer(owner);
+    ai->m_ownedDummyEntry = std::make_unique<PlayerBotEntry>();
+    ai->botEntry = ai->m_ownedDummyEntry.get();
+
+    // The fabricated-bot login work must not touch a real character: no premade spec,
+    // no auto-equip, no skill-maxing, no reagent grants, no heal, no channel joins.
+    // Role + spell data are the AI-internal pieces UpdateAI needs from that block.
+    ai->AutoAssignRole();
+    ai->ResetSpellData();
+    ai->PopulateSpellData();
+    ai->m_freshSpawn = false;
+    ai->m_initialized = true;
+    ai->m_lastKnownLevel = owner->GetLevel();
+
+    owner->SetAI(ai);
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT] %s (guid %u) real character enrolled as fleet AI",
+        owner->GetName(), owner->GetGUIDLow());
+    return ai;
+}
+
 bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 {
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,

@@ -18,7 +18,7 @@
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
-#include "SuiUnattendedAI.h"
+#include "AiBotAIMain.h"
 #include "World.h"
 
 namespace SuiPossess
@@ -73,33 +73,32 @@ static AiBotAI* BotAiOf(Player* bot)
     return bot ? dynamic_cast<AiBotAI*>(bot->AI()) : nullptr;
 }
 
-// ── Own-character autonomy (M5) ──────────────────────────────────────────────
+// ── Own-character autonomy (M5, design corrected 2026-08-10) ─────────────────
 // While the human drives a bot or the free camera, their real character runs
-// SuiUnattendedAI (PartyBotAI behaviour minus the fabricated-bot init). Never
-// stomps a foreign AI (mind control), and deletion is explicit — this AI is
-// owned here, not by a PlayerBotEntry.
+// the SAME fleet AI as every SuperUI bot (AiBotAI): it enrolls with the C#
+// brain through the normal HELLO/STATE bridge flow, follows the party boss
+// (possessed-first pre-pass in FindPartyBoss, so no anchor plumbing), and
+// assists in combat. In-party behaviour is the gate — group break force-
+// releases and detaches — and the bridge SELL_ITEMS wall refuses live-client
+// sessions, so it can never vendor. Never stomps a foreign AI (mind control);
+// deletion is explicit — this AI is owned here, not by PlayerBotMgr.
 
-static void AttachUnattendedAI(Player* owner, Player* anchor)
+static void AttachUnattendedAI(Player* owner, Player* /*anchor*/)
 {
     if (!owner || !owner->IsInWorld())
         return;
-    if (SuiUnattendedAI* existing = dynamic_cast<SuiUnattendedAI*>(owner->AI()))
-    {
-        existing->SetAnchor(anchor);
-        return;
-    }
+    if (dynamic_cast<AiBotAI*>(owner->AI()))
+        return;   // already enrolled (bot switch / freecam transition)
     if (owner->AI())
         return;   // charmed/controlled by something else — leave it alone
-    owner->SetAI(new SuiUnattendedAI(owner, anchor));
-    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s now runs unattended AI (anchor %s)",
-        owner->GetName(), anchor ? anchor->GetName() : "none");
+    AiBotAI::AttachToRealCharacter(owner);
 }
 
 static void DetachUnattendedAI(Player* owner)
 {
     if (!owner)
         return;
-    SuiUnattendedAI* ai = dynamic_cast<SuiUnattendedAI*>(owner->AI());
+    AiBotAI* ai = dynamic_cast<AiBotAI*>(owner->AI());
     if (!ai)
         return;
     owner->SetAI(nullptr);

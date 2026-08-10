@@ -464,7 +464,6 @@ set (game_SRCS
     SuperUiBots/AiBotAI.h
     SuperUiBots/AiBotAITeamPlay.h
     SuperUiBots/SuiPossess.h
-    SuperUiBots/SuiUnattendedAI.h
     SuperUiBots/Movement/AiBotMovementGenerators.h
     SuperUiBots/Movement/AiBotPathSmoothing.h
     PlayerBots/BattleBotWaypoints.h

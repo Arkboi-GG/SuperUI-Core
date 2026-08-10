@@ -47,6 +47,7 @@
 #include "Log.h"
 #include "PathFinder.h"   // Vector3, PointsArray — needed for SmoothPathCorners' signature
 #include "AiBotDoctrine.h" // [DOCTRINE] IEngagementDoctrine + ResolveDoctrine/MakeDoctrine (Layer D)
+#include "PlayerBotMgr.h"  // PlayerBotEntry (complete type for m_ownedDummyEntry)
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -429,6 +430,15 @@ public:
     bool IsPossessed() const { return m_possessed; }
     void UpdateBridgeTick();   // bridge connect/recv/state/flush, shared by both tick paths
 
+    // The REAL character's autonomy while its human drives a bot or the free camera
+    // (SuiPossess Attach/DetachUnattendedAI). The character runs this same fleet AI —
+    // enrolls with the brain via the normal HELLO/STATE bridge flow, follows the party
+    // boss (possessed-first pre-pass), assists — with the fabricated-bot login work
+    // skipped: no heal/skill-max/reagents/channel-join mutations on a real character.
+    // In-party behaviour is the gate, and the bridge SELL_ITEMS wall refuses live-client
+    // sessions, so it can never vendor. Ticks through Player::Update's m_AI slot.
+    static AiBotAI* AttachToRealCharacter(Player* owner);
+
     // --- Combat (from BattleBotAI) ---
     bool AttackStart(Unit* pVictim);
     Unit* SelectAttackTarget(Unit* pExcept = nullptr) const;
@@ -672,6 +682,9 @@ public:
     bool m_loggedFirstUpdate = false;
     bool m_freshSpawn = false;
     bool m_possessed = false;         // SUI possession: autonomous behaviour suspended
+    // Set by AttachToRealCharacter: inert PlayerBotEntry (never registered with
+    // PlayerBotMgr) absorbing the base class's requestRemoval writes.
+    std::unique_ptr<PlayerBotEntry> m_ownedDummyEntry;
     uint32 m_wanderTimer = 0;
     uint32 m_lastKnownLevel = 0;
     uint32 m_trackedQuestId = 0;
