@@ -389,6 +389,20 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             case ORDER_MOVE_QUEUE:
                 ai->SuiQueueWaypoint(x, y, z);
                 break;
+            case ORDER_FOLLOW:
+            {
+                // Portrait drag chain: this bot escorts the named group member.
+                // Rides the [FOLLOW-CMD] escort override, whose resolution is
+                // case-insensitive and falls back to the auto split when the
+                // name never resolves — so an empty/unknown target just clears.
+                Player* followTarget = targetGuid.IsEmpty() ? nullptr
+                    : sObjectMgr.GetPlayer(targetGuid);
+                snprintf(json, sizeof(json),
+                    "{\"type\":\"SET_ESCORT\",\"payload\":{\"player_name\":\"%s\"}}",
+                    followTarget ? followTarget->GetName() : "");
+                ai->BridgeProcessLine(json);
+                break;
+            }
             case ORDER_PATROL:
                 // Convert the queued chain into a loop. The coordinate in the
                 // packet joins the route as its final point (a bare patrol

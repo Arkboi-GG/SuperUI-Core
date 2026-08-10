@@ -70,6 +70,7 @@ namespace SuiPossess
         ORDER_STOP   = 2,
         ORDER_MOVE_QUEUE = 3,   // append a waypoint; arrival chains the next leg
         ORDER_PATROL = 4,       // loop the queued waypoints until MOVE/STOP clears them
+        ORDER_FOLLOW = 5,       // targetGuid = group member to escort; empty = auto split
     };
 
     // SMSG_SUI_CONTROL_ROSTER member flags
