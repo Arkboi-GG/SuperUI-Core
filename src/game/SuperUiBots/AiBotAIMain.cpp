@@ -744,6 +744,12 @@ void AiBotAI::DoPartyFollow()
     // detection boss — with two real players the fleet splits ~evenly instead of stacking
     // on one. Catch-up teleport + instance-follow below inherit the same target, so each
     // half of the escort tracks ITS human even when the humans split up.
+    // [SUI] Divinity-style chain: an UNLINKED member (broken off from the portrait
+    // chain) never formation-follows — it stands where it was left. Combat assist
+    // and the player-party stand-down stay live; only the follow leg is severed.
+    if (m_suiUnlinked)
+        return;
+
     Player* pBoss = FindEscortBoss();
     if (!pBoss || !pBoss->IsInWorld() || !pBoss->IsAlive())
         return;

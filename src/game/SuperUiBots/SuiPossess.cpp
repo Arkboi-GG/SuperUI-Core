@@ -403,6 +403,17 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 ai->BridgeProcessLine(json);
                 break;
             }
+            case ORDER_LINK:
+                // Divinity-style chain toggle. Linked members keep formation on the
+                // driven character; an unlinked member stands its ground from here.
+                ai->m_suiUnlinked = x < 0.5f;
+                if (ai->m_suiUnlinked)
+                {
+                    ai->StopMoving();
+                    pMember->GetMotionMaster()->Clear(false, true);
+                    pMember->GetMotionMaster()->MoveIdle();
+                }
+                break;
             case ORDER_PATROL:
                 // Convert the queued chain into a loop. The coordinate in the
                 // packet joins the route as its final point (a bare patrol

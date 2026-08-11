@@ -438,6 +438,7 @@ public:
     void SuiClearWaypoints() { m_suiWaypoints.clear(); m_suiPatrolLoop = false; }
     std::deque<std::array<float, 3>> m_suiWaypoints;
     bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
+    bool m_suiUnlinked = false;     // chain broken (ORDER_LINK): never formation-follows
 
     // The REAL character's autonomy while its human drives a bot or the free camera
     // (SuiPossess Attach/DetachUnattendedAI). The character runs this same fleet AI —
