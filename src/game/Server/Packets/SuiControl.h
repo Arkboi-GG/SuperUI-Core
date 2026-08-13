@@ -68,11 +68,30 @@ namespace WorldPackets
         {
         public:
             float x = 0, y = 0, z = 0;  // free-camera position (raw WoW map coords)
+            // Is the free view UP? The client cannot leave it silently: the server keys the
+            // streaming eye and the commanded-remotely waiver off this. Optional on the wire so
+            // a sender predating the flag still reads as "up", which is what it meant.
+            uint8 active = 1;
 
             explicit Cam() : ClientPacket(CMSG_SUI_CAM) {}
             void ReadFromWorldPacket(WorldPacket& recv_data) override
             {
                 recv_data >> x >> y >> z;
+                if (recv_data.rpos() < recv_data.size())
+                    recv_data >> active;
+            }
+        };
+
+        class ZoneIntel final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;   // reserved; an empty body is legal (older sender)
+
+            explicit ZoneIntel() : ClientPacket(CMSG_SUI_ZONE_INTEL) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.rpos() < recv_data.size())
+                    recv_data >> flags;
             }
         };
     }

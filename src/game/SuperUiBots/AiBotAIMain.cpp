@@ -493,6 +493,15 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
         }
         else if (Data == AIBOT_POINT_TASK_DEST)
         {
+            // [SUI] While a human drives this bot directly, the journey must not
+            // chain under them: TryBegin's stop finalizes the old spline, Finalize
+            // fires this callback, and the next chunk would re-open a movespline
+            // that HandleMovementOpcodes favours over every packet the human sends.
+            // Commanded-from-the-free-view stays exempt — waypoint chains are
+            // supposed to chain there, and the parked client sends no movement.
+            if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
+                return;
+
             // More chunks remaining in the current (possibly partial) leg?
             if (!m_pathWaypoints.empty() &&
                 m_pathIndex < (uint32)m_pathWaypoints.size() - 1)
@@ -604,6 +613,12 @@ void AiBotAI::RefreshDoctrine()
     DoctrineKind const kind = ResolveDoctrine(*this);
     if (!m_doctrine || kind != m_doctrineKind)
     {
+        // [SUI] A Solo-era brain errand does not survive joining a human's party:
+        // the planner stands down on pparty, but its last MOVE_TO kept walking the
+        // bot to a dead objective — and a live TASK_MOVE_TO also gates
+        // DoPartyFollow, so the new member marched away instead of forming up.
+        if (kind == DoctrineKind::PlayerParty && m_doctrineKind == DoctrineKind::Solo)
+            SuiAbandonJourney();
         char const* from = m_doctrine ? m_doctrine->Name() : "(none)";
         m_doctrine = MakeDoctrine(kind);
         m_doctrineKind = kind;
@@ -748,6 +763,12 @@ void AiBotAI::DoPartyFollow()
     // chain) never formation-follows — it stands where it was left. Combat assist
     // and the player-party stand-down stay live; only the follow leg is severed.
     if (m_suiUnlinked)
+        return;
+
+    // A toon the human is commanding from the sky stands where it was sent. Formation-following
+    // would drag it back to the party the moment its ordered leg finished, which is the opposite
+    // of driving it: you moved it there on purpose.
+    if (SuiPossess::IsCommandedFromFreeView(me))
         return;
 
     Player* pBoss = FindEscortBoss();
@@ -952,7 +973,13 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // behaviour — tasks, doctrine, combat, loot, wander — is suspended; only the
     // bridge stays alive so the C# brain keeps seeing STATE (possessed:1) and
     // stands down. SetPossessed(false) resumes on a fresh 1s tick.
-    if (m_possessed)
+    // Commanded from the free view is the exception: autonomy still must not choose goals,
+    // but the tick has to RUN or the ordered task has nothing to walk it. The doctrine that
+    // results is PlayerParty (the possessor's own body resolves as boss), which is exactly the
+    // wanted shape — no grind, no patrol, no wander, combat assist live, and the task machinery
+    // reachable for the MOVE_TO the order just queued. DoPartyFollow is separately suppressed
+    // for this bot so it holds the ground you sent it to instead of walking back to the party.
+    if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
     {
         UpdateBridgeTick();
         return;
@@ -1409,6 +1436,26 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // idles out as before). Known cosmetic: 1-2 ticks of turn-toward-boss between
             // errand legs (the task clears on TASK_COMPLETE, follow resumes until the next
             // command lands).
+            // [SUI-DIAG] Why is this member not forming up? Every "nobody follows me" report
+            // ends at one of three answers and none of them were observable: a stale
+            // TASK_MOVE_TO diverts past the follow call entirely, an unlinked member stands its
+            // ground by design, or the boss simply did not resolve. Throttled to 5s per bot,
+            // and only reachable in PlayerParty doctrine, so it is bounded to the human party
+            // rather than the whole fleet.
+            if (m_suiFollowDiagTimer > AIBOT_UPDATE_INTERVAL)
+                m_suiFollowDiagTimer -= AIBOT_UPDATE_INTERVAL;
+            else
+            {
+                m_suiFollowDiagTimer = 5000;
+                Player* pDiagBoss = FindEscortBoss();
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[SUI-FOLLOW] %s: task=%u unlinked=%u commanded=%u boss=%s dist=%.1f",
+                    me->GetName(), uint32(m_currentTask.type), m_suiUnlinked ? 1u : 0u,
+                    SuiPossess::IsCommandedFromFreeView(me) ? 1u : 0u,
+                    pDiagBoss ? pDiagBoss->GetName() : "(none)",
+                    pDiagBoss ? me->GetDistance(pDiagBoss) : -1.0f);
+            }
+
             if (m_currentTask.type != TASK_MOVE_TO)
             {
                 DoPartyFollow();

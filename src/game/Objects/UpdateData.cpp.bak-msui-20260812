@@ -159,21 +159,8 @@ bool UpdateData::BuildPacket(WorldPacket* packet, UpdatePacket const* updPacket,
 
     size_t pSize = buf.wpos();                              // use real used data size
 
-    // WorldSession rejects packets above 0x8000 before they ever reach the
-    // socket. Compression.Update.Size is an operator tuning knob, not
-    // permission to cross that wire ceiling: a value of 44938 caused a
-    // 32866-byte login SMSG_UPDATE_OBJECT to be logged and discarded, leaving
-    // the player in a populated instance with an apparently empty visibility
-    // bubble until a later cell refresh resent the missing creates.
-    //
-    // Keep honoring lower configured thresholds, but force compression once
-    // the uncompressed packet would exceed the protocol-safe size.
-    uint32 compressionThreshold = sWorld.getConfig(CONFIG_UINT32_COMPRESSION_UPDATE_SIZE);
-    if (compressionThreshold > MAX_UNCOMPRESSED_PACKET_SIZE)
-        compressionThreshold = MAX_UNCOMPRESSED_PACKET_SIZE;
-
     // compress large packets
-    if (pSize > compressionThreshold)
+    if (pSize > sWorld.getConfig(CONFIG_UINT32_COMPRESSION_UPDATE_SIZE))
     {
         if (pSize >= 900000)
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[CRASH-CLIENT] Too large packet: %u", pSize);

@@ -10867,7 +10867,17 @@ void Unit::UpdateSplineMovement(uint32 t_diff)
     {
         DisableSpline();
 
-        if (HasPendingSplineDone() && !IsPlayer() && !GetPossessorGuid().IsPlayer())
+        // [SUI] The Player exemption below trusts a real client to confirm with
+        // CMSG_MOVE_SPLINE_DONE. A PlayerBot's session is a fake client that never
+        // sends it, so a bot Player that was EVER spline-moved kept the flag for
+        // life — harmless while only the AI moved it, but HandleMovementOpcodes
+        // discards every client movement packet while it is set, which froze SUI
+        // possession of any bot the fleet had ever walked (the body never leaves
+        // the pickup spot while the client predicts freely).
+        bool const suiBotClient = IsPlayer() && ToPlayer()->GetSession() &&
+            ToPlayer()->GetSession()->GetBot();
+        if (HasPendingSplineDone() &&
+            (suiBotClient || (!IsPlayer() && !GetPossessorGuid().IsPlayer())))
             SetSplineDonePending(false);
     }
     else if (!movespline->isCyclic() && movespline->getLastPointSent() >= 0 && movespline->getLastPointSent() < (movespline->currentPathIdx() + 3))

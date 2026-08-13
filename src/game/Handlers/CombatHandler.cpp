@@ -28,6 +28,7 @@
 #include "ObjectGuid.h"
 #include "Player.h"
 #include "Map.h"
+#include "SuiPossess.h"      // [SUI] free-view facing help
 
 void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing const& packet)
 {
@@ -59,6 +60,12 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
         SendAttackStop(pEnemy);
         return;
     }
+
+    // [SUI] Same facing help as the cast path: in the free view the driving
+    // client never orients the acting unit, and a melee swing at a target
+    // behind it misses forever.
+    if (SuiPossess::IsFreeViewUp(_player) && !pActor->IsFacingTarget(pEnemy))
+        pActor->SetFacingToObject(pEnemy);
 
     pActor->Attack(pEnemy, true);
 }

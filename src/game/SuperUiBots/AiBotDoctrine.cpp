@@ -35,6 +35,23 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     // back to the frozen ladder next behaviour tick -- swap == reset, as always.
     if (bot.FindPartyBoss())
         return DoctrineKind::PlayerParty;
+
+    // [SUI] The owner's non-autonomy decree, enforced LOCALLY (2026-08-10). An unattended
+    // real character — the body its human left behind to possess a bot or fly the free view —
+    // must never pick its own goals. Nothing was actually holding it: pparty=1 is only ever an
+    // echo TO the brain, and the theft wall keeps this AI off the bridge entirely, so the echo
+    // has no reader. With nobody possessed, FindPartyBoss finds no OTHER real member in a
+    // group of bots, so this fell through the ladder to Solo and the body went grinding across
+    // the zone — logged as "[AIBOT-DOCTRINE] Tesfff: (none) -> Solo" the moment its human
+    // entered the free view, with the rest of the party dutifully escorting the runaway.
+    //
+    // PlayerParty is precisely the hold wanted, with no new behaviour invented: formation on
+    // whoever is being driven when someone is, DoPartyFollow's early return (no boss = stand
+    // still) when nobody is, combat assist either way, and — because the branch stands the
+    // whole task machinery down — no grind, no patrol, no wander. CMSG_SUI_ORDER injections
+    // remain the only thing that moves it deliberately, exactly as the decree says.
+    if (bot.IsUnattendedRealCharacter())
+        return DoctrineKind::PlayerParty;
     //
     // Posture source is the M2 ConductState. Until it lands, every bot is AUTONOMOUS (§3), so the
     // Directed branch below is present-but-dark and the resolver only ever picks TeamAuto or Solo

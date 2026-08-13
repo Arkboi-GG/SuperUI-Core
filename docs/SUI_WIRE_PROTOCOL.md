@@ -19,6 +19,13 @@ Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
 | `SMSG_SUI_CONTROL_ACK`     | 832 (0x0340) | S → C |
 | `SMSG_SUI_PROXY`           | 833 (0x0341) | S → C |
 | `SMSG_SUI_SNAPSHOT`        | 834 (0x0342) | S → C |
+| `CMSG_SUI_CAM`             | 835 (0x0343) | C → S |
+| `CMSG_SUI_ZONE_INTEL`      | 836 (0x0344) | C → S |
+| `SMSG_SUI_ZONE_INTEL`      | 837 (0x0345) | S → C |
+| `CMSG_SUI_RTS_STATE`       | 838 (0x0346) | C → S |
+| `SMSG_SUI_RTS_STATE`       | 839 (0x0347) | S → C |
+| `CMSG_SUI_RTS_ACTION`      | 840 (0x0348) | C → S |
+| `SMSG_SUI_RTS_ACTION_RESULT` | 841 (0x0349) | S → C |
 
 ## CMSG_SUI_CONTROL_REQUEST
 Ask to possess a party/raid bot.
@@ -120,3 +127,106 @@ stand-down). Mutating bridge commands sent anyway are dropped with an
 the same core without any custom SMSGs — control still works because the grant
 uses stock `SMSG_CLIENT_CONTROL_UPDATE` + `CMSG_SET_ACTIVE_MOVER`. This makes
 the whole server milestone testable from an unmodified 1.12 client.
+
+## CMSG_SUI_CAM
+
+Free-view camera position; the server keeps the streaming eye under it
+(heartbeat: every 2 s or >5 yd of rig travel). The trailing ACTIVE byte is the
+free view’s on/off signal — optional on the wire, absent reads as “up”.
+
+| Field | Type | Notes |
+|---|---|---|
+| x, y, z | 3×f32 | rig position, raw map coords |
+| active | u8 (optional) | 0 = the free view came down |
+
+## CMSG_SUI_ZONE_INTEL
+
+The commander map’s census request. Client-driven polling: sent on map open and
+every ~5 s while it stays open. Marks the session SuiCapable.
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 (optional) | reserved, send 0 |
+
+## SMSG_SUI_ZONE_INTEL
+
+Answered only to the asker. Two blocks, each with an explicit ROW STRIDE so a
+future server can append per-row facts while an older client skips the extra
+bytes (`skip(stride - known)`) — the classic optional-trailing idiom cannot
+express “every row grew”. Per-PACKET additions still go after the last block.
+
+| Field | Type | Notes |
+|---|---|---|
+| zoneCount | u16 | sparse: only zones with a nonzero census, all maps |
+| zoneRowBytes | u8 | row stride, currently 9 (R1) |
+| zoneCount × rows: | | |
+|  zoneId | u32 | `Player::GetCachedZoneId` (≤ one zone-tick stale) |
+|  bots | u16 | sessions with a `PlayerBotEntry` (`Player::IsBot`) |
+|  players | u16 | everyone else — unattended real characters and the asker included |
+|  controller | u8 | zone controller: 0 none / 1 alliance / 2 horde, bit 0x80 = contested (always 0 until territory R3) |
+| unitCount | u8 | the asker’s own forces: self + in-world group members |
+| unitRowBytes | u8 | row stride, currently 29 |
+| unitCount × rows: | | |
+|  guid | u64 | raw |
+|  mapId | u32 | |
+|  zoneId | u32 | |
+|  x, y, z | 3×f32 | live position (the client cannot see unstreamed members) |
+|  flags | u8 | bit0 alive, bit1 bot |
+
+Notes: GM-invisible characters are counted (no filtering in v1). Zone ids the
+client has no WorldMapArea entry for (dungeons, raids) appear in the census and
+are aggregated by the client as “elsewhere”.
+
+## CMSG_SUI_RTS_STATE / SMSG_SUI_RTS_STATE
+
+Tier-2 RTS worldstate snapshot; answered only to the asker, marks the session
+SuiCapable. Client polls on the commander-map cadence (~5 s). In the vanilla
+worldstate the reply is mode=0, moduleFlags=0 and all-zero blocks.
+
+Request: `u8 flags` (optional, reserved).
+
+Reply (all blocks stride-versioned — future servers grow rows, old clients skip):
+
+| Field | Type | Notes |
+|---|---|---|
+| mode | u8 | 0 vanilla, 1 RTS match |
+| moduleFlags | u8 | bit0 honor, bit1 heroes, bit2 territory, bit3 dungeons |
+| factionRowStride | u8 | currently 26; ALWAYS 2 rows (alliance, horde) |
+|  honorPool | i64 | faction honor pool (R2 feeds it) |
+|  ore, skins, herbs | 3×i32 | standing supply from held zones (R3) |
+|  controlledZones | u16 | R3 |
+|  heroesFielded, heroSlotCap | 2×u16 | R2/R3 |
+| heroCount, heroRowStride(12) | 2×u8 | rows: u64 guid, u8 team, u8 heroLevel, u8 dead, u8 pad |
+| dungeonCount, dungeonRowStride(7) | 2×u8 | rows: u32 mapId, u8 controller, u8 liveRunFlags(bit0 A run, bit1 H run), u8 pad |
+
+## CMSG_SUI_RTS_ACTION / SMSG_SUI_RTS_ACTION_RESULT
+
+Request: `u8 action` (1 heroDeclare, 2 heroUpgrade, 3 heroRevive), `u64 subjectGuid`.
+Result: `u8 action, u8 result, u64 subjectGuid, i64 poolAfter`.
+Result codes: 0 ok, 1 insufficient honor, 2 no free slot, 3 bad subject,
+4 unsupported/disabled (R1 always answers 4; R2 implements).
+
+## RTS ruleset key list (shared with the SuperUI web app registry)
+
+Scalars in `characters.superui_worldstate` (key/value), read ONCE at boot by
+`SuiRts::LoadRuleset()`. Absent key = default. This list is the single source
+both the core and the web app's RtsRulesetRegistry mirror.
+
+| Key | Default | Phase | Meaning |
+|---|---|---|---|
+| mode | (absent = vanilla) | — | `rts` flips the worldstate |
+| state.flush_ms | 30000 | R1 | write-behind cadence for faction state |
+| rate.xp_kill / rate.xp_kill_elite / rate.xp_quest | conf | R1 | sWorld rate overrides |
+| rate.drop_money / rate.drop_item_poor..artifact / rate.drop_item_referenced | conf | R1 | sWorld rate overrides |
+| bots.cap.alliance / bots.cap.horde | -1 (uncapped) | R1 | per-faction bot population cap |
+| honor.weight.player / .bot / .npc / .npc_elite | 10 / 5 / 1 / 3 | R2 | honor-pool kill weights; ANY key present enables the honor module |
+| honor.suppress_bot_hk | 1 | R2 | skip vanilla HK recording for bot-vs-bot |
+| hero.slots_fixed | 4 | R2 | hero cap until territory lands |
+| territory.zones_per_hero_slot | 2 | R3 | AoE-housing slot ratio |
+| territory.flip_cooldown_ms | 30000 | R3 | debounce hub re-flips |
+| dungeon.run_timeout_min | 120 | R4 | stale live-run safety net |
+
+List config tables (rows ship inside the RTS save): `superui_rules_zone`,
+`superui_rules_hub`, `superui_rules_hero`, `superui_rules_dungeon`. Runtime
+state: `superui_faction`, `superui_heroes`, `superui_zone_control`,
+`superui_dungeon_control`. All DDL is core-owned and idempotent.

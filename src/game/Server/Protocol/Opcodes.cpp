@@ -940,10 +940,16 @@ Handlers BuildOpcodeList()
     DEFINE_HANDLER(CMSG_SUI_CONTROL_RELEASE,          STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiControlReleaseOpcode);
     DEFINE_HANDLER(CMSG_SUI_ORDER,                    STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiOrderOpcode);
     DEFINE_HANDLER(CMSG_SUI_CAM,                      STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiCamOpcode);
+    DEFINE_HANDLER(CMSG_SUI_ZONE_INTEL,               STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiZoneIntelOpcode);
+    DEFINE_HANDLER(CMSG_SUI_RTS_STATE,                STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiRtsStateOpcode);
+    DEFINE_HANDLER(CMSG_SUI_RTS_ACTION,               STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiRtsActionOpcode);
     INVALID_PACKET(SMSG_SUI_CONTROL_ROSTER,           UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_CONTROL_ACK,              UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_PROXY,                    UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_SNAPSHOT,                 UnhandleReason::SendByServer);
+    INVALID_PACKET(SMSG_SUI_ZONE_INTEL,               UnhandleReason::SendByServer);
+    INVALID_PACKET(SMSG_SUI_RTS_STATE,                UnhandleReason::SendByServer);
+    INVALID_PACKET(SMSG_SUI_RTS_ACTION_RESULT,        UnhandleReason::SendByServer);
 #endif
 
     return list;

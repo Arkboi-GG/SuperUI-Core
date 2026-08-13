@@ -210,6 +210,7 @@ set (game_SRCS
     SuperUiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiBots/Movement/AiBotPathSmoothing.cpp
     SuperUiBots/SuiPossess.cpp
+    SuperUiBots/SuiRts.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp

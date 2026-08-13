@@ -436,6 +436,10 @@ public:
     // appends; arrival chains into the next leg; ORDER_MOVE / ORDER_STOP clear it.
     void SuiQueueWaypoint(float x, float y, float z);
     void SuiClearWaypoints() { m_suiWaypoints.clear(); m_suiPatrolLoop = false; }
+    // [SUI] Void the whole journey — brain task, stored path, queued RTS waypoints.
+    // Called when a human takes the body (TryBegin) and when a Solo-era errand must
+    // not survive joining a human's party (RefreshDoctrine).
+    void SuiAbandonJourney() { m_currentTask.Clear(); ClearStoredPath(); SuiClearWaypoints(); }
     std::deque<std::array<float, 3>> m_suiWaypoints;
     bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
     bool m_suiUnlinked = false;     // chain broken (ORDER_LINK): never formation-follows
@@ -516,6 +520,10 @@ public:
     // FindPartyBoss stays the DETECTION primitive (doctrine / pparty / invite / guards);
     // this one is only the FORMATION target (DoPartyFollow + the ppdist STATE echo).
     Player* FindEscortBoss() const;
+    // True for the body a human left behind (AttachToRealCharacter). Such an AI is kept off
+    // the brain bridge entirely by the theft wall, so any "stand down" that travels as a
+    // STATE echo is invisible to it — the non-autonomy decree has to be enforced locally.
+    bool IsUnattendedRealCharacter() const { return m_ownedDummyEntry != nullptr; }
     void    DoPartyFollow();
 
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---
@@ -696,6 +704,7 @@ public:
     // PlayerBotMgr) absorbing the base class's requestRemoval writes.
     std::unique_ptr<PlayerBotEntry> m_ownedDummyEntry;
     uint32 m_wanderTimer = 0;
+    uint32 m_suiFollowDiagTimer = 0;   // [SUI-DIAG] throttle for the party-follow decision log
     uint32 m_lastKnownLevel = 0;
     uint32 m_trackedQuestId = 0;
 

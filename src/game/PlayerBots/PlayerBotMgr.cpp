@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "Policies/SingletonImp.h"
 #include "PlayerBotMgr.h"
+#include "SuiRts.h"
 #include "ObjectMgr.h"
 #include "World.h"
 #include "WorldSession.h"
@@ -460,6 +461,36 @@ bool PlayerBotMgr::AddBot(uint32 playerGUID, bool chatBot, PlayerBotAI* pAI)
             e->customBot = false;
         }
         m_bots.insert({ playerGUID , e });
+    }
+
+    // [SUI-RTS] per-faction population cap (R1): the match config caps each
+    // side's army. Outside the RTS worldstate BotCap() is -1 and this is free.
+    if (!chatBot)
+    {
+        if (PlayerCacheData const* cache = sObjectMgr.GetPlayerDataByGUID(playerGUID))
+        {
+            uint8 teamIdx = (Player::TeamForRace(uint8(cache->uiRace)) == HORDE) ? 1 : 0;
+            int64 cap = SuiRts::BotCap(teamIdx);
+            if (cap >= 0)
+            {
+                int64 current = 0;
+                for (auto const& itr : m_bots)
+                {
+                    if (itr.second->state == PB_STATE_OFFLINE || itr.second->playerGUID == playerGUID)
+                        continue;
+                    if (PlayerCacheData const* other = sObjectMgr.GetPlayerDataByGUID(uint32(itr.second->playerGUID)))
+                        if (((Player::TeamForRace(uint8(other->uiRace)) == HORDE) ? 1 : 0) == teamIdx)
+                            ++current;
+                }
+                if (current >= cap)
+                {
+                    sLog.Out(LOG_BASIC, LOG_LVL_BASIC,
+                        "[SUI-RTS] bot cap: refusing guid %u (%s at %ld/%ld)",
+                        playerGUID, teamIdx ? "horde" : "alliance", long(current), long(cap));
+                    return false;
+                }
+            }
+        }
     }
 
     e->ai->botEntry = e.get();

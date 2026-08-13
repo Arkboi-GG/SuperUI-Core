@@ -838,5 +838,11 @@ enum OpcodesList
     SMSG_SUI_PROXY                         = 833,
     SMSG_SUI_SNAPSHOT                      = 834,
     CMSG_SUI_CAM                           = 835,
-    NUM_MSG_TYPES                          = 836
+    CMSG_SUI_ZONE_INTEL                    = 836,
+    SMSG_SUI_ZONE_INTEL                    = 837,
+    CMSG_SUI_RTS_STATE                     = 838,
+    SMSG_SUI_RTS_STATE                     = 839,
+    CMSG_SUI_RTS_ACTION                    = 840,
+    SMSG_SUI_RTS_ACTION_RESULT             = 841,
+    NUM_MSG_TYPES                          = 842
 };

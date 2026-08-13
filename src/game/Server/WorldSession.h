@@ -59,6 +59,7 @@
 #include "Packets/Skill.h"
 #include "Packets/Spell.h"
 #include "Packets/SuiControl.h"
+#include "Packets/SuiRts.h"
 #include "Packets/Taxi.h"
 #include "Packets/Trade.h"
 
@@ -506,6 +507,9 @@ class WorldSession
         void HandleSuiControlReleaseOpcode(WorldPackets::SuiControl::ControlRelease const& packet);
         void HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& packet);
         void HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packet);
+        void HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet);
+        void HandleSuiRtsStateOpcode(WorldPackets::SuiRts::RtsState const& packet);
+        void HandleSuiRtsActionOpcode(WorldPackets::SuiRts::RtsAction const& packet);
 
         // Movement
         void HandleMoveRootAck(WorldPackets::Movement::MoveRootAck const& packet);

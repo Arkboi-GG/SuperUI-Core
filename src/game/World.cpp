@@ -69,6 +69,8 @@
 #include "AuctionHouseBotMgr.h"
 #include "Transports/TransportMgr.h"
 #include "PlayerBotMgr.h"
+#include "SuiPossess.h"
+#include "SuiRts.h"
 #include "ZoneScriptMgr.h"
 #include "CharacterDatabaseCache.h"
 #include "CreatureGroups.h"
@@ -200,6 +202,7 @@ World::~World()
 
 void World::Shutdown()
 {
+    SuiRts::Shutdown();       // flush RTS faction state before sessions die
     sPlayerBotMgr.DeleteAll();
     KickAll();                                     // save and kick all players
     UpdateSessions(1);                             // real players unload required UpdateSessions call
@@ -1813,6 +1816,12 @@ void World::SetInitialWorldSettings()
     sBattleGroundMgr.CreateInitialBattleGrounds();
     CheckLootTemplates_Reference(ids_set);
 
+    // SuperUI worldstate + RTS ruleset: does the loaded save carry match rules?
+    // Must precede InitZoneScripts (territory zone scripts key on the mode) and
+    // PlayerBotMgr::Load (bot caps). (SuiPossess.h / SuiRts.h)
+    SuiPossess::LoadWorldState();
+    SuiRts::LoadRuleset();
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Starting ZoneScripts");
     sZoneScriptMgr.InitZoneScripts();
 
@@ -2059,6 +2068,7 @@ void World::Update(uint32 diff)
     sBattleGroundMgr.Update(diff);
     sGuardMgr.Update(diff);
     sZoneScriptMgr.Update(diff);
+    SuiRts::Tick(diff);
 
     // Update groups with offline leaders
     if (m_timers[WUPDATE_GROUPS].Passed())

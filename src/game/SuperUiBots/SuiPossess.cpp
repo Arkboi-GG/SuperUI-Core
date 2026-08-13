@@ -16,6 +16,7 @@
 #include "Chat.h"
 #include "Group.h"
 #include "MasterPlayer.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
@@ -25,6 +26,31 @@
 
 namespace SuiPossess
 {
+
+// ── Worldstate (see SuiPossess.h for the two-tier rule) ──────────────────────
+
+static bool s_rtsWorldState = false;
+
+void LoadWorldState()
+{
+    s_rtsWorldState = false;
+    // The table always exists (idempotent DDL) so a vanilla DB boots clean; the
+    // ROW only ships inside an RTS save. The swap machinery owns writing it.
+    CharacterDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS `superui_worldstate` ("
+        "`key` VARCHAR(32) NOT NULL PRIMARY KEY, `value` VARCHAR(64) NOT NULL)");
+    if (auto result = CharacterDatabase.Query(
+            "SELECT `value` FROM `superui_worldstate` WHERE `key`='mode'"))
+    {
+        Field* fields = result->Fetch();
+        s_rtsWorldState = fields[0].GetCppString() == "rts";
+    }
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[SUI] worldstate: %s",
+        s_rtsWorldState ? "RTS MATCH (tier-2 mechanics live)" : "vanilla (tier-2 mechanics inert)");
+}
+
+bool RtsWorldState() { return s_rtsWorldState; }
+void OverrideWorldState(bool rts) { s_rtsWorldState = rts; }
 
 static void SendSnapshot(WorldSession* to, Player* bot);   // defined with the M4 block below
 
@@ -109,6 +135,10 @@ static void DetachUnattendedAI(Player* owner)
     owner->GetMotionMaster()->Clear(false, true);
     owner->GetMotionMaster()->MoveIdle();
     owner->AttackStop();
+    // The AI era walked this body by server splines the real client never
+    // confirms (no CMSG_MOVE_SPLINE_DONE in MSUIClient); a pending flag left
+    // set here discards every movement packet of the returning driver.
+    owner->SetSplineDonePending(false);
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s back under manual control", owner->GetName());
 }
 
@@ -147,6 +177,26 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
 
     // ── Grant ──
     ai->SetPossessed(true);
+    // Stop whatever the AI had it doing FIRST. A bot taken mid-stride keeps its movespline,
+    // and HandleMovementOpcodes drops every client movement packet while one is unfinalized
+    // (HandleMovementOpcodes: if movespline is not Finalized, return) — so the human would
+    // drive a body that
+    // ignores them and keeps walking to wherever the AI was already sending it. Since bots are
+    // almost always following the party when you take them, that is the normal case, not an
+    // edge one: it reads as "I move but nothing happens, and I snap back to the group".
+    bot->StopMoving();
+    bot->GetMotionMaster()->Clear(false, true);
+    bot->GetMotionMaster()->MoveIdle();
+    // StopMoving on a moving Player launches a stop spline, and Launch marks every
+    // player spline "done pending" until a client confirms it — which this client
+    // never will (MSUIClient does not speak CMSG_MOVE_SPLINE_DONE). Together with
+    // any stale flag from the bot's AI era, that blocked HandleMovementOpcodes
+    // wholesale: the human drove a body whose every packet was discarded. Clear
+    // it LAST, after the stop above.
+    bot->SetSplineDonePending(false);
+    // The bot's brain-era journey does not survive a human taking the body: a
+    // live TASK_MOVE_TO gates DoPartyFollow and resumes walking on release.
+    ai->SuiAbandonJourney();
     // A half-open loot window would strand the loot session (loot is
     // player-scoped); mirror ModPossess's force-release.
     if (ObjectGuid lootGuid = bot->GetLootGuid())
@@ -218,7 +268,21 @@ static void RemoveFreecamEye(Player* player)
     if (player->IsInWorld())
         if (Creature* eye = player->GetMap()->GetCreature(ObjectGuid(it->second)))
         {
-            player->GetCamera().ResetView();
+            // Give the view back to whatever the player is actually looking through. Landing
+            // out of the free view while still possessing must return it to the BOT — a blind
+            // ResetView would point the camera at the abandoned body and stop streaming the
+            // world around the character being driven.
+            Player* stillDriving = nullptr;
+            if (WorldSession* session = player->GetSession())
+            {
+                ObjectGuid driven = session->GetSuiControlledGuid();
+                if (!driven.IsEmpty())
+                    stillDriving = sObjectMgr.GetPlayer(driven);
+            }
+            if (stillDriving && stillDriving->IsInWorld())
+                player->GetCamera().SetView(stillDriving);
+            else
+                player->GetCamera().ResetView();
             eye->AddObjectToRemoveList();
         }
     s_freecamEyes.erase(it);
@@ -293,13 +357,52 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
     }
 }
 
-void HandleCam(WorldSession* session, float x, float y, float z)
+bool IsCommandedFromFreeView(Unit const* bot)
+{
+    Player* possessor = GetPossessor(bot);
+    return possessor != nullptr && FreecamEyeOf(possessor) != nullptr;
+}
+
+bool IsFreeViewUp(Player* player)
+{
+    return player != nullptr && FreecamEyeOf(player) != nullptr;
+}
+
+void HandleCam(WorldSession* session, float x, float y, float z, bool active)
 {
     Player* player = session->GetPlayer();
     if (!player || !player->IsInWorld())
         return;
+    // The free view came down. Drop the eye — which also ends IsCommandedFromFreeView, handing
+    // a possessed bot back to the client that is once again really driving it.
+    if (!active)
+    {
+        // Landing. Tear the eye down FIRST so the commanded-remotely waiver is
+        // already off when the stop below finalizes the bot's spline — otherwise
+        // MovementInform still reads "commanded" and chains the next task leg
+        // under the feet of the client that is about to really drive it.
+        RemoveFreecamEye(player);
+        // The command era walked the bot by server splines this client never
+        // confirms; stop it where it stands and drop the pending flag, or every
+        // movement packet from its returning driver is silently discarded.
+        if (Player* bot = GetControlledBot(session))
+        {
+            bot->StopMoving();
+            bot->GetMotionMaster()->Clear(false, true);
+            bot->GetMotionMaster()->MoveIdle();
+            bot->SetSplineDonePending(false);
+        }
+        return;
+    }
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
         return;
+    // ENSURE, not just move. HandleRequest tears the eye down ("possess overrides the
+    // free-camera view"), which was true while possessing meant leaving the free view — it
+    // does not any more: the client now commands a toon with the camera still up, and kept
+    // flying with nothing streaming the world in around it. The client only ever sends
+    // CMSG_SUI_CAM while its free view is up, so rebuilding here makes the eye's existence
+    // track the client's real camera mode instead of its possession state.
+    EnsureFreecamEye(player);
     if (Creature* eye = FreecamEyeOf(player))
         eye->NearTeleportTo(x, y, z, 0.0f);
 }
@@ -346,21 +449,41 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     Player* player = session->GetPlayer();
     if (!player || session->GetBot())
         return;
+    // Solo is legal: the unattended own character (freecam with no party) must
+    // obey RTS orders too — a group only widens the orderable set. This gate
+    // silently ate every order a partyless owner clicked from the free view.
     Group* group = player->GetGroup();
-    if (!group)
-        return;
 
     auto orderBot = [&](Player* pMember)
     {
-        if (!pMember || pMember->GetGroup() != group)
+        if (!pMember)
+            return;
+        // In a party: subjects must be members. Solo (group null): ONLY the own
+        // character — matching on GetGroup() alone would let a partyless session
+        // order any ungrouped AI-attached body on the server.
+        if (group ? pMember->GetGroup() != group : pMember != player)
             return;
         // AI-attached is the real gate: fabricated bots always are; the human's
         // own character only while unattended (possession/freecam), which is
         // exactly when it must obey RTS orders alongside the bots. A manually
         // driven character has no AiBotAI, and the possessed bot stays excluded.
         AiBotAI* ai = dynamic_cast<AiBotAI*>(pMember->AI());
-        if (!ai || ai->IsPossessed())
+        if (!ai)
             return;
+        if (ai->IsPossessed())
+        {
+            // Normally excluded: possession makes the CLIENT the bot's mover, and a
+            // server-side MOVE_TO would fight the movement stream coming the other way.
+            // From the FREE VIEW that conflict cannot arise — the client's controller is the
+            // detached camera, its movement stream is parked, and the possessed bot receives
+            // no client input at all. So the toon you are commanding stays orderable, which
+            // is the whole point of clicking it: halo, bars, and a right-click that moves it.
+            // The freecam eye is the server's evidence of that camera mode (the client sends
+            // CMSG_SUI_CAM only while the free view is up, and HandleCam keeps the eye alive).
+            Player* possessor = GetPossessor(pMember);
+            if (!possessor || !FreecamEyeOf(possessor))
+                return;
+        }
 
         // Reuse the bridge command paths verbatim — ordered behaviour is then
         // bit-identical to a brain-issued MOVE_TO / ATTACK_TARGET, including the
@@ -380,9 +503,13 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             case ORDER_ATTACK:
                 if (targetGuid.IsCreature())
                 {
+                    // Carry the ENTRY too. A vmangos creature ObjectGuid is
+                    // (HIGHGUID_UNIT, entry, counter) and Map::GetCreature matches on all
+                    // three, so a counter-only payload can never be resolved on the far side
+                    // — every RTS attack order died as "creature guid N not found on map".
                     snprintf(json, sizeof(json),
-                        "{\"type\":\"ATTACK_TARGET\",\"payload\":{\"guid\":%u}}",
-                        targetGuid.GetCounter());
+                        "{\"type\":\"ATTACK_TARGET\",\"payload\":{\"guid\":%u,\"entry\":%u}}",
+                        targetGuid.GetCounter(), targetGuid.GetEntry());
                     ai->BridgeProcessLine(json);
                 }
                 break;
@@ -436,9 +563,11 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     if (!subjects.empty())
         for (ObjectGuid guid : subjects)
             orderBot(sObjectMgr.GetPlayer(guid));
-    else
+    else if (group)
         for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
             orderBot(itr->getSource());
+    else
+        orderBot(player);   // empty subject list solo = the own character
 }
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
@@ -546,6 +675,15 @@ namespace SuiPossess
 
 static void AppendSnapshotItem(WorldPacket& data, uint8 bag, uint8 slot, Item* item)
 {
+    // The client queries these templates the moment the snapshot lands, and the
+    // anti-datamining gate (HandleItemQuerySingleOpcode: ItemPrototype::Discovered)
+    // answers "no such item" for anything neither the startup scan nor a runtime
+    // Item::Create has marked — fabricated bots' gear can be exactly that after a
+    // restart. The client caches the refusal permanently: nameless icon-less bags
+    // with working stack counts. An item in a possessed party member's bags is
+    // discovered by any honest reading of the rule.
+    if (ItemPrototype const* proto = item->GetProto())
+        proto->Discovered = true;
     data << uint8(bag);
     data << uint8(slot);
     data << uint64(item->GetObjectGuid().GetRawValue());
@@ -601,6 +739,30 @@ static void SendSnapshot(WorldSession* to, Player* bot)
                 }
 
     data.put<uint16>(countPos, count);
+
+    // ── Snapshot v2: the paper-doll stat block. These UNIT_FIELD values are
+    // owner-only on the vanilla wire (never streamed for another player), so a
+    // possessed bot's character sheet rendered all zeros without them. Raw field
+    // values, mirrored verbatim into the same fields client-side; the client
+    // reads the block only when present, so the growth is compatible both ways.
+    for (int i = 0; i < 5; ++i)
+        data << bot->GetUInt32Value(UNIT_FIELD_STAT0 + i);
+    for (int i = 0; i < 7; ++i)
+        data << bot->GetUInt32Value(UNIT_FIELD_RESISTANCES + i);
+    data << bot->GetUInt32Value(UNIT_FIELD_ATTACK_POWER);
+    data << bot->GetUInt32Value(UNIT_FIELD_ATTACK_POWER_MODS);
+    data << bot->GetUInt32Value(UNIT_FIELD_RANGED_ATTACK_POWER);
+    data << bot->GetUInt32Value(UNIT_FIELD_RANGED_ATTACK_POWER_MODS);
+    data << bot->GetUInt32Value(UNIT_FIELD_BASEATTACKTIME);
+    data << bot->GetUInt32Value(UNIT_FIELD_BASEATTACKTIME + 1);   // offhand
+    data << bot->GetUInt32Value(UNIT_FIELD_RANGEDATTACKTIME);
+    data << bot->GetFloatValue(UNIT_FIELD_MINDAMAGE);
+    data << bot->GetFloatValue(UNIT_FIELD_MAXDAMAGE);
+    data << bot->GetFloatValue(UNIT_FIELD_MINOFFHANDDAMAGE);
+    data << bot->GetFloatValue(UNIT_FIELD_MAXOFFHANDDAMAGE);
+    data << bot->GetFloatValue(UNIT_FIELD_MINRANGEDDAMAGE);
+    data << bot->GetFloatValue(UNIT_FIELD_MAXRANGEDDAMAGE);
+
     to->SendPacket(&data);
 }
 
@@ -642,6 +804,83 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
 
 } // namespace SuiPossess
 
+// ── Zone intel (commander map) ────────────────────────────────────────────────
+
+void SuiPossess::HandleZoneIntel(WorldSession* session, uint8 /*flags*/)
+{
+    // Any CMSG_SUI_* proves the sender is MSUIClient (same opportunistic mark
+    // as the other handlers); the reply below goes only to the asker.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || !requester->IsInWorld() || session->GetBot())
+        return;
+
+    // Census: every in-world player bucketed by CACHED zone id. GetCachedZoneId
+    // is a plain field read at most one zone-tick stale; WorldObject::GetZoneId
+    // is a terrain query and must never run in this loop.
+    std::unordered_map<uint32, std::pair<uint16, uint16>> census;   // zone -> {bots, players}
+    {
+        HashMapHolder<Player>::ReadGuard g(HashMapHolder<Player>::GetLock());
+        for (auto const& itr : sObjectAccessor.GetPlayers())
+        {
+            Player* p = itr.second;
+            if (!p || !p->IsInWorld())
+                continue;
+            uint32 zone = p->GetCachedZoneId();
+            if (!zone)
+                continue;                    // mid-login, zone not resolved yet
+            auto& c = census[zone];
+            uint16& bucket = p->IsBot() ? c.first : c.second;
+            if (bucket < 0xFFFF)
+                ++bucket;                    // unattended real characters count as players
+        }
+    }
+
+    // The asker's own forces: self + every in-world group member, with live
+    // positions. The client has no position data for unstreamed members — this
+    // block is what places the unit markers on the zone map.
+    std::vector<Player*> units;
+    units.push_back(requester);
+    if (Group* group = requester->GetGroup())
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            if (member && member->IsInWorld() && member != requester)
+                units.push_back(member);
+        }
+    if (units.size() > 250)
+        units.resize(250);                   // u8 count; far above any raid size
+
+    // Both blocks carry an explicit row stride so a future server can append
+    // per-row facts while an older client skips them (see SUI_WIRE_PROTOCOL.md).
+    WorldPacket data(SMSG_SUI_ZONE_INTEL, 3 + census.size() * 9 + 2 + units.size() * 29);
+    data << uint16(census.size());
+    data << uint8(9);                        // zone row stride (R1: +controller byte)
+    for (auto const& kv : census)
+    {
+        data << uint32(kv.first);
+        data << uint16(kv.second.first);
+        data << uint16(kv.second.second);
+        data << uint8(0);                    // controller (0 until territory R3; 0x80 = contested)
+    }
+    data << uint8(units.size());
+    data << uint8(29);                       // unit row stride
+    for (Player* u : units)
+    {
+        uint8 unitFlags = 0;
+        if (u->IsAlive()) unitFlags |= 1;
+        if (u->IsBot())   unitFlags |= 2;
+        data << uint64(u->GetObjectGuid().GetRawValue());
+        data << uint32(u->GetMapId());
+        data << uint32(u->GetCachedZoneId());
+        data << float(u->GetPositionX());
+        data << float(u->GetPositionY());
+        data << float(u->GetPositionZ());
+        data << unitFlags;
+    }
+    session->SendPacket(&data);
+}
+
 // ── Wire handlers ────────────────────────────────────────────────────────────
 
 Player* WorldSession::GetSuiActor()
@@ -673,10 +912,38 @@ void WorldSession::HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& p
 
 void WorldSession::HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packet)
 {
-    SuiPossess::HandleCam(this, packet.x, packet.y, packet.z);
+    SuiPossess::HandleCam(this, packet.x, packet.y, packet.z, packet.active != 0);
+}
+
+void WorldSession::HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet)
+{
+    SuiPossess::HandleZoneIntel(this, packet.flags);
 }
 
 // ── GM commands (stock-client testable: .sui possess <name> / .sui release) ──
+
+bool ChatHandler::HandleSuiWorldStateCommand(char* args)
+{
+    if (char* arg = ExtractLiteralArg(&args))
+    {
+        std::string mode = arg;
+        if (mode == "rts")
+            SuiPossess::OverrideWorldState(true);
+        else if (mode == "vanilla")
+            SuiPossess::OverrideWorldState(false);
+        else
+        {
+            SendSysMessage("Usage: .sui worldstate [rts|vanilla]");
+            return false;
+        }
+        PSendSysMessage("SUI worldstate overridden to %s (runtime only; boot re-reads the DB).",
+            mode.c_str());
+        return true;
+    }
+    PSendSysMessage("SUI worldstate: %s",
+        SuiPossess::RtsWorldState() ? "RTS MATCH" : "vanilla");
+    return true;
+}
 
 bool ChatHandler::HandleSuiPossessCommand(char* args)
 {

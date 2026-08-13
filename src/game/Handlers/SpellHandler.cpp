@@ -30,6 +30,7 @@
 #include "SpellAuras.h"
 #include "GameObject.h"
 #include "Map.h"
+#include "SuiPossess.h"      // [SUI] free-view facing help
 
 using namespace Spells;
 
@@ -309,6 +310,15 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
         if (ObjectGuid lootGuid = GetPlayer()->GetLootGuid())
             DoLootRelease(lootGuid);
     }
+
+    // [SUI] In the free view nobody turns the acting unit: the driving client
+    // is parked on the camera, so the orientation packets that normally keep a
+    // caster facing its target never come — every frontal-arc check then fails
+    // and the commanded toon cannot fight. Face the target at cast time.
+    if (Unit* pFaceTarget = packet.targets.getUnitTarget())
+        if (pFaceTarget != pActor && SuiPossess::IsFreeViewUp(_player) &&
+            !pActor->IsFacingTarget(pFaceTarget))
+            pActor->SetFacingToObject(pFaceTarget);
 
     Spell* spell = new Spell(pActor, spellInfo, false, ObjectGuid(), nullptr, packet.targets.getUnitTarget());
 

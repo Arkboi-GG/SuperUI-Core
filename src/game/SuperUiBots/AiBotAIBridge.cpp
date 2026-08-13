@@ -17,6 +17,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "SuiPossess.h"      // [SUI] free-view command waiver on the possessed drop
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -563,7 +564,12 @@ void AiBotAI::BridgeProcessLine(const char* line)
     // [SUI] While a real player drives this bot every mutating command would
     // execute under the human's feet (MOVE_TO would yank the mover). Drop with
     // an event so the C# supervisor sees an explicit answer, not a stall.
-    if (m_possessed && strcmp(msgType, "PING") != 0)
+    // ...unless the human is COMMANDING it from the free view, where there are no feet to
+    // execute under: the client's controller is the camera, its movement stream is parked, and
+    // an RTS order is the only thing that can move this bot at all. Dropping the order here is
+    // what made a commanded toon the one party member that ignored a move.
+    if (m_possessed && strcmp(msgType, "PING") != 0 &&
+        !SuiPossess::IsCommandedFromFreeView(me))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (possessed)",
             me->GetName(), msgType);
@@ -1638,15 +1644,21 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
         return;
     }
 
-    // Find the creature by guid counter in current map
-    Creature* pCreature = me->GetMap()->GetCreature(
-        ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
+    // A creature ObjectGuid here is (HIGHGUID_UNIT, entry, counter) and Map::GetCreature
+    // matches on the whole thing — the two-argument form below leaves entry 0, so it never
+    // resolved anything and the "fallback" the old comment promised was never written. Every
+    // caller that gets this right (the kill/victim paths in AiBotAIMain) passes the entry, so
+    // senders now do too; the entry-less attempt is kept for any producer still omitting it.
+    int entry = 0;
+    JsonExtractInt(payload, "entry", entry);
+
+    Creature* pCreature = entry > 0
+        ? me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(entry), uint32(guidLow)))
+        : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
 
     if (!pCreature)
     {
-        // Try with full GUID construction — guid might be entry+counter encoded
-        // Search nearby creatures as fallback
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature guid %d not found on map", me->GetName(), guidLow);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature guid %d (entry %d) not found on map", me->GetName(), guidLow, entry);
         return;
     }
 
