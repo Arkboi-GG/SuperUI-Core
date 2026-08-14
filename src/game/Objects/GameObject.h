@@ -220,6 +220,7 @@ class GameObject : public SpellCaster
         bool IsUseRequirementMet() const;
         bool PlayerCanUse(Player* pPlayer);
         void SetOwnerGroupId(uint32 groupId) { m_playerGroupId = groupId; }
+        uint32 GetOwnerGroupId() const { return m_playerGroupId; }
 
         // Gestion des GameObjectAI
         void AIM_Initialize();

@@ -50,6 +50,7 @@
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
 #include "Loot/CraftingRewardVariantStore.h"
+#include "SuiPortal.h"
 
 using namespace Spells;
 
@@ -5702,6 +5703,11 @@ void Spell::EffectTransmitted(SpellEffectIndex effIdx)
         delete pGameObj;
         return;
     }
+
+    // The client begins an existing-portal warm at 150 yards. Guarantee that
+    // the six stock Mage portal summons use the core's 200-yard large-object
+    // visibility even if a world database template omitted its `large` bit.
+    SuiPortal::ConfigureSummonedPortalVisibility(pGameObj, m_spellInfo->Id);
 
     int32 duration = m_spellInfo->GetDuration();
 

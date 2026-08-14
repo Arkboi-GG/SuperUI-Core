@@ -6,8 +6,9 @@ Custom opcodes between **MSUIClient** and **SuperUI-Core**, layered on the stock
 `CMSG_SUI_*` first (`WorldSession::IsSuiCapable`), so stock clients never see
 them. All integers little-endian; guids are raw `uint64`, never packed.
 
-Server implementation: `src/game/SuperUiBots/SuiPossess.{h,cpp}`,
-packet structs in `src/game/Server/Packets/SuiControl.h`.
+Server implementation: `src/game/SuperUiBots/SuiPossess.{h,cpp}` and
+`src/game/SuperUiBots/SuiPortal.{h,cpp}`, packet structs in
+`src/game/Server/Packets/SuiControl.h` and `SuiPortalPackets.h`.
 Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
 
 | Opcode | Value | Direction |
@@ -26,6 +27,19 @@ Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
 | `SMSG_SUI_RTS_STATE`       | 839 (0x0347) | S → C |
 | `CMSG_SUI_RTS_ACTION`      | 840 (0x0348) | C → S |
 | `SMSG_SUI_RTS_ACTION_RESULT` | 841 (0x0349) | S → C |
+
+### Real-portal opcode block
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_PORTAL_PREPARE`  | 844 (0x034C) | C -> S |
+| `SMSG_SUI_PORTAL_DESCRIPTOR` | 845 (0x034D) | S -> C |
+| `CMSG_SUI_PORTAL_READY`    | 846 (0x034E) | C -> S |
+| `SMSG_SUI_PORTAL_STATE`    | 847 (0x034F) | S -> C |
+
+Values 835-843 are reserved for the camera, zone-intel, and RTS extensions.
+The portal values are intentionally fixed above that range so those branches
+can merge without renumbering wire traffic. `NUM_MSG_TYPES` is 848.
 
 ## CMSG_SUI_CONTROL_REQUEST
 Ask to possess a party/raid bot.
@@ -96,6 +110,27 @@ On any release result the client teleports its controller to the carried
 position (the own character may have moved under its AI). Server-initiated
 releases open a 1 s movement drain window on the session so in-flight
 bot-coordinate `MSG_MOVE_*` are discarded, not misattributed.
+
+The fixed ACK prefix remains 25 bytes. Current cores append an optional
+eight-byte capability trailer: `u32 0x31495553` (`SUI1` on the little-endian
+wire), then a `u32` capability mask. Bit 0 advertises REAL_PORTALS version 1;
+bit 1 advertises the server-authored cast-prewarm catalog described below.
+Older clients may ignore the suffix and any catalog bytes after it. A current
+client probes safely with a zero-guid `CMSG_SUI_CONTROL_REQUEST`: an older core
+returns its ordinary denial without a trailer, while a portal-capable core
+advertises bit 0. The client must not send portal opcodes until that bit is
+observed.
+
+When bit 1 is present, the mask is followed by `u8 catalogVersion = 1`, `u8
+rowCount = 6`, `u16 rowBytes = 32`, then six fixed-stride rows. Each row is
+`u32 summonSpellId`, `u32 portalEntry`, `u32 teleportSpellId`, `u32 previewMapId`,
+and `f32 previewX, previewY, previewZ, previewOrientation`. The rows cover only
+Mage portal summon spells 10059 and 11416-11420. Destinations are resolved from
+the live server `spell_target_position` table; the client never hard-codes city
+coordinates. A new client may begin cancellable destination-only work when its
+own `SMSG_SPELL_START` matches a row. This hint has no GameObject GUID, ticket,
+lease, use permission, or teleport authority: visual publication and READY still
+require the later ordinary portal descriptor for the exact spawned object.
 
 ## SMSG_SUI_PROXY (M3)
 Owner-only packets of the possessed bot, re-wrapped into the possessor's
@@ -230,3 +265,89 @@ List config tables (rows ship inside the RTS save): `superui_rules_zone`,
 `superui_rules_hub`, `superui_rules_hero`, `superui_rules_dungeon`. Runtime
 state: `superui_faction`, `superui_heroes`, `superui_zone_control`,
 `superui_dungeon_control`. All DDL is core-owned and idempotent.
+## Real portal preparation/readiness (version 1)
+
+This side channel lets each live MSUIClient session preload a destination and
+render it only after a complete frame is available. It does not invoke
+`GameObject::Use`, authorize a crossing, or replace the stock click handler.
+Every client packet first marks the session SUI-capable; no portal SMSG is sent
+to a session which has not opted in with a `CMSG_SUI_*`.
+
+All four payloads are fixed-size. Reserved fields and trailing bytes must be
+zero/absent. Unknown versions are rejected rather than guessed.
+
+### CMSG_SUI_PORTAL_PREPARE (16 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version | u8 | 1 |
+| reserved | u8 | 0 |
+| flags | u16 | 0 in version 1 |
+| requestId | u32 | echoed in the descriptor |
+| portalGuid | u64 | raw game-object guid |
+
+The server validates that the object is spawned, visible for use, inside the
+150-yard preparation radius, has no `GO_FLAG_NO_INTERACT`, passes
+`PlayerCanUse`, and passes the spellcaster party-only rule. The authoritative
+classifier accepts only type-22 entries 176296, 176497, 176498, 176499, 176500,
+and 176501 with their matching `gameobject_template.data0` use spells 17334,
+17607, 17608, 17609, 17610, and 17611. Destination coordinates come from
+`SpellMgr::GetSpellTargetPosition`; client-side portal-name inference is never
+trusted.
+
+The six matching summoned GameObjects are forced into the core's bounded
+200-yard large-object visibility tier, so a client can actually discover an
+existing portal before the 150-yard preparation boundary. This does not change
+the stock click/use distance.
+
+### SMSG_SUI_PORTAL_DESCRIPTOR (92 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version, result | u8, u8 | version 1; result below |
+| flags | u16 | bit 0 ONE_WAY, bit 1 PARTY_ONLY, bit 2 CLICK_FALLBACK, bit 3 SAME_MAP_HINT; bit 4 BIDIRECTIONAL is reserved |
+| requestId | u32 | correlation with PREPARE |
+| portalGuid | u64 | raw game-object guid |
+| generation, revision | u32, u32 | per-session generation; descriptor revision |
+| ticket | u64 | readiness correlation only; not teleport authority |
+| entry, teleportSpellId | u32, u32 | authoritative classifier inputs |
+| remainingLifetimeMs | u32 | `0xFFFFFFFF` means no known expiry |
+| sourceX, sourceY, sourceZ, sourceYaw | f32 x 4 | source frame center and facing |
+| halfWidth, halfHeight | f32, f32 | 3.0 and 4.0: a 6 x 8 yard aperture |
+| crossingEpsilon | f32 | 0.35 yard geometry tolerance |
+| destinationMapId | u32 | preview map |
+| destinationX, destinationY, destinationZ, destinationO | f32 x 4 | preview pose |
+
+Descriptor results: 0 OK, 1 Denied, 2 Unsupported, 3 Expired, 4 Failed.
+Denied/error replies keep the same 92-byte layout and zero fields which are not
+valid, so parsing never depends on a result-specific packet length.
+
+### CMSG_SUI_PORTAL_READY (28 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version, loadResult | u8, u8 | version 1; 0 Ready, 1 Failed |
+| reserved | u16 | 0 |
+| portalGuid | u64 | descriptor key |
+| generation, revision | u32, u32 | descriptor key |
+| ticket | u64 | descriptor key |
+
+The server rejects stale/mismatched keys, expired preparation leases, despawned
+objects, range changes, and lost use/party eligibility. It re-runs validation;
+a client assertion is never treated as proof.
+
+### SMSG_SUI_PORTAL_STATE (32 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version, state, reason, reserved | u8 x 4 | reserved is 0 |
+| portalGuid | u64 | correlated object |
+| generation, revision | u32, u32 | correlated descriptor |
+| ticket | u64 | correlated descriptor |
+| leaseMs | u32 | nonzero only when Ready |
+
+States: 0 Ready, 1 Revoked, 2 Blocked, 3 Entering, 4 Expired, 5 Failed.
+Version 1 grants a 5-second Ready lease. A portal that remains open is renewed
+by another PREPARE/DESCRIPTOR/READY cycle; the generation/ticket may be reused
+while the previous correlation is still live. This lease still does not bypass
+the stock `CMSG_GAMEOBJ_USE` range and eligibility checks.

@@ -21,6 +21,7 @@
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
+#include "SuiPortal.h"
 #include "AiBotAIMain.h"
 #include "World.h"
 
@@ -61,7 +62,10 @@ static void SendAck(WorldSession* session, ObjectGuid guid, AckResult result, Pl
     // opcodes beyond its table.
     if (!session->IsSuiCapable())
         return;
-    WorldPacket data(SMSG_SUI_CONTROL_ACK, 8 + 1 + 4 * 4);
+    // 25-byte ACK prefix + 8-byte SUI1 trailer + 4-byte catalog header +
+    // six 32-byte prewarm rows. WorldPacket grows dynamically, but reserving
+    // the negotiated maximum avoids reallocating every capability probe.
+    WorldPacket data(SMSG_SUI_CONTROL_ACK, 25 + 8 + 4 + 6 * 32);
     data << uint64(guid.GetRawValue());
     data << uint8(result);
     if (positionOf)
@@ -69,6 +73,10 @@ static void SendAck(WorldSession* session, ObjectGuid guid, AckResult result, Pl
              << positionOf->GetPositionZ() << positionOf->GetOrientation();
     else
         data << 0.0f << 0.0f << 0.0f << 0.0f;
+    // Existing clients consume only the fixed 25-byte ACK. The portal helper
+    // appends the self-identifying capability suffix and its optional cast-warm
+    // catalog; older clients safely ignore both.
+    SuiPortal::WriteCapabilityTrailer(data);
     session->SendPacket(&data);
 }
 

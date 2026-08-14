@@ -60,6 +60,7 @@
 #include "Packets/Spell.h"
 #include "Packets/SuiControl.h"
 #include "Packets/SuiRts.h"
+#include "Packets/SuiPortalPackets.h"
 #include "Packets/Taxi.h"
 #include "Packets/Trade.h"
 
@@ -510,6 +511,8 @@ class WorldSession
         void HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet);
         void HandleSuiRtsStateOpcode(WorldPackets::SuiRts::RtsState const& packet);
         void HandleSuiRtsActionOpcode(WorldPackets::SuiRts::RtsAction const& packet);
+        void HandleSuiPortalPrepareOpcode(WorldPackets::SuiPortal::Prepare const& packet);
+        void HandleSuiPortalReadyOpcode(WorldPackets::SuiPortal::Ready const& packet);
 
         // Movement
         void HandleMoveRootAck(WorldPackets::Movement::MoveRootAck const& packet);
@@ -892,6 +895,12 @@ class WorldSession
         uint32 m_moveRejectTime;
         ObjectGuid m_suiControlledGuid;                     // bot this session drives (SuiPossess)
         bool m_suiCapable = false;                          // session spoke CMSG_SUI_* - may receive SUI SMSGs
+        ObjectGuid m_suiPortalGuid;                         // currently prepared real-portal object
+        uint32 m_suiPortalGeneration = 0;                  // increments when this session prepares a new object
+        uint32 m_suiPortalRevision = 0;                    // descriptor schema/data revision
+        uint64 m_suiPortalTicket = 0;                      // correlates readiness; never authorizes teleporting
+        uint32 m_suiPortalIssuedAtMs = 0;                  // monotonic lease origin
+        uint32 m_suiPortalLeaseMs = 0;                     // short, renewed by another prepare/ready cycle
         time_t m_createTime;                                // when session was created
         time_t m_previousPlayTime;                          // play time from previous session less than 5 hours ago
         time_t m_logoutTime;                                // when its time to log out character
