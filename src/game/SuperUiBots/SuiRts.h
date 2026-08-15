@@ -1,5 +1,5 @@
 /*
- * SuperUI RTS worldstate - the tier-2 match layer foundation (phase R1).
+ * SuperUI RTS worldstate - the R2 profile's database/wire foundation.
  *
  * TWO-GATE LAW (binding): every tier-2 mechanic checks
  *   1. SuiPossess::RtsWorldState()   - the loaded save carries match rules
@@ -16,7 +16,8 @@
  * save the web app swaps in): scalars in superui_worldstate key/value rows,
  * list config in sibling superui_rules_* tables, runtime state in
  * superui_faction / superui_heroes / superui_zone_control /
- * superui_dungeon_control. All DDL is idempotent and core-owned.
+ * superui_dungeon_control. MangosSuperUI creates the complete overlay while it
+ * constructs an RTS World State; the core consumes and updates rows only.
  */
 
 #ifndef MANGOS_SUI_RTS_H

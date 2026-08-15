@@ -1,7 +1,8 @@
 /*
- * SuperUI RTS worldstate foundation (R1). See SuiRts.h for the two-gate and
- * threading laws. R2 adds honor/hero mechanics, R3 territory, R4 dungeons -
- * each fills the blocks this file already frames on the wire.
+ * SuperUI RTS worldstate database/wire foundation. MangosSuperUI exposes only
+ * the R2 profile. The current source still lacks the Honor/Hero gameplay
+ * modules that fill the extension points framed here; do not mistake module
+ * flags or wire placeholders for a completed implementation.
  */
 
 #include "SuiRts.h"
@@ -56,64 +57,6 @@ int64 GetKVInt(std::string const& key, int64 def)
 
 // boot ------------------------------------------------------------------------
 
-static void CreateTables()
-{
-    // Idempotent, characters DB: vanilla DBs get empty tables and boot clean;
-    // config ROWS only ship inside an RTS save (the swap tooling writes them).
-    static char const* DDL[] =
-    {
-        "CREATE TABLE IF NOT EXISTS `superui_rules_zone` ("
-        "`zone_id` INT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`ore` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-        "`skins` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-        "`herbs` TINYINT UNSIGNED NOT NULL DEFAULT 0)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_rules_hub` ("
-        "`hub_id` SMALLINT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`zone_id` INT UNSIGNED NOT NULL,"
-        "`name` VARCHAR(64) NOT NULL,"
-        "`banner_go_guid` INT UNSIGNED NOT NULL,"
-        "`event_alliance` SMALLINT UNSIGNED NOT NULL,"
-        "`event_horde` SMALLINT UNSIGNED NOT NULL,"
-        "`capture_ms` INT UNSIGNED NOT NULL DEFAULT 60000,"
-        "`initial_controller` TINYINT UNSIGNED NOT NULL DEFAULT 0)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_rules_hero` ("
-        "`hero_level` TINYINT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`declare_cost` INT UNSIGNED NOT NULL,"
-        "`revive_fee` INT UNSIGNED NOT NULL,"
-        "`spell_id` INT UNSIGNED NOT NULL)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_rules_dungeon` ("
-        "`map_id` INT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`final_boss_entry` INT UNSIGNED NOT NULL,"
-        "`buff_spell_id` INT UNSIGNED NOT NULL,"
-        "`loot_items` TINYINT UNSIGNED NOT NULL DEFAULT 10)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_faction` ("
-        "`team` TINYINT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`honor_pool` BIGINT NOT NULL DEFAULT 0)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_heroes` ("
-        "`guid` INT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`team` TINYINT UNSIGNED NOT NULL,"
-        "`hero_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,"
-        "`dead` TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-        "`declared_at` BIGINT UNSIGNED NOT NULL DEFAULT 0)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_zone_control` ("
-        "`zone_id` INT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`controller` TINYINT UNSIGNED NOT NULL DEFAULT 0)",
-
-        "CREATE TABLE IF NOT EXISTS `superui_dungeon_control` ("
-        "`map_id` INT UNSIGNED NOT NULL PRIMARY KEY,"
-        "`controller` TINYINT UNSIGNED NOT NULL DEFAULT 0)",
-    };
-    for (char const* sql : DDL)
-        CharacterDatabase.DirectExecute(sql);
-    CharacterDatabase.DirectExecute("INSERT IGNORE INTO `superui_faction` VALUES (0,0),(1,0)");
-}
-
 static uint32 CountRows(char const* table)
 {
     if (auto result = CharacterDatabase.PQuery("SELECT COUNT(*) FROM `%s`", table))
@@ -164,8 +107,6 @@ void LoadRuleset()
     s_botCap[0] = s_botCap[1] = -1;
     s_honorEnabled = s_heroesEnabled = s_territoryEnabled = s_dungeonsEnabled = false;
     s_flushTimer = 0;
-
-    CreateTables();
 
     if (!SuiPossess::RtsWorldState())
     {
@@ -322,7 +263,7 @@ void HandleRtsAction(WorldSession* session, uint8 action, uint64 subjectGuid)
     session->SetSuiCapable(true);
 
     // Result codes: 0 ok, 1 insufficient honor, 2 no free slot, 3 bad subject,
-    // 4 unsupported/disabled. R1 implements nothing yet - R2 fills this in.
+    // 4 unsupported/disabled. The absent R2 gameplay modules must fill this in.
     WorldPacket data(SMSG_SUI_RTS_ACTION_RESULT, 1 + 1 + 8 + 8);
     data << action;
     data << uint8(4);

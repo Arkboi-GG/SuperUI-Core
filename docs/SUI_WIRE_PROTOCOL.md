@@ -6,10 +6,13 @@ Custom opcodes between **MSUIClient** and **SuperUI-Core**, layered on the stock
 `CMSG_SUI_*` first (`WorldSession::IsSuiCapable`), so stock clients never see
 them. All integers little-endian; guids are raw `uint64`, never packed.
 
-Server implementation: `src/game/SuperUiBots/SuiPossess.{h,cpp}` and
-`src/game/SuperUiBots/SuiPortal.{h,cpp}`, packet structs in
+Server implementation: `src/game/SuperUiBots/SuiPossess.{h,cpp}`,
+`SuiFactionControl.{h,cpp}`, `SuiRts.{h,cpp}`, `SuiHonor.{h,cpp}`,
+`SuiHero.{h,cpp}`, and `SuiPortal.{h,cpp}`, packet structs in
 `src/game/Server/Packets/SuiControl.h` and `SuiPortalPackets.h`.
-Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
+Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,
+`GameLoop/Scene/GameLoop.CommanderMap.cs`, `Net/RtsWire.cs`, and the
+`Net/NetworkClient.cs` / `Net/WorldSession.cs` facade paths.
 
 | Opcode | Value | Direction |
 |---|---|---|
@@ -27,6 +30,8 @@ Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
 | `SMSG_SUI_RTS_STATE`       | 839 (0x0347) | S → C |
 | `CMSG_SUI_RTS_ACTION`      | 840 (0x0348) | C → S |
 | `SMSG_SUI_RTS_ACTION_RESULT` | 841 (0x0349) | S → C |
+| `CMSG_SUI_FORCE_ROSTER`    | 842 (0x034A) | C → S |
+| `SMSG_SUI_FORCE_ROSTER`    | 843 (0x034B) | S → C |
 
 ### Real-portal opcode block
 
@@ -37,22 +42,33 @@ Client implementation: MSUIClient `Program.Control.cs` / `Net/`.
 | `CMSG_SUI_PORTAL_READY`    | 846 (0x034E) | C -> S |
 | `SMSG_SUI_PORTAL_STATE`    | 847 (0x034F) | S -> C |
 
-Values 835-843 are reserved for the camera, zone-intel, and RTS extensions.
+Values 835-843 are the camera, zone-intel, and RTS extensions.
 The portal values are intentionally fixed above that range so those branches
 can merge without renumbering wire traffic. `NUM_MSG_TYPES` is 848.
 
 ## CMSG_SUI_CONTROL_REQUEST
-Ask to possess a party/raid bot.
+Ask to possess a bot. MMO boot keeps the original party/raid-only rule. An RTS
+boot with `control.faction_bots=1` additionally authorizes any in-world
+same-faction AiBot; this is the only party-membership bypass.
 
 | Field | Type | Notes |
 |---|---|---|
 | targetGuid | u64 | the bot to possess |
 
 Server validation (deny codes in parentheses): requester is a real session and
-self-mover, alive, not on taxi/transport, possessing nothing (6); target exists,
-in world, same map+instance, visible (1); target session is a bot with AiBotAI
-(2); same group (3); not already possessed (4); target alive, not on
-taxi/transport, not teleporting (5).
+self-mover, alive, not on taxi/transport, possessing nothing (6); target exists
+and is in world (1); target session is a bot with AiBotAI (2); same group, or
+the boot-latched RTS faction-control bypass described above (3); not already
+possessed (4); target alive, not on taxi/transport, not teleporting (5).
+
+An authorized RTS faction bot already on the same map+instance must be visible.
+For any non-visible outdoor, non-instance target (distant on the same map or on
+a different map), the server first retires any source free-camera eye and
+accepts an ordinary owner-body `TeleportTo` to the bot's position, then replies
+7 (`ACK_RELOCATING`). The client waits for ordinary movement/world and entity
+streaming, then retries this same request after the bot is resident. Any
+instance target not already same-map, same-instance, and visible replies 8 and
+is never entered. The owner body remains at that destination after later release.
 
 On grant, in order: bot AI suspended (`AiBotAI::m_possessed`, bridge commands
 gated, brain sees `possessed:1` STATE), bot loot force-released,
@@ -103,6 +119,7 @@ client must accept it in any control state.
 
 Results: 0 OK · 1 DENY_NOT_FOUND · 2 DENY_NOT_BOT · 3 DENY_NOT_IN_GROUP ·
 4 DENY_BUSY · 5 DENY_TARGET_STATE · 6 DENY_REQUESTER_STATE ·
+7 ACK_RELOCATING · 8 DENY_CROSS_INSTANCE ·
 16 RELEASED · 17 RELEASED_FREECAM · 18 RELEASED_DEATH · 19 RELEASED_TELEPORT ·
 20 RELEASED_GROUP · 21 RELEASED_LOGOUT
 
@@ -225,7 +242,7 @@ Reply (all blocks stride-versioned — future servers grow rows, old clients ski
 | Field | Type | Notes |
 |---|---|---|
 | mode | u8 | 0 vanilla, 1 RTS match |
-| moduleFlags | u8 | bit0 honor, bit1 heroes, bit2 territory, bit3 dungeons |
+| moduleFlags | u8 | bit0 honor, bit1 heroes, bit2 territory, bit3 dungeons, bit4 faction control |
 | factionRowStride | u8 | currently 26; ALWAYS 2 rows (alliance, horde) |
 |  honorPool | i64 | faction honor pool (R2 feeds it) |
 |  ore, skins, herbs | 3×i32 | standing supply from held zones (R3) |
@@ -241,6 +258,55 @@ Result: `u8 action, u8 result, u64 subjectGuid, i64 poolAfter`.
 Result codes: 0 ok, 1 insufficient honor, 2 no free slot, 3 bad subject,
 4 unsupported/disabled (R1 always answers 4; R2 implements).
 
+Heroes are unconditionally AiBot-only. `hero.slots_fixed` configures 1..127
+slots per faction and defaults to four.
+Declare/upgrade costs are selected by the target level (20/40/80/160/320) and
+revive costs by the current level (10/20/40/80/160). A dead hero stays in the
+AiBot dead path until a successful paid revive, which returns it at the normal
+graveyard with full resources. Hero levels use native passive, permanent world
+spells 51001..51005. Each has `MOD_SCALE` and `MOD_DAMAGE_PERCENT_DONE` for a
+total 120/140/160/180/200 percent; the server validates the spell definition
+against the save-bound `scale_percent` and `damage_percent` rule columns before
+enabling heroes. No generic `Unit` damage/scale override is involved.
+
+## CMSG_SUI_FORCE_ROSTER / SMSG_SUI_FORCE_ROSTER
+
+RTS-only paged discovery of every in-world same-faction AiBot. An MMO boot, or
+an RTS save without `control.faction_bots=1`, returns an empty page. Names are
+not duplicated here; the client resolves the full player GUID with the stock
+name-query path. Reserved request flags must be zero and requestId must be
+nonzero; malformed requests receive an empty page without a roster scan.
+
+Request (14 bytes):
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | reserved, must be 0 |
+| requestId | u32 | nonzero client generation; echoed |
+| zoneId | u32 | 0 = every zone, otherwise exact cached zone |
+| afterGuidLow | u32 | exclusive cursor; 0 starts a scan |
+| limit | u8 | 0 means 200; otherwise clamped to 1..200 |
+
+Reply header (16 bytes), followed by `count` fixed rows:
+
+| Field | Type | Notes |
+|---|---|---|
+| requestId | u32 | echoed |
+| zoneId | u32 | echoed |
+| nextGuidLow | u32 | 0=end; otherwise exactly the last emitted GUID low |
+| total | u16 | saturating size of this live scan |
+| count | u8 | rows in this page, at most 200 |
+| rowStride | u8 | 32 |
+
+Rows are sorted by player GUID low and are exactly:
+`u64 fullPlayerGuid, u32 mapId, u32 zoneId, f32 x, f32 y, f32 z, u8 race,
+u8 class, u8 level, u8 flags`. Row flags are 0x01 alive, 0x02 busy/possessed,
+0x04 control-eligible-now, 0x08 same map+instance, 0x10 hero, 0x20 hero dead
+or pending, 0x40 instanceable, and 0x80 reserved.
+
+Pagination is a sequence of live scans, not a snapshot: `total` may change
+between pages. Clients must not reject a generation solely because it changes.
+
 ## RTS ruleset key list (shared with the SuperUI web app registry)
 
 Scalars in `characters.superui_worldstate` (key/value), read ONCE at boot by
@@ -250,13 +316,16 @@ both the core and the web app's RtsRulesetRegistry mirror.
 | Key | Default | Phase | Meaning |
 |---|---|---|---|
 | mode | (absent = vanilla) | — | `rts` flips the worldstate |
+| honor.enabled | 0 | R2 | explicit Honor module gate |
+| hero.enabled | 0 | R2 | explicit hero gate; fails closed unless Honor is enabled and all five rules/spells validate |
+| control.faction_bots | 0 | R2 | faction-wide roster/control gate |
 | state.flush_ms | 30000 | R1 | write-behind cadence for faction state |
 | rate.xp_kill / rate.xp_kill_elite / rate.xp_quest | conf | R1 | sWorld rate overrides |
 | rate.drop_money / rate.drop_item_poor..artifact / rate.drop_item_referenced | conf | R1 | sWorld rate overrides |
 | bots.cap.alliance / bots.cap.horde | -1 (uncapped) | R1 | per-faction bot population cap |
-| honor.weight.player / .bot / .npc / .npc_elite | 10 / 5 / 1 / 3 | R2 | honor-pool kill weights; ANY key present enables the honor module |
+| honor.weight.player / .bot / .npc / .npc_elite | 10 / 5 / 1 / 3 | R2 | enemy-player, enemy-bot, opposing-faction NPC, and opposing-faction elite kill weights |
 | honor.suppress_bot_hk | 1 | R2 | skip vanilla HK recording for bot-vs-bot |
-| hero.slots_fixed | 4 | R2 | hero cap until territory lands |
+| hero.slots_fixed | 4 | R2 | per-faction hero cap until territory lands; clamped 1..127 so both faction rosters fit the u8 packet count |
 | territory.zones_per_hero_slot | 2 | R3 | AoE-housing slot ratio |
 | territory.flip_cooldown_ms | 30000 | R3 | debounce hub re-flips |
 | dungeon.run_timeout_min | 120 | R4 | stale live-run safety net |
@@ -264,7 +333,9 @@ both the core and the web app's RtsRulesetRegistry mirror.
 List config tables (rows ship inside the RTS save): `superui_rules_zone`,
 `superui_rules_hub`, `superui_rules_hero`, `superui_rules_dungeon`. Runtime
 state: `superui_faction`, `superui_heroes`, `superui_zone_control`,
-`superui_dungeon_control`. All DDL is core-owned and idempotent.
+`superui_dungeon_control`. The MangosSuperUI world-profile workflow owns schema,
+seed rows, and the five world `spell_template` rows. Core boot is read-only for
+configuration: it never creates, alters, seeds, or hot-reloads RTS schema.
 ## Real portal preparation/readiness (version 1)
 
 This side channel lets each live MSUIClient session preload a destination and
