@@ -726,15 +726,6 @@ public:
     std::vector<Vector3> m_pathWaypoints;
     uint32 m_pathIndex = 0;
 
-    // [FINDING_017] Continuation progress gate: tracks distance-to-dest across
-    // leg-exhausted continuations of one TASK_MOVE_TO dest. Re-armed when the
-    // task dest changes; 3 consecutive continuations gaining <5yd → MOVE_FAILED
-    // no_path instead of re-issuing forever (0-yd-partial livelock).
-    float  m_contDestX = 0.0f;
-    float  m_contDestY = 0.0f;
-    float  m_contLastDist = -1.0f;
-    uint32 m_contNoProgress = 0;
-
     // §4 approach-scan throttle: an enriched (objective) MOVE_TO scans for its target
     // mob every ~2-3s while walking. Reset to 0 by BridgeHandleMoveTo so the first scan
     // fires on the journey's first tick. Decremented in UpdateAI alongside m_wanderTimer.

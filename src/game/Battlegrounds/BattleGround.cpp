@@ -37,6 +37,7 @@
 #include "GridNotifiersImpl.h"
 #include "Chat.h"
 #include "ScriptMgr.h"
+#include "SuiHero.h"
 
 namespace MaNGOS
 {
@@ -676,7 +677,7 @@ void BattleGround::EndBattleGround(Team winner)
         if (pPlayer->HasAuraType(SPELL_AURA_SPIRIT_OF_REDEMPTION))
             pPlayer->RemoveSpellsCausingAura(SPELL_AURA_MOD_SHAPESHIFT);
 
-        if (!pPlayer->IsAlive())
+        if (!pPlayer->IsAlive() && !SuiHero::BlocksResurrection(pPlayer))
         {
             pPlayer->ResurrectPlayer(1.0f);
             pPlayer->SpawnCorpseBones();
@@ -917,7 +918,7 @@ void BattleGround::RemovePlayerAtLeave(ObjectGuid guid, bool transport, bool sen
     if (pPlayer && pPlayer->HasAuraType(SPELL_AURA_SPIRIT_OF_REDEMPTION))
         pPlayer->RemoveSpellsCausingAura(SPELL_AURA_MOD_SHAPESHIFT);
 
-    if (pPlayer && !pPlayer->IsAlive())                             // resurrect on exit
+    if (pPlayer && !pPlayer->IsAlive() && !SuiHero::BlocksResurrection(pPlayer)) // resurrect on exit
     {
         pPlayer->ResurrectPlayer(1.0f);
         pPlayer->SpawnCorpseBones();

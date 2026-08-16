@@ -16,6 +16,7 @@
 
 #include "scriptPCH.h"
 #include "blackwing_lair.h"
+#include "SuperUiBots/SuiHero.h"
 
 static const Position EggSpawnCoords[] =
 {
@@ -1109,6 +1110,7 @@ bool AreaTrigger_at_orb_of_command(Player* pPlayer, AreaTriggerEntry const* pAt)
         Corpse* pCorpse = pPlayer->GetCorpse();
         if (pCorpse &&
             pPlayer->IsDead() &&
+            !SuiHero::BlocksResurrection(pPlayer) &&
             pPlayer->GetQuestRewardStatus(QUEST_BLACKHANDS_COMMAND) &&
             pCorpse->GetMapId() == MAP_BLACKWING_LAIR)
         {

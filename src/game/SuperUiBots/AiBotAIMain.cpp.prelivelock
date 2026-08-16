@@ -521,43 +521,6 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
                 float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
                 if (dist > 3.0f)
                 {
-                    // [FINDING_017] Progress gate on the continuation. A new task dest
-                    // re-arms the tracker; three consecutive continuations that gain
-                    // <5yd toward the SAME dest mean the leg cannot advance (degenerate
-                    // partials or frontier oscillation) — report honest no_path so C#
-                    // shelves it, instead of re-issuing forever with no bridge event.
-                    if (m_contDestX != m_currentTask.x || m_contDestY != m_currentTask.y)
-                    {
-                        m_contDestX = m_currentTask.x;
-                        m_contDestY = m_currentTask.y;
-                        m_contLastDist = -1.0f;
-                        m_contNoProgress = 0;
-                    }
-                    if (m_contLastDist >= 0.0f && (m_contLastDist - dist) < 5.0f)
-                        ++m_contNoProgress;
-                    else
-                        m_contNoProgress = 0;
-                    m_contLastDist = dist;
-
-                    if (m_contNoProgress >= 3)
-                    {
-                        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                            "[AIBOT-PATH] %s: leg exhausted %.0fyd from dest, no progress x%u — MOVE_FAILED no_path",
-                            me->GetName(), dist, m_contNoProgress);
-
-                        char eventData[256];
-                        snprintf(eventData, sizeof(eventData),
-                            "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path",
-                            m_currentTask.x, m_currentTask.y, m_currentTask.z);
-                        BridgeSendEvent("MOVE_FAILED", eventData);
-
-                        m_contLastDist = -1.0f;
-                        m_contNoProgress = 0;
-                        m_currentTask.Clear();
-                        ClearStoredPath();
-                        return;
-                    }
-
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-PATH] %s: leg exhausted %.0fyd from dest — continuing journey",
                         me->GetName(), dist);

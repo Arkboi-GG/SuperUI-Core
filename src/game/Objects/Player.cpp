@@ -26,7 +26,10 @@
 #include "Player.h"
 #include "Bag.h"
 #include "Language.h"
+#include "SuiHero.h"
+#include "SuiHonor.h"
 #include "SuiPossess.h"
+#include "SuiRts.h"
 #include "Database/DatabaseEnv.h"
 #include "Log.h"
 #include "Opcodes.h"
@@ -1966,7 +1969,7 @@ bool Player::TeleportTo(uint32 mapId, float x, float y, float z, float orientati
         {
             if (Corpse* corpse = GetCorpse())
             {
-                if (mapId == corpse->GetMapId())
+                if (mapId == corpse->GetMapId() && !SuiHero::BlocksResurrection(this))
                 {
                     ResurrectPlayer(0.5f);
                     SpawnCorpseBones();
@@ -2179,7 +2182,8 @@ void Player::ProcessDelayedOperations()
     if (m_delayedOperations == 0)
         return;
 
-    if (m_delayedOperations & DELAYED_RESURRECT_PLAYER)
+    if ((m_delayedOperations & DELAYED_RESURRECT_PLAYER) &&
+        !SuiHero::BlocksResurrection(this))
     {
         ResurrectPlayer(0.0f, false);
 
@@ -5118,7 +5122,8 @@ void Player::RepopAtGraveyard()
             if (GetTransport())
             {
                 GetTransport()->RemovePassenger(this);
-                ResurrectPlayer(1.0f);
+                if (!SuiHero::BlocksResurrection(this))
+                    ResurrectPlayer(1.0f);
             }
             TeleportTo(pClosestGrave->map_id, pClosestGrave->x, pClosestGrave->y, pClosestGrave->z, orientation, TELE_TO_NOT_UNSUMMON_PET, std::move(recover));
         }
@@ -15580,7 +15585,8 @@ void Player::LoadCorpse()
         else
         {
             //Prevent Dead Player login without corpse
-            ResurrectPlayer(0.5f);
+            if (!SuiHero::BlocksResurrection(this))
+                ResurrectPlayer(0.5f);
         }
     }
 }
@@ -19254,6 +19260,7 @@ void Player::SendInitialPacketsAfterAddToMap(bool login)
     uint32 newzone, newarea;
     GetZoneAndAreaId(newzone, newarea);
     UpdateZone(newzone, newarea);                           // also call SendInitWorldStates();
+    SuiRts::OnPlayerWorldEnter(this);
 
     if (login)
     {
@@ -20134,6 +20141,12 @@ uint32 Player::GetBaseWeaponSkillValue(WeaponAttackType attType) const
 
 void Player::ResurrectUsingRequestData()
 {
+    if (SuiHero::BlocksResurrection(this))
+    {
+        ClearResurrectRequestData();
+        return;
+    }
+
     // Teleport before resurrecting by player, otherwise the player might get attacked from creatures near his corpse
     if (m_resurrectData.resurrectorGuid.IsPlayer())
     {
@@ -21953,9 +21966,13 @@ void Player::RewardHonorOnDeath()
         std::vector<Player*> rewarded;
         for (const auto& grItr : g->GetMemberSlots())
             if (Player* pl = GetMap()->GetPlayer(grItr.guid))
-                if (pl->IsAtGroupRewardDistance(this) && pl->IsAlive() && pl->GetTeam() != GetTeam())
+                if (pl->IsAtGroupRewardDistance(this) && pl->IsAlive() &&
+                    pl->GetTeam() != GetTeam() &&
+                    !SuiHonor::SuppressVanillaHonor(pl, this))
                     rewarded.push_back(pl);
 
+        if (rewarded.empty())
+            continue;
         uint32 totalRewarded = rewarded.size();
         float honorRate = itr.second;
         honorRate *= MaNGOS::XP::xp_in_group_rate(totalRewarded, false);
@@ -21976,6 +21993,8 @@ void Player::RewardHonorOnDeath()
     // Distribute honor to single players
     for (const auto& rewItr : damagePerAlonePlayer)
     {
+        if (SuiHonor::SuppressVanillaHonor(rewItr.first, this))
+            continue;
         if (!rewItr.first->IsHonorOrXPTarget(this))
             continue;
 

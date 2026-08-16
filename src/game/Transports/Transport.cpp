@@ -31,6 +31,7 @@
 #include "GameObjectModel.h"
 #include "ObjectAccessor.h"
 #include "MapManager.h"
+#include "SuiHero.h"
 
 #include <G3D/Quat.h>
 
@@ -169,7 +170,7 @@ bool ShipTransport::TeleportTransport(uint32 newMapid, float x, float y, float z
                     break;
                 }
 
-                if (!player->IsAlive())
+                if (!player->IsAlive() && !SuiHero::BlocksResurrection(player))
                     player->ResurrectPlayer(1.0f);
 
                 player->RemoveSpellsCausingAura(SPELL_AURA_MOD_CONFUSE);

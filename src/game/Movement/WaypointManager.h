@@ -59,6 +59,7 @@ class WaypointManager
         ~WaypointManager() { Unload(); }
 
         void Load();
+        void ReloadPath(uint32 id);   // reload one per-guid path from DB (MSUI .npc reloadspawn)
         void Unload();
 
         void Cleanup();

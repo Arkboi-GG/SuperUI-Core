@@ -844,9 +844,9 @@ enum OpcodesList
     SMSG_SUI_RTS_STATE                     = 839,
     CMSG_SUI_RTS_ACTION                    = 840,
     SMSG_SUI_RTS_ACTION_RESULT             = 841,
+    CMSG_SUI_FORCE_ROSTER                  = 842,
+    SMSG_SUI_FORCE_ROSTER                  = 843,
 
-    // 842..843 remain reserved. Keep the portal block stable above the
-    // independently developed camera, zone-intel and RTS extensions.
     CMSG_SUI_PORTAL_PREPARE                = 844,
     SMSG_SUI_PORTAL_DESCRIPTOR             = 845,
     CMSG_SUI_PORTAL_READY                  = 846,

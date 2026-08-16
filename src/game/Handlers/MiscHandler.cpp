@@ -44,6 +44,7 @@
 #include "Conditions.h"
 #include "Anticheat.h"
 #include "MasterPlayer.h"
+#include "SuiHero.h"
 
 void WorldSession::HandleRepopRequestOpcode(NullClientPacket const& /*packet*/)
 {
@@ -595,6 +596,8 @@ void WorldSession::HandleReclaimCorpseOpcode(WorldPackets::Misc::ReclaimCorpse c
     if (BattleGround const* bg = GetPlayer()->GetBattleGround())
         if (bg->GetStatus() != STATUS_IN_PROGRESS)
             return;
+    if (SuiHero::BlocksResurrection(GetPlayer()))
+        return;
     // resurrect
     GetPlayer()->ResurrectPlayer(GetPlayer()->InBattleGround() ? 1.0f : 0.5f);
 
@@ -719,7 +722,8 @@ void WorldSession::HandleAreaTriggerOpcode(WorldPackets::Misc::AreaTrigger const
         // Special case prior Patch 1.3 to revive your corpse if dead in Molten Core
         if (sWorld.GetWowPatch() <= WOW_PATCH_102)
         {
-            if (corpseMapId == MAP_MOLTEN_CORE && packet.triggerId == 1466)
+            if (corpseMapId == MAP_MOLTEN_CORE && packet.triggerId == 1466 &&
+                !SuiHero::BlocksResurrection(pPlayer))
             {
                 pPlayer->ResurrectPlayer(0.5f);
                 pPlayer->SpawnCorpseBones();

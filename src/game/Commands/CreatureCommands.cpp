@@ -1316,6 +1316,83 @@ bool ChatHandler::HandleNpcMoveHelperCommand(char* args, bool save)
     return true;
 }
 
+bool ChatHandler::HandleNpcReloadSpawnCommand(char* args)
+{
+    uint32 lowguid;
+    if (!ExtractUInt32(&args, lowguid))
+    {
+        SendSysMessage("Usage: .npc reloadspawn #guid");
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    CreatureData const* data = sObjectMgr.GetCreatureData(lowguid);
+    if (!data)
+    {
+        PSendSysMessage(LANG_COMMAND_CREATGUIDNOTFOUND, lowguid);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    // Re-read this spawn's row from the (already-committed) `creature` table into the cached
+    // CreatureData, so a later grid reload also gets the new values. NO DB WRITE here - the
+    // durable change was made through MangosSuperUI's audited apply; this only makes it live.
+    std::unique_ptr<QueryResult> result(WorldDatabase.PQuery(
+        "SELECT `position_x`, `position_y`, `position_z`, `orientation`, "
+        "`spawntimesecsmin`, `spawntimesecsmax`, `wander_distance`, `movement_type`, `spawn_flags` "
+        "FROM `creature` WHERE `guid` = %u", lowguid));
+    if (!result)
+    {
+        PSendSysMessage("Creature guid %u has no `creature` row.", lowguid);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    Field* f              = result->Fetch();
+    CreatureData* mut     = const_cast<CreatureData*>(data);
+    mut->position.x       = f[0].GetFloat();
+    mut->position.y       = f[1].GetFloat();
+    mut->position.z       = f[2].GetFloat();
+    mut->position.o       = f[3].GetFloat();
+    mut->spawntimesecsmin = f[4].GetUInt32();
+    mut->spawntimesecsmax = f[5].GetUInt32();
+    mut->wander_distance  = f[6].GetFloat();
+    mut->movement_type    = f[7].GetUInt8();
+    mut->spawn_flags      = f[8].GetUInt32();
+
+    // Reload this guid's waypoint path (creature_movement) into the WaypointManager cache.
+    sWaypointMgr.ReloadPath(lowguid);
+
+    // If the spawn is live on a loaded map, re-home it and (if alive) respawn so it reads the
+    // new position / movement type / path immediately. Mirrors HandleNpcMoveHelperCommand's
+    // proven kill+Respawn dance, but sourced from the DB row instead of the GM's position.
+    Creature* pCreature = (m_session && m_session->GetPlayer() && m_session->GetPlayer()->IsInWorld())
+        ? m_session->GetPlayer()->GetMap()->GetCreature(data->GetObjectGuid(lowguid))
+        : nullptr;
+
+    if (pCreature)
+    {
+        pCreature->SetHomePosition(mut->position.x, mut->position.y, mut->position.z, mut->position.o);
+        pCreature->SetDefaultMovementType(MovementGeneratorType(mut->movement_type));
+        pCreature->SetWanderDistance(mut->wander_distance);
+        pCreature->SetRespawnDelay(mut->spawntimesecsmin);
+        if (pCreature->IsAlive())
+        {
+            pCreature->SetDeathState(JUST_DIED);
+            pCreature->Respawn();
+        }
+        PSendSysMessage("Reloaded creature guid %u (entry %u): position/movement/path refreshed and respawned.",
+                        lowguid, mut->creature_id[0]);
+    }
+    else
+    {
+        PSendSysMessage("Reloaded DB data + path for creature guid %u (not spawned nearby; new values apply on next spawn).",
+                        lowguid);
+    }
+
+    return true;
+}
+
 bool ChatHandler::HandleNpcSpawnSetMoveTypeCommand(char* args)
 {
     // 2 arguments:

@@ -23,6 +23,7 @@
 #include "Pet.h"
 #include "Totem.h"
 #include "Player.h"
+#include "SuiRts.h"
 #include "SuiPossess.h"
 #include "Log.h"
 #include "Opcodes.h"
@@ -956,6 +957,8 @@ uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDa
 
 void Unit::Kill(Unit* pVictim, SpellEntry const* spellProto, bool durabilityLoss)
 {
+    SuiRts::OnUnitKill(this, pVictim);
+
     // find player: owner of controlled `this` or `this` itself maybe
     // for loot will be sued only if pGroupTap == nullptr
     Player* pPlayerTap = GetCharmerOrOwnerPlayerOrPlayerItself();

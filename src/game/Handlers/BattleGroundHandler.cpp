@@ -36,6 +36,7 @@
 #include "ScriptMgr.h"
 #include "World.h"
 #include "Anticheat.h"
+#include "SuiHero.h"
 
 void WorldSession::HandleBattlemasterHelloOpcode(WorldPackets::Battleground::BattlemasterHello const& packet)
 {
@@ -457,7 +458,7 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPackets::Battleground::Battl
             }
 
             // resurrect the player
-            if (!_player->IsAlive())
+            if (!_player->IsAlive() && !SuiHero::BlocksResurrection(_player))
             {
                 _player->ResurrectPlayer(1.0f);
                 _player->SpawnCorpseBones();

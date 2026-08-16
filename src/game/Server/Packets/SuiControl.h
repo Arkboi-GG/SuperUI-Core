@@ -94,6 +94,32 @@ namespace WorldPackets
                     recv_data >> flags;
             }
         };
+
+        class ForceRoster final : public ClientPacket
+        {
+        public:
+            static constexpr size_t WIRE_SIZE = 14;
+
+            uint8 flags = 0;
+            uint32 requestId = 0;
+            uint32 zoneId = 0;
+            uint32 afterGuidLow = 0;
+            uint8 limit = 0;
+            bool exactSize = false;
+
+            explicit ForceRoster() : ClientPacket(CMSG_SUI_FORCE_ROSTER) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                exactSize = recv_data.size() == WIRE_SIZE;
+                if (!exactSize)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+
+                recv_data >> flags >> requestId >> zoneId >> afterGuidLow >> limit;
+            }
+        };
     }
 }
 

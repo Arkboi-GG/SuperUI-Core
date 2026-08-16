@@ -427,6 +427,46 @@ void WaypointManager::Cleanup()
     }
 }
 
+void WaypointManager::ReloadPath(uint32 id)
+{
+    // Reload ONE per-guid path (creature_movement) from the DB, in place, so any live pointer
+    // to this path stays valid. Used by ".npc reloadspawn" after MangosSuperUI committed the
+    // rows. Mirrors the creature_movement branch of Load(); per-guid paths only (template
+    // paths are shared by entry and are not reloaded here).
+    WaypointPath& path = m_pathMap[id];
+    path.clear();
+
+    std::unique_ptr<QueryResult> result(WorldDatabase.PQuery(
+        "SELECT `point`, `position_x`, `position_y`, `position_z`, `waittime`, "
+        "`wander_distance`, `script_id`, `orientation`, `path_id` "
+        "FROM `creature_movement` WHERE `id` = %u", id));
+
+    if (!result)
+    {
+        m_pathMap.erase(id);
+        return;
+    }
+
+    do
+    {
+        Field* fields        = result->Fetch();
+        uint32 point         = fields[0].GetUInt32();
+        if (point < 1)
+            continue;
+
+        WaypointNode& node   = path[point - 1];
+        node.x               = fields[1].GetFloat();
+        node.y               = fields[2].GetFloat();
+        node.z               = fields[3].GetFloat();
+        node.delay           = fields[4].GetUInt32();
+        node.wander_distance = fields[5].GetFloat();
+        node.script_id       = fields[6].GetUInt32();
+        node.orientation     = fields[7].GetFloat();
+        node.path_id         = fields[8].GetUInt32();
+    }
+    while (result->NextRow());
+}
+
 void WaypointManager::Unload()
 {
     for (auto& itr : m_pathMap)

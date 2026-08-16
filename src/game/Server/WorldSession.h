@@ -511,6 +511,7 @@ class WorldSession
         void HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet);
         void HandleSuiRtsStateOpcode(WorldPackets::SuiRts::RtsState const& packet);
         void HandleSuiRtsActionOpcode(WorldPackets::SuiRts::RtsAction const& packet);
+        void HandleSuiForceRosterOpcode(WorldPackets::SuiControl::ForceRoster const& packet);
         void HandleSuiPortalPrepareOpcode(WorldPackets::SuiPortal::Prepare const& packet);
         void HandleSuiPortalReadyOpcode(WorldPackets::SuiPortal::Ready const& packet);
 

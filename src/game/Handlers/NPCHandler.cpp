@@ -36,6 +36,7 @@
 #include "Spell.h"
 #include "Chat.h"
 #include "CharacterDatabaseCache.h"
+#include "SuiHero.h"
 
 enum StableResultCode
 {
@@ -428,6 +429,9 @@ void WorldSession::HandleSpiritHealerActivateOpcode(WorldPackets::Npc::SpiritHea
 
 void WorldSession::SendSpiritResurrect()
 {
+    if (SuiHero::BlocksResurrection(_player))
+        return;
+
     _player->ResurrectPlayer(0.5f, true);
 
     _player->DurabilityLossAll(0.25f, true);

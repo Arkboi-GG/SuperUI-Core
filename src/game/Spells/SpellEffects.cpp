@@ -50,6 +50,7 @@
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
 #include "Loot/CraftingRewardVariantStore.h"
+#include "SuiHero.h"
 #include "SuiPortal.h"
 
 using namespace Spells;
@@ -252,6 +253,9 @@ void Spell::EffectResurrectNew(SpellEffectIndex effIdx)
     }
 
     Player* pTarget = ((Player*)unitTarget);
+
+    if (SuiHero::BlocksResurrection(pTarget))
+        return;
 
     if (pTarget->IsRessurectRequested())      // already have one active request
         return;
@@ -5218,6 +5222,9 @@ void Spell::EffectResurrect(SpellEffectIndex effIdx)
 
     Player* pTarget = ((Player*)unitTarget);
 
+    if (SuiHero::BlocksResurrection(pTarget))
+        return;
+
     if (pTarget->IsRessurectRequested())      // already have one active request
         return;
 
@@ -5338,6 +5345,8 @@ void Spell::EffectSelfResurrect(SpellEffectIndex effIdx)
     }
 
     Player* plr = ((Player*)unitTarget);
+    if (SuiHero::BlocksResurrection(plr))
+        return;
     plr->ResurrectPlayer(0.0f);
 
     plr->SetHealth(ditheru(health));
@@ -5813,7 +5822,7 @@ void Spell::EffectSpiritHeal(SpellEffectIndex /*effIdx*/)
 
     auto player = unitTarget->ToPlayer();
 
-    if (!player)
+    if (!player || SuiHero::BlocksResurrection(player))
         return;
 
     // no resurrection on a GY other than homie if BG is not in progress

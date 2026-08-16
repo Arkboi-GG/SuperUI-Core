@@ -21,8 +21,8 @@
 #include "Objects/Player.h"
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
+#include "SuiFactionControl.h"
 #include "SuiPortal.h"
-#include "AiBotAIMain.h"
 #include "World.h"
 
 namespace SuiPossess
@@ -35,9 +35,9 @@ static bool s_rtsWorldState = false;
 void LoadWorldState()
 {
     s_rtsWorldState = false;
-    // MangosSuperUI creates the RTS overlay while constructing an RTS World
-    // State. A stock characters database has no overlay and must still boot as
-    // ordinary MMO without the core creating or altering schema.
+    // MangosSuperUI creates the complete RTS overlay while constructing a
+    // World State. A stock characters database has no overlay and boots as MMO
+    // without the core creating, altering, or querying an absent RTS table.
     uint32 overlayTableCount = 0;
     if (auto result = CharacterDatabase.Query(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() "
@@ -50,24 +50,24 @@ void LoadWorldState()
     if (overlayTableCount == 9)
     {
         if (auto result = CharacterDatabase.Query(
-                "SELECT `value` FROM `superui_worldstate` WHERE `key`='mode'"))
-        {
-            Field* fields = result->Fetch();
-            s_rtsWorldState = fields[0].GetCppString() == "rts";
-        }
+                "SELECT `value` FROM `superui_worldstate` WHERE `key`='mode' LIMIT 1"))
+            s_rtsWorldState = result->Fetch()[0].GetCppString() == "rts";
     }
     else if (overlayTableCount != 0)
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[SUI] incomplete RTS overlay: found %u of 9 required characters tables; RTS disabled",
             overlayTableCount);
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[SUI] worldstate: %s",
         s_rtsWorldState ? "RTS OVERLAY ACTIVE" : "vanilla (RTS overlay inactive)");
 }
 
 bool RtsWorldState() { return s_rtsWorldState; }
-void OverrideWorldState(bool rts) { s_rtsWorldState = rts; }
 
 static void SendSnapshot(WorldSession* to, Player* bot);   // defined with the M4 block below
+static Creature* FreecamEyeOf(Player* player);
+static void EnsureFreecamEye(Player* player);
+static void RemoveFreecamEye(Player* player);
 
 static void SendAck(WorldSession* session, ObjectGuid guid, AckResult result, Player* positionOf)
 {
@@ -164,6 +164,24 @@ static void DetachUnattendedAI(Player* owner)
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s back under manual control", owner->GetName());
 }
 
+static void ParkUnattendedBody(Player* owner)
+{
+    if (!owner)
+        return;
+    // A faction-wide target need not share the owner's group. The generic
+    // unattended AiBotAI has no explicit anchor in that case and may select
+    // solo doctrine/quests while the human is driving a distant army unit.
+    // Remove only our attached real-character AI and park the owner exactly at
+    // the relocation destination until release restores manual control.
+    DetachUnattendedAI(owner);
+    owner->StopMoving();
+    owner->GetMotionMaster()->Clear(false, true);
+    owner->GetMotionMaster()->MoveIdle();
+    owner->SetSplineDonePending(false);
+    owner->AttackStop();
+    owner->CombatStop(true);
+}
+
 /// Everything except the ACK — shared by the wire handler and the GM command.
 static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player** grantedBot)
 {
@@ -185,19 +203,42 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     if (!ai)
         return DENY_NOT_BOT;
     Group* group = possessor->GetGroup();
-    if (!group || group != bot->GetGroup())
+    bool factionAuthorized = SuiFactionControl::CanControl(possessor, bot);
+    bool const partyAuthorized = group && group == bot->GetGroup();
+    if (!partyAuthorized && !factionAuthorized)
         return DENY_NOT_IN_GROUP;
     if (!bot->GetPossessorGuid().IsEmpty())
         return DENY_BUSY;
     if (bot->IsDead() || bot->IsTaxiFlying() || bot->GetTransport() || bot->IsBeingTeleported())
         return DENY_TARGET_STATE;
-    // Camera::SetView requires the target on the same map and visible to the client.
-    if (bot->GetMapId() != possessor->GetMapId() ||
-        bot->GetInstanceId() != possessor->GetInstanceId() ||
-        !possessor->IsInVisibleList(bot))
+    // Camera::SetView requires the target on the same map. Faction control can
+    // explicitly relocate the owner's body outdoors; the client retries this
+    // request only after normal world streaming has made the target visible.
+    bool const sameMapInstance = bot->GetMapId() == possessor->GetMapId() &&
+        bot->GetInstanceId() == possessor->GetInstanceId();
+    bool const visible = sameMapInstance && possessor->IsInVisibleList(bot);
+    if (!visible)
+    {
+        if (!factionAuthorized)
+            return DENY_NOT_FOUND;
+        SuiFactionControl::RelocateResult relocate =
+            SuiFactionControl::TryRelocate(possessor, bot);
+        if (relocate == SuiFactionControl::RELOCATE_INSTANCE_DENIED)
+            return DENY_CROSS_INSTANCE;
+        if (relocate == SuiFactionControl::RELOCATE_ACCEPTED)
+        {
+            if (grantedBot)
+                *grantedBot = bot;
+            return ACK_RELOCATING;
+        }
         return DENY_NOT_FOUND;
+    }
 
     // ── Grant ──
+    // This request may originate from Commander free view (including the GM
+    // diagnostic path). Retire its streaming eye only after every denial gate
+    // has passed so a rejected request leaves the existing view untouched.
+    RemoveFreecamEye(possessor);
     ai->SetPossessed(true);
     // Stop whatever the AI had it doing FIRST. A bot taken mid-stride keeps its movespline,
     // and HandleMovementOpcodes drops every client movement packet while one is unfinalized
@@ -231,7 +272,10 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     possessor->SetClientControl(bot, 1);
 
     // The abandoned real character follows and assists whoever the human drives.
-    AttachUnattendedAI(possessor, bot);
+    if (partyAuthorized)
+        AttachUnattendedAI(possessor, bot);
+    else
+        ParkUnattendedBody(possessor);
 
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s now possesses bot %s",
         possessor->GetName(), bot->GetName());
@@ -359,8 +403,6 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
 void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
 {
     session->SetSuiCapable(true);
-    if (Player* requester = session->GetPlayer())
-        RemoveFreecamEye(requester);   // possess overrides the free-camera view
     Player* bot = nullptr;
     AckResult result = TryBegin(session, targetGuid, &bot);
     SendAck(session, targetGuid, result, bot);
@@ -388,6 +430,19 @@ bool IsCommandedFromFreeView(Unit const* bot)
 bool IsFreeViewUp(Player* player)
 {
     return player != nullptr && FreecamEyeOf(player) != nullptr;
+}
+
+bool PrepareForRelocation(Player* player)
+{
+    bool const restoreFreeView = FreecamEyeOf(player) != nullptr;
+    RemoveFreecamEye(player);
+    return restoreFreeView;
+}
+
+void RestoreAfterFailedRelocation(Player* player, bool restoreFreeView)
+{
+    if (restoreFreeView)
+        EnsureFreecamEye(player);
 }
 
 void HandleCam(WorldSession* session, float x, float y, float z, bool active)
@@ -948,18 +1003,7 @@ bool ChatHandler::HandleSuiWorldStateCommand(char* args)
 {
     if (char* arg = ExtractLiteralArg(&args))
     {
-        std::string mode = arg;
-        if (mode == "rts")
-            SuiPossess::OverrideWorldState(true);
-        else if (mode == "vanilla")
-            SuiPossess::OverrideWorldState(false);
-        else
-        {
-            SendSysMessage("Usage: .sui worldstate [rts|vanilla]");
-            return false;
-        }
-        PSendSysMessage("SUI worldstate overridden to %s (runtime only; boot re-reads the DB).",
-            mode.c_str());
+        PSendSysMessage("SUI worldstate is boot-latched; '%s' was not applied.", arg);
         return true;
     }
     PSendSysMessage("SUI worldstate: %s",

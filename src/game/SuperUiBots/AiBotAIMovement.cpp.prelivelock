@@ -749,27 +749,6 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         totalDist += sqrtf(pdx * pdx + pdy * pdy + pdz * pdz);
     }
 
-    // [FINDING_017] A degenerate partial is not a route. Detour returns
-    // INCOMPLETE partials TOWARD an unreachable dest, so the nudge/ring-scan
-    // "not NOPATH" tests above can succeed with a leg that is ~0yd long —
-    // it exhausts instantly and the leg-exhausted continuation re-issues at
-    // log speed (measured: 1.07M zero-yd cycles / 15h fleet-wide). The
-    // recovery chain is done by this point: report honest no_path so the C#
-    // planner shelves the leg, exactly as the ring-scan-miss branch does.
-    if (isPartial && totalDist < 5.0f)
-    {
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT-PATH] %s: degenerate partial (%.1fyd, %u waypoints) — MOVE_FAILED no_path",
-            me->GetName(), totalDist, (uint32)points.size());
-
-        char eventData[256];
-        snprintf(eventData, sizeof(eventData),
-            "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path",
-            x, y, z);
-        BridgeSendEvent("MOVE_FAILED", eventData);
-        return;
-    }
-
     if (stopCurrentMovement)
         StopMoving();
     ClearStoredPath();

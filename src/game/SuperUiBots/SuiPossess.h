@@ -48,6 +48,8 @@ namespace SuiPossess
         DENY_BUSY               = 4,   // already possessed by someone
         DENY_TARGET_STATE       = 5,   // dead / taxi / transport / teleporting
         DENY_REQUESTER_STATE    = 6,   // requester is a bot, not self-mover, dead, on taxi…
+        ACK_RELOCATING          = 7,   // outdoor transfer accepted; retry after ordinary streaming
+        DENY_CROSS_INSTANCE     = 8,   // faction control never enters a foreign instance
 
         RELEASED                = 16,  // voluntary, back to own character
         RELEASED_FREECAM        = 17,  // voluntary, own character stays autonomous
@@ -95,7 +97,6 @@ namespace SuiPossess
     // BINDING RULE: no tier-2 mechanic ships without a RtsWorldState() gate.
     void LoadWorldState();                 // boot-time read (World::SetInitialWorldSettings)
     bool RtsWorldState();
-    void OverrideWorldState(bool rts);     // .sui worldstate — runtime testing only, not persisted
 
     void HandleRequest(WorldSession* session, ObjectGuid targetGuid);
 
@@ -145,6 +146,12 @@ namespace SuiPossess
     /// The bot this session is driving, or nullptr.
     Player* GetControlledBot(WorldSession const* session);
     bool IsSuiPossessed(Unit const* unit);
+
+    // Cross-map faction control must retire the source-map free-camera eye
+    // before Player::TeleportTo starts ordinary NEW_WORLD streaming.  The
+    // return value records whether a failed transfer should restore that view.
+    bool PrepareForRelocation(Player* player);
+    void RestoreAfterFailedRelocation(Player* player, bool restoreFreeView);
 
     // ── Roster ────────────────────────────────────────────────────────────────
     /// Push SMSG_SUI_CONTROL_ROSTER to one real player (their current group view).

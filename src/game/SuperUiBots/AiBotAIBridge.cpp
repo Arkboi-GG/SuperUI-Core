@@ -17,6 +17,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "SuiHero.h"
 #include "SuiPossess.h"      // [SUI] free-view command waiver on the possessed drop
 #include "Player.h"
 #include <cstring>
@@ -2834,6 +2835,13 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 {
     if (!me)
         return;
+
+    if (SuiHero::BlocksResurrection(me))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[SUI-RTS] %s: automatic resurrection held for paid hero revive", me->GetName());
+        return;
+    }
 
     // A graveyard self-rez is already in flight: we've teleported the ghost and will rez it
     // ourselves once the teleport lands (see UpdateAI). Ignore ANY rez command until then —

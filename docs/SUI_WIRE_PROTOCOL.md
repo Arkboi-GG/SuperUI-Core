@@ -210,7 +210,7 @@ express “every row grew”. Per-PACKET additions still go after the last block
 | Field | Type | Notes |
 |---|---|---|
 | zoneCount | u16 | sparse: only zones with a nonzero census, all maps |
-| zoneRowBytes | u8 | row stride, currently 9 (R1) |
+| zoneRowBytes | u8 | row stride, currently 9 (v1) |
 | zoneCount × rows: | | |
 |  zoneId | u32 | `Player::GetCachedZoneId` (≤ one zone-tick stale) |
 |  bots | u16 | sessions with a `PlayerBotEntry` (`Player::IsBot`) |
@@ -256,7 +256,7 @@ Reply (all blocks stride-versioned — future servers grow rows, old clients ski
 Request: `u8 action` (1 heroDeclare, 2 heroUpgrade, 3 heroRevive), `u64 subjectGuid`.
 Result: `u8 action, u8 result, u64 subjectGuid, i64 poolAfter`.
 Result codes: 0 ok, 1 insufficient honor, 2 no free slot, 3 bad subject,
-4 unsupported/disabled (R1 always answers 4; R2 implements).
+4 unsupported/disabled.
 
 Heroes are unconditionally AiBot-only. `hero.slots_fixed` configures 1..127
 slots per faction and defaults to four.
@@ -274,8 +274,10 @@ enabling heroes. No generic `Unit` damage/scale override is involved.
 RTS-only paged discovery of every in-world same-faction AiBot. An MMO boot, or
 an RTS save without `control.faction_bots=1`, returns an empty page. Names are
 not duplicated here; the client resolves the full player GUID with the stock
-name-query path. Reserved request flags must be zero and requestId must be
-nonzero; malformed requests receive an empty page without a roster scan.
+name-query path. The request body is exactly 14 bytes. Reserved request flags
+must be zero and requestId must be nonzero. A wrong-size or zero-id request is
+dropped without a roster scan; reserved flags with a usable id receive a
+terminal empty page.
 
 Request (14 bytes):
 
@@ -319,10 +321,10 @@ both the core and the web app's RtsRulesetRegistry mirror.
 | honor.enabled | 0 | R2 | explicit Honor module gate |
 | hero.enabled | 0 | R2 | explicit hero gate; fails closed unless Honor is enabled and all five rules/spells validate |
 | control.faction_bots | 0 | R2 | faction-wide roster/control gate |
-| state.flush_ms | 30000 | R1 | write-behind cadence for faction state |
-| rate.xp_kill / rate.xp_kill_elite / rate.xp_quest | conf | R1 | sWorld rate overrides |
-| rate.drop_money / rate.drop_item_poor..artifact / rate.drop_item_referenced | conf | R1 | sWorld rate overrides |
-| bots.cap.alliance / bots.cap.horde | -1 (uncapped) | R1 | per-faction bot population cap |
+| state.flush_ms | 30000 | R2 | write-behind cadence for faction state |
+| rate.xp_kill / rate.xp_kill_elite / rate.xp_quest | conf | R2 | sWorld rate overrides |
+| rate.drop_money / rate.drop_item_poor..artifact / rate.drop_item_referenced | conf | R2 | sWorld rate overrides |
+| bots.cap.alliance / bots.cap.horde | -1 (uncapped) | R2 | per-faction bot population cap |
 | honor.weight.player / .bot / .npc / .npc_elite | 10 / 5 / 1 / 3 | R2 | enemy-player, enemy-bot, opposing-faction NPC, and opposing-faction elite kill weights |
 | honor.suppress_bot_hk | 1 | R2 | skip vanilla HK recording for bot-vs-bot |
 | hero.slots_fixed | 4 | R2 | per-faction hero cap until territory lands; clamped 1..127 so both faction rosters fit the u8 packet count |
