@@ -209,7 +209,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotDoctrinePlayerParty.cpp
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.cpp
-    SuperUiContent/SuiBots/SuiPossess.cpp
+    SuperUiContent/SuiWorld/CRPG/SuiPossess.cpp
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.cpp
     SuperUiContent/SuiWorld/RTS/SuiHonor.cpp
     SuperUiContent/SuiWorld/RTS/SuiHero.cpp
@@ -468,7 +468,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotAIMain.h
     SuperUiContent/SuiBots/AiBotAI.h
     SuperUiContent/SuiBots/AiBotAITeamPlay.h
-    SuperUiContent/SuiBots/SuiPossess.h
+    SuperUiContent/SuiWorld/CRPG/SuiPossess.h
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.h
     SuperUiContent/SuiWorld/RTS/SuiHonor.h
     SuperUiContent/SuiWorld/RTS/SuiHero.h
@@ -595,6 +595,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/PacketBroadcast
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerBots
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiBots
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/CRPG
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/RTS
   ${CMAKE_CURRENT_SOURCE_DIR}/Server
   ${CMAKE_CURRENT_SOURCE_DIR}/Server/Protocol
