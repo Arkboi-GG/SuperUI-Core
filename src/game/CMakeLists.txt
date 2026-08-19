@@ -214,7 +214,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/SuiHonor.cpp
     SuperUiContent/SuiBots/SuiHero.cpp
     SuperUiContent/SuiBots/SuiRts.cpp
-    SuperUiContent/SuiBots/SuiPortal.cpp
+    SuperUiContent/SuiWorld/Bridge/SuiPortal.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp
@@ -473,7 +473,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/SuiHonor.h
     SuperUiContent/SuiBots/SuiHero.h
     SuperUiContent/SuiBots/SuiRts.h
-    SuperUiContent/SuiBots/SuiPortal.h
+    SuperUiContent/SuiWorld/Bridge/SuiPortal.h
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.h
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.h
     PlayerBots/BattleBotWaypoints.h

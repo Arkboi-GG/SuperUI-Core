@@ -22,7 +22,7 @@
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
 #include "SuiFactionControl.h"
-#include "SuiPortal.h"
+#include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 #include "World.h"
 
 namespace SuiPossess

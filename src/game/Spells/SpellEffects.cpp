@@ -51,7 +51,7 @@
 #include "SocialMgr.h"
 #include "Loot/CraftingRewardVariantStore.h"
 #include "SuiHero.h"
-#include "SuiPortal.h"
+#include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 
 using namespace Spells;
 
