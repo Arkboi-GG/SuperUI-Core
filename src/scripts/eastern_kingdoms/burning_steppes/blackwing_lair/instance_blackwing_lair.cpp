@@ -16,7 +16,7 @@
 
 #include "scriptPCH.h"
 #include "blackwing_lair.h"
-#include "SuperUiBots/SuiHero.h"
+#include "SuperUiContent/SuiBots/SuiHero.h"
 
 static const Position EggSpawnCoords[] =
 {

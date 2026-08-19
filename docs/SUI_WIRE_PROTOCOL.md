@@ -6,7 +6,7 @@ Custom opcodes between **MSUIClient** and **SuperUI-Core**, layered on the stock
 `CMSG_SUI_*` first (`WorldSession::IsSuiCapable`), so stock clients never see
 them. All integers little-endian; guids are raw `uint64`, never packed.
 
-Server implementation: `src/game/SuperUiBots/SuiPossess.{h,cpp}`,
+Server implementation: `src/game/SuperUiContent/SuiBots/SuiPossess.{h,cpp}`,
 `SuiFactionControl.{h,cpp}`, `SuiRts.{h,cpp}`, `SuiHonor.{h,cpp}`,
 `SuiHero.{h,cpp}`, and `SuiPortal.{h,cpp}`, packet structs in
 `src/game/Server/Packets/SuiControl.h` and `SuiPortalPackets.h`.

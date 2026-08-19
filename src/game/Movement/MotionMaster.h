@@ -166,7 +166,7 @@ class MotionMaster : std::stack<MovementGenerator *>
 
 
         // SuperUiBots: the one friend permitted to push a custom MovementGenerator (bot smoothed-
-        // path movement) without widening Mutate to every caller. See SuperUiBots/Movement/.
+        // path movement) without widening Mutate to every caller. See SuperUiContent/SuiBots/Movement/.
         friend class AiBotMovementIssuer;
 
     private:

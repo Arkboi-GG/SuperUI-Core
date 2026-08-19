@@ -195,26 +195,26 @@ set (game_SRCS
     PlayerBots/PartyBotAI.cpp
     PlayerBots/CombatBotBaseAI.cpp
     PlayerBots/BattleBotAI.cpp
-    SuperUiBots/AiBotAIMain.cpp
-    SuperUiBots/AiBotAICombat.cpp
-    SuperUiBots/AiBotAIMovement.cpp
-    SuperUiBots/AiBotAILoot.cpp
-    SuperUiBots/AiBotAIGrind.cpp
-    SuperUiBots/AiBotAIBridge.cpp
-    SuperUiBots/AiBotAITeamPlay.cpp
-    SuperUiBots/AiBotDoctrine.cpp
-    SuperUiBots/AiBotDoctrineSolo.cpp
-    SuperUiBots/AiBotDoctrineTeam.cpp
-    SuperUiBots/AiBotDoctrineDirected.cpp
-    SuperUiBots/AiBotDoctrinePlayerParty.cpp
-    SuperUiBots/Movement/AiBotMovementGenerators.cpp
-    SuperUiBots/Movement/AiBotPathSmoothing.cpp
-    SuperUiBots/SuiPossess.cpp
-    SuperUiBots/SuiFactionControl.cpp
-    SuperUiBots/SuiHonor.cpp
-    SuperUiBots/SuiHero.cpp
-    SuperUiBots/SuiRts.cpp
-    SuperUiBots/SuiPortal.cpp
+    SuperUiContent/SuiBots/AiBotAIMain.cpp
+    SuperUiContent/SuiBots/AiBotAICombat.cpp
+    SuperUiContent/SuiBots/AiBotAIMovement.cpp
+    SuperUiContent/SuiBots/AiBotAILoot.cpp
+    SuperUiContent/SuiBots/AiBotAIGrind.cpp
+    SuperUiContent/SuiBots/AiBotAIBridge.cpp
+    SuperUiContent/SuiBots/AiBotAITeamPlay.cpp
+    SuperUiContent/SuiBots/AiBotDoctrine.cpp
+    SuperUiContent/SuiBots/AiBotDoctrineSolo.cpp
+    SuperUiContent/SuiBots/AiBotDoctrineTeam.cpp
+    SuperUiContent/SuiBots/AiBotDoctrineDirected.cpp
+    SuperUiContent/SuiBots/AiBotDoctrinePlayerParty.cpp
+    SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.cpp
+    SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.cpp
+    SuperUiContent/SuiBots/SuiPossess.cpp
+    SuperUiContent/SuiBots/SuiFactionControl.cpp
+    SuperUiContent/SuiBots/SuiHonor.cpp
+    SuperUiContent/SuiBots/SuiHero.cpp
+    SuperUiContent/SuiBots/SuiRts.cpp
+    SuperUiContent/SuiBots/SuiPortal.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp
@@ -465,17 +465,17 @@ set (game_SRCS
     PlayerBots/CombatBotBaseAI.h
     PlayerBots/PartyBotAI.h
     PlayerBots/BattleBotAI.h
-    SuperUiBots/AiBotAIMain.h
-    SuperUiBots/AiBotAI.h
-    SuperUiBots/AiBotAITeamPlay.h
-    SuperUiBots/SuiPossess.h
-    SuperUiBots/SuiFactionControl.h
-    SuperUiBots/SuiHonor.h
-    SuperUiBots/SuiHero.h
-    SuperUiBots/SuiRts.h
-    SuperUiBots/SuiPortal.h
-    SuperUiBots/Movement/AiBotMovementGenerators.h
-    SuperUiBots/Movement/AiBotPathSmoothing.h
+    SuperUiContent/SuiBots/AiBotAIMain.h
+    SuperUiContent/SuiBots/AiBotAI.h
+    SuperUiContent/SuiBots/AiBotAITeamPlay.h
+    SuperUiContent/SuiBots/SuiPossess.h
+    SuperUiContent/SuiBots/SuiFactionControl.h
+    SuperUiContent/SuiBots/SuiHonor.h
+    SuperUiContent/SuiBots/SuiHero.h
+    SuperUiContent/SuiBots/SuiRts.h
+    SuperUiContent/SuiBots/SuiPortal.h
+    SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.h
+    SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.h
     PlayerBots/BattleBotWaypoints.h
     PlayerBots/PlayerBotAI.h
     PlayerBots/PlayerBotMgr.h
@@ -594,7 +594,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/OutdoorPvP
   ${CMAKE_CURRENT_SOURCE_DIR}/PacketBroadcast
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerBots
-  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiBots
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiBots
   ${CMAKE_CURRENT_SOURCE_DIR}/Server
   ${CMAKE_CURRENT_SOURCE_DIR}/Server/Protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/Spells
