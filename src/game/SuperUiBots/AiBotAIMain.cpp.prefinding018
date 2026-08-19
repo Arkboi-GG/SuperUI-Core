@@ -526,18 +526,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
                     // <5yd toward the SAME dest mean the leg cannot advance (degenerate
                     // partials or frontier oscillation) — report honest no_path so C#
                     // shelves it, instead of re-issuing forever with no bridge event.
-                    // [FINDING_017 v2] Anchor the "new dest re-arms the tracker" test to a
-                    // radius comfortably larger than the ring scan. The scan writes a point up
-                    // to AIBOT_RING_SCAN_RADIUS off the true dest back into m_currentTask, so an
-                    // exact-inequality test here reset m_contNoProgress every leg and the
-                    // MOVE_FAILED no_path below never fired. Compare against the stored anchor
-                    // with a tolerance > the ring radius: jitter counts as the same journey (so
-                    // no-progress accumulates and the leg is shelved), while a genuinely new
-                    // objective (a far jump) still re-arms.
-                    float anchorDx = m_contDestX - m_currentTask.x;
-                    float anchorDy = m_contDestY - m_currentTask.y;
-                    if ((anchorDx * anchorDx + anchorDy * anchorDy) >
-                        (AIBOT_CONT_SAME_DEST_EPSILON * AIBOT_CONT_SAME_DEST_EPSILON))
+                    if (m_contDestX != m_currentTask.x || m_contDestY != m_currentTask.y)
                     {
                         m_contDestX = m_currentTask.x;
                         m_contDestY = m_currentTask.y;

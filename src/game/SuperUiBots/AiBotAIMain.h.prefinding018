@@ -107,17 +107,6 @@
 #define AIBOT_FILLET_VALIDATE_SEARCH_YARDS 5.0f
 #define AIBOT_FILLET_VALIDATE_EPSILON      1.0f
 #define AIBOT_JOURNEY_DEST_EPSILON         1.0f
-
-// [FINDING_017 v2] Ring-scan radius, promoted from the magic 3.0f literal in
-// AiBotAIMovement's ring scan. The scan accepts a pathable point up to this far
-// off the true dest and MoveToDestination writes THAT back into m_currentTask —
-// so on an unreachable dest the task jitters by up to this radius every leg.
-#define AIBOT_RING_SCAN_RADIUS             3.0f
-// The continuation "same journey" tolerance. MUST exceed AIBOT_RING_SCAN_RADIUS
-// so ring-scan jitter is NOT mistaken for a new destination (which re-arms the
-// no-progress gate every leg and lets the 017 livelock survive its own fix).
-// 2x radius covers a full ring-diameter excursion of the pathing target.
-#define AIBOT_CONT_SAME_DEST_EPSILON       (2.0f * AIBOT_RING_SCAN_RADIUS)
 #define AIBOT_FILLET_MIN_TURN_EPSILON_DEG 5.0f   // below this a vertex is "basically straight" — doesn't start or continue a merge run
 #define AIBOT_FILLET_MAX_WINDOW_POINTS    8       // cap on how many consecutive vertices one run can merge (~40yd at this fork's ~5yd spacing) — generous for a real corner, bounded so a long gentle bend can't get swallowed whole
 

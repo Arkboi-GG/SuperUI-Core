@@ -648,7 +648,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
             "[AIBOT-PATH] %s: nudge failed — trying ring scan around (%.1f, %.1f)",
             me->GetName(), origX, origY);
 
-        float ringDist = AIBOT_RING_SCAN_RADIUS;
+        float ringDist = 3.0f;
         for (int i = 0; i < 8; ++i)
         {
             float angle = (float)i * (M_PI_F / 4.0f); // 0, 45, 90, ... 315 degrees
