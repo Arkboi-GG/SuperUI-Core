@@ -69,7 +69,7 @@
 #include "AuctionHouseBotMgr.h"
 #include "Transports/TransportMgr.h"
 #include "PlayerBotMgr.h"
-#include "SuiPossess.h"
+#include "SuiWorldState.h"
 #include "SuiRts.h"
 #include "ZoneScriptMgr.h"
 #include "CharacterDatabaseCache.h"
@@ -87,8 +87,8 @@
 #include "TransportMgr.h"
 #include "RealmZone.h"
 #include "IO/Multithreading/CreateThread.h"
-#include "Loot/QuestRewardVariantStore.h"
-#include "Loot/CraftingRewardVariantStore.h" 
+#include "SuperUiContent/Lootifiers/QuestRewardVariantStore.h"
+#include "SuperUiContent/Lootifiers/CraftingRewardVariantStore.h"
 
 #include <chrono>
 
@@ -1818,8 +1818,8 @@ void World::SetInitialWorldSettings()
 
     // SuperUI worldstate + RTS ruleset: does the loaded save carry match rules?
     // Must precede InitZoneScripts (territory zone scripts key on the mode) and
-    // PlayerBotMgr::Load (bot caps). (SuiPossess.h / SuiRts.h)
-    SuiPossess::LoadWorldState();
+    // PlayerBotMgr::Load (bot caps). (SuiWorldState.h / SuiRts.h)
+    SuiWorldState::LoadWorldState();
     SuiRts::LoadRuleset();
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Starting ZoneScripts");

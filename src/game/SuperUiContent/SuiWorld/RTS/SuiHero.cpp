@@ -21,7 +21,7 @@
 #include "Spells/SpellDefines.h"
 #include "Spells/SpellEntry.h"
 #include "Spells/SpellMgr.h"
-#include "SuiPossess.h"
+#include "SuiWorldState.h"
 #include "SuiRts.h"
 
 namespace SuiHero
@@ -57,7 +57,7 @@ namespace
 
     bool Active()
     {
-        return SuiPossess::RtsWorldState() && SuiRts::HeroesEnabled();
+        return SuiWorldState::RtsWorldState() && SuiRts::HeroesEnabled();
     }
 
     uint8 TeamIndex(Player const* player)

@@ -42,8 +42,8 @@
 #include "MapManager.h"
 #include "CreatureGroups.h"
 #include "HardcodedEvents.h"
-#include "Loot/QuestRewardVariantStore.h"
-#include "Loot/CraftingRewardVariantStore.h"
+#include "SuperUiContent/Lootifiers/QuestRewardVariantStore.h"
+#include "SuperUiContent/Lootifiers/CraftingRewardVariantStore.h"
 
 bool ChatHandler::HandleAnnounceCommand(char* args)
 {

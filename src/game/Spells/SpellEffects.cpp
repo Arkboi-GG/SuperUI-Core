@@ -49,7 +49,7 @@
 #include "InstanceData.h"
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
-#include "Loot/CraftingRewardVariantStore.h"
+#include "SuperUiContent/Lootifiers/CraftingRewardVariantStore.h"
 #include "SuiHero.h"
 #include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 
@@ -1848,10 +1848,10 @@ void Spell::EffectHealthLeech(SpellEffectIndex effIndex)
 //    * UpdateCraftSkill(m_spellInfo->Id)        -> spell-keyed, skill-ups unaffected
 //
 //  ALSO ADD, once, near the top of SpellEffects.cpp with the other includes:
-//      #include "CraftingRewardVariantStore.h"
+//      #include "SuperUiContent/Lootifiers/CraftingRewardVariantStore.h"
 //
-//  Build note: this pulls in a new header from src/game/Loot/, so re-run
-//  `cmake ..` (not just `make`) so the glob picks it up on the include path.
+//  Build note: this pulls in a header from src/game/SuperUiContent/Lootifiers/,
+//  so re-run `cmake ..` (not just `make`) to refresh generated dependencies.
 // ─────────────────────────────────────────────────────────────────────────────
 
 void Spell::DoCreateItem(SpellEffectIndex effIdx, uint32 itemtype)

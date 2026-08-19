@@ -129,8 +129,8 @@ set (game_SRCS
     LFG/LFGHandler.cpp
     LFG/LFGMgr.cpp
     LFG/LFGQueue.cpp
-    Loot/QuestRewardVariantStore.cpp
-    Loot/CraftingRewardVariantStore.cpp
+    SuperUiContent/Lootifiers/QuestRewardVariantStore.cpp
+    SuperUiContent/Lootifiers/CraftingRewardVariantStore.cpp
     Mail/Mail.cpp
     Mail/MassMailMgr.cpp
     Maps/GridMap.cpp
@@ -209,6 +209,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotDoctrinePlayerParty.cpp
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.cpp
+    SuperUiContent/SuiWorld/Shared/SuiWorldState.cpp
     SuperUiContent/SuiWorld/CRPG/SuiPossess.cpp
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.cpp
     SuperUiContent/SuiWorld/RTS/SuiHonor.cpp
@@ -379,8 +380,8 @@ set (game_SRCS
     LFG/LFGDefines.h
     LFG/LFGMgr.h
     LFG/LFGQueue.h
-    Loot/QuestRewardVariantStore.h
-    Loot/CraftingRewardVariantStore.h
+    SuperUiContent/Lootifiers/QuestRewardVariantStore.h
+    SuperUiContent/Lootifiers/CraftingRewardVariantStore.h
     Mail/Mail.h
     Mail/MassMailMgr.h
     Maps/Cell.h
@@ -468,6 +469,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotAIMain.h
     SuperUiContent/SuiBots/AiBotAI.h
     SuperUiContent/SuiBots/AiBotAITeamPlay.h
+    SuperUiContent/SuiWorld/Shared/SuiWorldState.h
     SuperUiContent/SuiWorld/CRPG/SuiPossess.h
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.h
     SuperUiContent/SuiWorld/RTS/SuiHonor.h
@@ -595,6 +597,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/PacketBroadcast
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerBots
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiBots
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/Shared
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/CRPG
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/RTS
   ${CMAKE_CURRENT_SOURCE_DIR}/Server

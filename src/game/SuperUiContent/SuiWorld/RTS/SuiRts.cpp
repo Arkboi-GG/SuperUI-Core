@@ -4,7 +4,7 @@
 
 #include "SuiHero.h"
 #include "SuiHonor.h"
-#include "SuiPossess.h"
+#include "SuiWorldState.h"
 
 #include <algorithm>
 #include <atomic>
@@ -95,7 +95,7 @@ namespace
 
     void FlushState()
     {
-        if (!SuiPossess::RtsWorldState() || !s_poolDirty.exchange(false))
+        if (!SuiWorldState::RtsWorldState() || !s_poolDirty.exchange(false))
             return;
         for (uint8 team = 0; team < 2; ++team)
         {
@@ -138,7 +138,7 @@ void LoadRuleset()
 
     // MMO boot is deliberately read-only and does not even probe RTS module
     // tables. LoadWorldState already established the immutable mode latch.
-    if (!SuiPossess::RtsWorldState())
+    if (!SuiWorldState::RtsWorldState())
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[SUI-RTS] vanilla boot: all match modules inert");
@@ -212,7 +212,7 @@ void LoadRuleset()
 
 void Tick(uint32 diff)
 {
-    if (!SuiPossess::RtsWorldState())
+    if (!SuiWorldState::RtsWorldState())
         return;
     if (HeroesEnabled())
         SuiHero::Tick();
@@ -226,18 +226,18 @@ void Tick(uint32 diff)
 
 void Shutdown()
 {
-    if (!SuiPossess::RtsWorldState())
+    if (!SuiWorldState::RtsWorldState())
         return;
     if (HeroesEnabled())
         SuiHero::Shutdown();
     FlushState();
 }
 
-bool HonorEnabled() { return SuiPossess::RtsWorldState() && s_honorEnabled; }
-bool HeroesEnabled() { return SuiPossess::RtsWorldState() && s_heroesEnabled; }
-bool TerritoryEnabled() { return SuiPossess::RtsWorldState() && s_territoryEnabled; }
-bool DungeonsEnabled() { return SuiPossess::RtsWorldState() && s_dungeonsEnabled; }
-bool FactionControlEnabled() { return SuiPossess::RtsWorldState() && s_factionControlEnabled; }
+bool HonorEnabled() { return SuiWorldState::RtsWorldState() && s_honorEnabled; }
+bool HeroesEnabled() { return SuiWorldState::RtsWorldState() && s_heroesEnabled; }
+bool TerritoryEnabled() { return SuiWorldState::RtsWorldState() && s_territoryEnabled; }
+bool DungeonsEnabled() { return SuiWorldState::RtsWorldState() && s_dungeonsEnabled; }
+bool FactionControlEnabled() { return SuiWorldState::RtsWorldState() && s_factionControlEnabled; }
 
 int64 HonorPool(uint8 teamIdx)
 {
@@ -293,12 +293,12 @@ void RefundHonor(uint8 teamIdx, int64 amount, int64* poolAfter)
 
 int64 BotCap(uint8 teamIdx)
 {
-    return SuiPossess::RtsWorldState() ? s_botCap[teamIdx & 1] : -1;
+    return SuiWorldState::RtsWorldState() ? s_botCap[teamIdx & 1] : -1;
 }
 
 void OnUnitKill(Unit* killer, Unit* victim)
 {
-    if (!SuiPossess::RtsWorldState())
+    if (!SuiWorldState::RtsWorldState())
         return;
     if (HonorEnabled())
         SuiHonor::OnUnitKill(killer, victim);
@@ -315,7 +315,7 @@ void OnPlayerWorldEnter(Player* player)
 void HandleRtsState(WorldSession* session, uint8 /*flags*/)
 {
     session->SetSuiCapable(true);
-    bool rts = SuiPossess::RtsWorldState();
+    bool rts = SuiWorldState::RtsWorldState();
     uint8 modules = 0;
     if (HonorEnabled())          modules |= 0x01;
     if (HeroesEnabled())         modules |= 0x02;
@@ -430,7 +430,7 @@ bool ChatHandler::HandleSuiRtsCommand(char* args)
         }
     }
 
-    PSendSysMessage("SUI RTS worldstate: %s", SuiPossess::RtsWorldState() ? "RTS MATCH" : "vanilla");
+    PSendSysMessage("SUI RTS worldstate: %s", SuiWorldState::RtsWorldState() ? "RTS MATCH" : "vanilla");
     PSendSysMessage("  modules: honor=%u heroes=%u territory=%u dungeons=%u faction-control=%u",
         SuiRts::HonorEnabled(), SuiRts::HeroesEnabled(), SuiRts::TerritoryEnabled(),
         SuiRts::DungeonsEnabled(), SuiRts::FactionControlEnabled());

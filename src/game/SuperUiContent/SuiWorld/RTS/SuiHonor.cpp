@@ -11,7 +11,7 @@
 #include "Objects/Creature.h"
 #include "Objects/Player.h"
 #include "Objects/Unit.h"
-#include "SuiPossess.h"
+#include "SuiWorldState.h"
 #include "SuiRts.h"
 
 namespace SuiHonor
@@ -56,7 +56,7 @@ void OnUnitKill(Unit* killer, Unit* victim)
 {
     // Deliberately keep the cold path to two cheap gates. The weight cache is
     // atomic because this hook runs on parallel map threads.
-    if (!SuiPossess::RtsWorldState() || !SuiRts::HonorEnabled())
+    if (!SuiWorldState::RtsWorldState() || !SuiRts::HonorEnabled())
         return;
     if (!killer || !victim || killer == victim)
         return;
@@ -107,7 +107,7 @@ void OnUnitKill(Unit* killer, Unit* victim)
 
 bool SuppressVanillaHonor(Player const* recipient, Player const* victim)
 {
-    return SuiPossess::RtsWorldState() && SuiRts::HonorEnabled() &&
+    return SuiWorldState::RtsWorldState() && SuiRts::HonorEnabled() &&
         s_suppressBotHk.load(std::memory_order_relaxed) &&
         IsAiBot(recipient) && IsAiBot(victim);
 }
