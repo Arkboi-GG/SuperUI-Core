@@ -7,8 +7,8 @@ Custom opcodes between **MSUIClient** and **SuperUI-Core**, layered on the stock
 them. All integers little-endian; guids are raw `uint64`, never packed.
 
 Server implementation: `src/game/SuperUiContent/SuiBots/SuiPossess.{h,cpp}`,
-`SuiFactionControl.{h,cpp}`, `SuiRts.{h,cpp}`, `SuiHonor.{h,cpp}`,
-`SuiHero.{h,cpp}`, and
+`src/game/SuperUiContent/SuiWorld/RTS/SuiFactionControl.{h,cpp}`,
+`SuiRts.{h,cpp}`, `SuiHonor.{h,cpp}`, `SuiHero.{h,cpp}`, and
 `src/game/SuperUiContent/SuiWorld/Bridge/SuiPortal.{h,cpp}`, packet structs in
 `src/game/Server/Packets/SuiControl.h` and `SuiPortalPackets.h`.
 Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,

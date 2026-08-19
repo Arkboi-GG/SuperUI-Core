@@ -210,10 +210,10 @@ set (game_SRCS
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.cpp
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.cpp
     SuperUiContent/SuiBots/SuiPossess.cpp
-    SuperUiContent/SuiBots/SuiFactionControl.cpp
-    SuperUiContent/SuiBots/SuiHonor.cpp
-    SuperUiContent/SuiBots/SuiHero.cpp
-    SuperUiContent/SuiBots/SuiRts.cpp
+    SuperUiContent/SuiWorld/RTS/SuiFactionControl.cpp
+    SuperUiContent/SuiWorld/RTS/SuiHonor.cpp
+    SuperUiContent/SuiWorld/RTS/SuiHero.cpp
+    SuperUiContent/SuiWorld/RTS/SuiRts.cpp
     SuperUiContent/SuiWorld/Bridge/SuiPortal.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
@@ -469,10 +469,10 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotAI.h
     SuperUiContent/SuiBots/AiBotAITeamPlay.h
     SuperUiContent/SuiBots/SuiPossess.h
-    SuperUiContent/SuiBots/SuiFactionControl.h
-    SuperUiContent/SuiBots/SuiHonor.h
-    SuperUiContent/SuiBots/SuiHero.h
-    SuperUiContent/SuiBots/SuiRts.h
+    SuperUiContent/SuiWorld/RTS/SuiFactionControl.h
+    SuperUiContent/SuiWorld/RTS/SuiHonor.h
+    SuperUiContent/SuiWorld/RTS/SuiHero.h
+    SuperUiContent/SuiWorld/RTS/SuiRts.h
     SuperUiContent/SuiWorld/Bridge/SuiPortal.h
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.h
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.h
@@ -595,6 +595,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/PacketBroadcast
   ${CMAKE_CURRENT_SOURCE_DIR}/PlayerBots
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiBots
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/RTS
   ${CMAKE_CURRENT_SOURCE_DIR}/Server
   ${CMAKE_CURRENT_SOURCE_DIR}/Server/Protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/Spells
