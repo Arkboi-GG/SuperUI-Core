@@ -1478,17 +1478,8 @@ void AiBotAI::UpdateAI(uint32 const diff)
         {
             if (Unit* pEscortTarget = m_doctrine->AcquireTarget(*this))
             {
-                // A live party focus OWNS this tick. AttackStart() returns false once we are
-                // ALREADY attacking this victim (Unit::Attack no-ops on the same target), so a
-                // false return is success ("already engaged"), NOT "nothing to fight". We must
-                // return either way -- falling through on false let DoPartyFollow() re-issue
-                // MoveFollow(boss) every steady-state tick, overriding the active MoveChase and
-                // yanking the bot back the instant it got past AIBOT_PARTY_FOLLOW_DIST+1 (4yd)
-                // from the boss: melee companions engaged, turned around at ~4yd, and only ever
-                // hit mobs that wandered into melee (Nico, 2026-08-19). The tick-1 MoveChase
-                // persists on a false return and keeps closing to the boss's target.
-                AttackStart(pEscortTarget);
-                return;
+                if (AttackStart(pEscortTarget))
+                    return;
             }
 
             // [HUB-ERRAND] YIELD (2026-07-08 §3): an active MOVE_TO while in a human's party
