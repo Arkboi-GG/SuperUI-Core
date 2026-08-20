@@ -869,6 +869,14 @@ CREATE TABLE IF NOT EXISTS `playerbot` (
   `chance` int(10) unsigned NOT NULL DEFAULT '10',
   `comment` varchar(255) DEFAULT NULL,
   `ai` varchar(50) DEFAULT NULL,
+  `race` tinyint(3) unsigned NOT NULL DEFAULT '0',
+  `class` tinyint(3) unsigned NOT NULL DEFAULT '0',
+  `level` tinyint(3) unsigned NOT NULL DEFAULT '0',
+  `map` smallint(5) unsigned NOT NULL DEFAULT '0' COMMENT 'Map Identifier',
+  `position_x` float NOT NULL DEFAULT '0',
+  `position_y` float NOT NULL DEFAULT '0',
+  `position_z` float NOT NULL DEFAULT '0',
+  `name` varchar(12) NOT NULL DEFAULT '',
   PRIMARY KEY (`char_guid`)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1;
 
