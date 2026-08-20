@@ -47,6 +47,16 @@
 #include "PathFinder.h"
 #include "MoveMap.h"
 
+// [WIN-COMPAT] MSVC/Windows lacks the POSIX ssize_t and strtok_r used by the TCP
+// bridge below. Map them to their Windows equivalents so this TU compiles on MSVC.
+#ifdef _MSC_VER
+#include <basetsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+#ifdef _WIN32
+#define strtok_r strtok_s
+#endif
+
 // ============================================================
 // TCP BRIDGE — Phase 2
 // ============================================================
