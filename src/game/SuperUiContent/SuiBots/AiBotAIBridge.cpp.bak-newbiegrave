@@ -2960,44 +2960,13 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         // Primary: zone-linked nearest graveyard for the death position.
         WorldSafeLocsEntry const* grave = sObjectMgr.GetClosestGraveYard(dx, dy, dz, mapId, me->GetTeam());
 
-        // [AIBOT-NEWBIE-GRAVE] Starter-valley graveyard gap: the starter SUB-zones (Coldridge
-        // Valley, Northshire, Shadowglen, Valley of Trials, Deathknell, Camp Narache, ...) have NO
-        // game_graveyard_zone link in the world DB, so the stock GetClosestGraveYard above falls back
-        // to the nearest MAIN-zone graveyard and flings a dead newbie clear out of its valley (a
-        // Coldridge death -> Kharanos, ~1300yd, observed live). For a low-level bot, if its racial
-        // START — the playercreateinfo spawn, which sits in the newbie valley by its spirit healer —
-        // is CLOSER to the death than the graveyard the core picked, rez THERE instead. Race-correct
-        // for every start (GetPlayerInfo by race/class); self-limiting: a newbie that genuinely died
-        // out by the main-zone graveyard keeps the stock pick (that one is then the closer of the two).
-        bool  newbieGrave = false;
-        float ngx = 0.0f, ngy = 0.0f, ngz = 0.0f;
-        if (me->GetLevel() <= AIBOT_NEWBIE_GRAVE_LEVEL)
-        {
-            if (PlayerInfo const* startInfo = sObjectMgr.GetPlayerInfo(me->GetRace(), me->GetClass()))
-            {
-                if ((int)startInfo->mapId == mapId)
-                {
-                    float const rsdx = startInfo->positionX - dx, rsdy = startInfo->positionY - dy;
-                    float const rsDistSq = rsdx * rsdx + rsdy * rsdy;
-                    float const gvDistSq = grave
-                        ? (grave->x - dx) * (grave->x - dx) + (grave->y - dy) * (grave->y - dy)
-                        : 1e18f;
-                    if (rsDistSq < gvDistSq)
-                    {
-                        newbieGrave = true;
-                        ngx = startInfo->positionX; ngy = startInfo->positionY; ngz = startInfo->positionZ;
-                    }
-                }
-            }
-        }
-
         // Fallback: the death pos resolves to a zone with NO graveyard link (areaId 0 /
         // out-of-bounds pocket — the Odugi/Haxixaw 200+ death loop). GetClosestGraveYard
         // returns null there, and the OLD code rez'd in place => infinite re-death. Probe
         // outward in rings; a probe point that lands in a REAL adjacent zone makes
         // GetClosestGraveYard return that zone's nearest valid, same-faction, level-
         // appropriate graveyard. Keep the hit closest to the actual death position.
-        if (!grave && !newbieGrave)
+        if (!grave)
         {
             static const float kRings[] = { 150.0f, 350.0f, 600.0f, 1000.0f };
             float bestSq = 0.0f;
@@ -3027,7 +2996,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 
         // Last resort: still nothing AND spawn point is on this map — port to spawn
         // (always a valid, level-appropriate starter loc). Never rez-in-place into the pocket.
-        if (!grave && !newbieGrave && m_spawnMapId == mapId)
+        if (!grave && m_spawnMapId == mapId)
         {
             // [GROUND] Spawn coords are authored, but ground them anyway so a bad spawn row
             // can't float the ghost. Local copy → snap → stash the grounded value so the
@@ -3046,7 +3015,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
             return;
         }
 
-        if (!grave && !newbieGrave)
+        if (!grave)
         {
             // Genuinely nowhere on this map (cross-map spawn + no graveyard) — degrade to the
             // old in-place rez, but log loudly so this rare case is visible if it ever bites.
@@ -3062,12 +3031,9 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         }
 
         // [GROUND] Graveyard rows are authored on the ground (no-op in the normal case), but
-        // snapping catches a bad/edge graveyard entry. A newbie override (racial start) wins over
-        // the stock pick — see [AIBOT-NEWBIE-GRAVE] above. const grave → local copy.
-        float gx, gy, gz;
-        if (newbieGrave) { gx = ngx; gy = ngy; gz = ngz; }
-        else             { gx = grave->x; gy = grave->y; gz = grave->z; }
-        ReGroundZ(gx, gy, gz, newbieGrave ? "rez-newbie-start" : "rez-grave");
+        // snapping catches a bad/edge graveyard entry. const grave → local copy.
+        float gx = grave->x, gy = grave->y, gz = grave->z;
+        ReGroundZ(gx, gy, gz, "rez-grave");
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT] %s graveyard port (ghost): (%.1f, %.1f, %.1f) -> (%.1f, %.1f, %.1f) map=%u",

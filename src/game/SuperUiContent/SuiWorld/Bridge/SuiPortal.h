@@ -19,6 +19,9 @@ namespace SuiPortal
     constexpr uint32 CAPABILITIES_MAGIC = 0x31495553; // "SUI1" little-endian
     constexpr uint32 CAPABILITY_REAL_PORTALS_V1 = 1u << 0;
     constexpr uint32 CAPABILITY_PORTAL_CAST_PREWARM_V1 = 1u << 1;
+    // Faction bot control groups (census + non-party possession + RTS orders)
+    // are served by this core. Baseline SuperUI — advertised unconditionally.
+    constexpr uint32 CAPABILITY_FACTION_CONTROL_GROUPS_V1 = 1u << 2;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

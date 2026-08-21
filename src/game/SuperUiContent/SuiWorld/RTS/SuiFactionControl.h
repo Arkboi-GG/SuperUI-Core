@@ -19,6 +19,7 @@ namespace SuiFactionControl
 
     // This is the only party-membership bypass. It is false unless both the
     // immutable RTS boot latch and control.faction_bots are active.
+    bool Available();   // baseline SuperUI: always true (see .cpp)
     bool CanControl(Player const* actor, Player const* bot);
     RelocateResult TryRelocate(Player* actor, Player* bot);
 

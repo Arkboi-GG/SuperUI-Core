@@ -576,12 +576,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
     PathType pType = path.getPathType();
     // INCOMPLETE is a valid PARTIAL leg now — only NOPATH needs recovery.
-    // SHORTCUT / NOT_USING_PATH = the straight line PathFinder returns when it cannot lay a real
-    // corridor -- flagged "travel through obstacles, terrain, air" -- which glides a ground bot
-    // through the void toward the dest (the floating-toward-a-slope bug). A flying bot may use them;
-    // a walking one must not, so refuse and hand off to the seam/ring/recovery machinery below.
-    bool airLine = (pType & (PATHFIND_SHORTCUT | PATHFIND_NOT_USING_PATH)) && !me->CanFly();
-    bool pathOk = !(pType & PATHFIND_NOPATH) && !airLine;
+    bool pathOk = !(pType & PATHFIND_NOPATH);
 
     // ── Navmesh seam (cave mouth): dest is NOPATH but we're right next to it ──
     // Reached only with an ON-MESH start (the off-mesh alarm above already re-tared a bad start),
@@ -733,7 +728,6 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|start_isolated=%u",
             x, y, z, startIsolated ? 1u : 0u);
-        SuiAbandonJourney();
         BridgeSendEvent("MOVE_FAILED", eventData);
         return;
     }
@@ -750,7 +744,6 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=empty_path|start_isolated=%u",
             x, y, z, IsStartIsolated() ? 1u : 0u);   // [FINDING_020]
-        SuiAbandonJourney();
         BridgeSendEvent("MOVE_FAILED", eventData);
         return;
     }
@@ -791,7 +784,6 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|start_isolated=%u",
             x, y, z, startIsolated ? 1u : 0u);
-        SuiAbandonJourney();
         BridgeSendEvent("MOVE_FAILED", eventData);
         return;
     }

@@ -486,19 +486,6 @@ bool AiBotAI::PullReady() const
 // this via HoldPull, harmlessly — they have no autonomous pulls left to veto.
 // ════════════════════════════════════════════════════════════════════════════════════════
 
-// [OVERPULL] Solo density cap scaled to survivability. AIBOT_OVERPULL_SOLO (3) is calibrated for
-// a settled mid-level bot; a fresh L1 (~40 HP) dies to 2-3 even-con mobs long before the flee
-// cycle recovers, and 3 attackers sits one BELOW the flat > cap trigger — so it never fled. Cap
-// now scales with level, tightened further when already hurt. Grouped bots keep AIBOT_OVERPULL_GROUP.
-uint32 AiBotAI::SoloOverpullCap() const
-{
-    uint32 const lvl = me->GetLevel();
-    uint32 cap = (lvl < 5) ? 1u : (lvl < 10) ? 2u : (uint32)AIBOT_OVERPULL_SOLO;
-    if (me->GetHealthPercent() < 35.0f && cap > 1u)
-        --cap;   // already bloodied — bail sooner
-    return cap;
-}
-
 bool AiBotAI::OverpullGuard(Unit* target) const
 {
     if (!target)
@@ -516,7 +503,7 @@ bool AiBotAI::OverpullGuard(Unit* target) const
     // the team-sized density cap must gate it. A camp denser than the cap = hold + patrol instead
     // of diving in; the C# grind-lock wall clock relocates a team parked against an un-pullable
     // field, so a hold here can never wedge the group forever).
-    uint32 const cap = me->GetGroup() ? AIBOT_OVERPULL_GROUP : SoloOverpullCap();
+    uint32 const cap = me->GetGroup() ? AIBOT_OVERPULL_GROUP : AIBOT_OVERPULL_SOLO;
     return CountNearbyHostiles(target, AIBOT_PULL_DENSITY_RADIUS) > cap;
 }
 
@@ -537,7 +524,7 @@ bool AiBotAI::HandleOverpullRetreat()
         return true;
     }
  
-    uint32 const cap = me->GetGroup() ? AIBOT_OVERPULL_GROUP : SoloOverpullCap();
+    uint32 const cap = me->GetGroup() ? AIBOT_OVERPULL_GROUP : AIBOT_OVERPULL_SOLO;
     auto const& attackers = me->GetAttackers();   // melee attacker set (Unit*)
     uint32 const count = (uint32)attackers.size();
  
@@ -1630,11 +1617,8 @@ void AiBotAI::UpdateInCombatAI_Mage()
                     DoCastSpell(me, m_spells.mage.pFrostNova);
                 }
 
-                // [STOP-AND-CAST] Do NOT kite. Stand where we are and let the nuke rotation below
-                // fire, instead of running 25yd away every time a mob reaches melee (the "mages keep
-                // running away from their target" bug). Frost Nova above still roots the adjacent mob.
-                if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
-                    me->GetMotionMaster()->MoveIdle();
+                if (me->GetMotionMaster()->MoveDistance(pVictim, 25.0f))
+                    return;
             }
         }
 
@@ -1655,8 +1639,8 @@ void AiBotAI::UpdateInCombatAI_Mage()
             }
         }
 
-        // [STOP-AND-CAST] (kite removed above) — always fall through to the nuke rotation; never
-        // skip casting to finish a run-away.
+        if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == DISTANCING_MOTION_TYPE)
+            return;
 
         if (m_spells.mage.pRemoveLesserCurse &&
            (me->GetAttackers().size() < 3) &&

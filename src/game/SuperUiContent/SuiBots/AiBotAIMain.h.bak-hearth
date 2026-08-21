@@ -171,9 +171,6 @@
 #define AIBOT_OVERPULL_RETREAT_DIST 30.0f   // how far to retreat away from the hostile centroid
 #define AIBOT_OVERPULL_FLEE_HOLD_MS 2500    // let a retreat hop run uninterrupted this long
 #define AIBOT_OVERPULL_MAX_FLEES    4       // retreats before we stop thrashing and let the fight resolve
-#define AIBOT_HEARTH_SPELL_ID       8690    // Hearthstone — cast for the authentic stranded-escape port
-#define AIBOT_NEWBIE_GRAVE_LEVEL    10      // <= this level: rez at the racial START if it is closer than
-                                            // the stock graveyard (starter-valley graveyard-link gap fix)
 #define AIBOT_GRIND_SCAN_YARDS   100.0f  // indefinite grind: bot-centric scan radius for the nearest valid XP mob
 #define AIBOT_GRIND_HIGH_OFFSET  3       // …skip a mob more than this many levels above the bot (no red suicide)
 #define AIBOT_GRIND_FREEZE_DWELL    3      // consecutive frozen grind ticks (~1s each) — over-cap veto OR no valid target — before handing back to C# (GRIND_BLOCKED). ~3s, fast vs the old 8-hold dwell.
@@ -506,7 +503,6 @@ public:
     // solo call sites so a L1 flees the 2nd add instead of standing in a 3-mob pile and dying.
     uint32 SoloOverpullCap() const;
     bool HandleOverpullRetreat();
-    bool HandleHearthCast();   // [HEARTH] drive the stranded-escape Hearthstone cast -> town port
     // PullReady: fight-INITIATION readiness (solo). Gates only the start of a new pull at
     // the grind dispatch + approach scan; never gates defense or an in-progress fight.
     bool PullReady() const;
@@ -817,19 +813,6 @@ public:
     uint32 m_overpullFleeHoldMs = 0;   // mid-retreat hold (suppress re-chase while the hop runs)
     uint8  m_overpullFlees      = 0;   // retreats issued this combat (cap at AIBOT_OVERPULL_MAX_FLEES)
     uint32 m_lastAttackerCount  = 0;   // peak melee attackers this combat — stamped on the DEATH event
-
-    // --- [HEARTH] Authentic stranded-escape hearth (PORT_HOME) state ---
-    // Cast Hearthstone (8690) for the real cast bar + animation + built-in damage/move interrupt,
-    // with the bot's homebind temporarily pointed at the escape town so the spell's own teleport
-    // lands there. HandleHearthCast restores the homebind + re-anchors spawn on completion, or
-    // aborts (bot stays; the C# brain re-issues) on interrupt.
-    bool   m_hearthActive       = false;
-    uint32 m_hearthElapsedMs    = 0;
-    float  m_hearthX = 0.0f, m_hearthY = 0.0f, m_hearthZ = 0.0f;
-    int    m_hearthMap          = -1;
-    float  m_hearthSavedHomeX = 0.0f, m_hearthSavedHomeY = 0.0f, m_hearthSavedHomeZ = 0.0f;
-    uint32 m_hearthSavedHomeMap = 0;
-    uint16 m_hearthSavedArea    = 0;
 
     // --- [PULL] Proactive pull-and-retreat state (FINDING_005) ---
     // A fresh grind engagement TAGS the target then drags it to m_pullAnchor so only it (+ tight

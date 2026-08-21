@@ -1042,78 +1042,6 @@ void AiBotAI::UpdateTravelStuckWatchdog()
 }
 
 
-// [HEARTH] Drive the stranded-escape Hearthstone cast to completion. While the cast runs we own
-// the tick (no movement, so we don't self-interrupt). On natural completion the spell has already
-// ported the bot to the escape town (its homebind was pointed there for the cast); we restore the
-// real homebind and re-anchor the spawn fallback. Any early loss of the cast (damage / knockback /
-// combat / death) is an interrupt: restore the homebind and let the C# brain re-issue the escape.
-// Returns true while the hearth owns the tick (caller returns), false once done/aborted (resume AI).
-bool AiBotAI::HandleHearthCast()
-{
-    if (!m_hearthActive)
-        return false;
-
-    // Interruptible by design — pulled into combat or killed cancels the escape.
-    if (!me->IsAlive() || me->IsInCombat())
-    {
-        me->InterruptSpell(CURRENT_GENERIC_SPELL);
-        me->SetHomebindInMemory(
-            WorldLocation(m_hearthSavedHomeMap, m_hearthSavedHomeX, m_hearthSavedHomeY, m_hearthSavedHomeZ, 0.0f),
-            m_hearthSavedArea);
-        m_hearthActive = false;
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT] %s HEARTH aborted (alive=%d combat=%d) — brain re-issues the escape",
-            me->GetName(), me->IsAlive() ? 1 : 0, me->IsInCombat() ? 1 : 0);
-        return false;
-    }
-
-    m_hearthElapsedMs += AIBOT_UPDATE_INTERVAL;
-
-    // Still channeling → own the tick (stationary; do not let normal AI issue a move that breaks it).
-    if (me->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr)
-        return true;
-
-    // Cast is gone. Either it completed (spell teleported us to the town via the overridden homebind)
-    // or it was interrupted before completion. Restore the real homebind either way.
-    me->SetHomebindInMemory(
-        WorldLocation(m_hearthSavedHomeMap, m_hearthSavedHomeX, m_hearthSavedHomeY, m_hearthSavedHomeZ, 0.0f),
-        m_hearthSavedArea);
-    m_hearthActive = false;
-
-    bool const crossMapPort = ((int)me->GetMapId() != m_hearthMap) || me->IsBeingTeleported();
-    float const dx = me->GetPositionX() - m_hearthX, dy = me->GetPositionY() - m_hearthY;
-    bool const arrivedSameMap = ((int)me->GetMapId() == m_hearthMap) && (dx * dx + dy * dy) < 60.0f * 60.0f;
-
-    if (crossMapPort || arrivedSameMap)
-    {
-        // Re-anchor the "spawn" fallback to the town we hearthed to (mirrors the old PORT_HOME).
-        m_spawnMapId = (uint32)m_hearthMap;
-        m_spawnX = m_hearthX; m_spawnY = m_hearthY; m_spawnZ = m_hearthZ; m_spawnO = me->GetOrientation();
-        if ((int)me->GetMapId() != m_hearthMap)
-        {
-            // Cross-continent worldport is async — validate the landing on the arrival tick (same
-            // guarantee as the fallback instant cross-map port).
-            m_pendingWalkableLanding = true;
-            m_pendingWalkableMap = (uint32)m_hearthMap;
-            m_pendingWalkableX = m_hearthX; m_pendingWalkableY = m_hearthY; m_pendingWalkableZ = m_hearthZ;
-        }
-        else
-        {
-            TeleportToWalkable(m_hearthX, m_hearthY, m_hearthZ, me->GetOrientation(), "hearth-home");
-            m_spawnX = me->GetPositionX(); m_spawnY = me->GetPositionY(); m_spawnZ = me->GetPositionZ();
-        }
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT] %s HEARTH complete -> town (%.1f, %.1f, %.1f) map=%d",
-            me->GetName(), m_hearthX, m_hearthY, m_hearthZ, m_hearthMap);
-        return true;
-    }
-
-    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-        "[AIBOT] %s HEARTH interrupted @ %u ms — escape aborted (brain re-issues)",
-        me->GetName(), m_hearthElapsedMs);
-    return false;
-}
-
 void AiBotAI::UpdateAI(uint32 const diff)
 {
     // Handle pending teleports from base class
@@ -1206,16 +1134,6 @@ void AiBotAI::UpdateAI(uint32 const diff)
     {
         UpdateBridgeTick();
         return;
-    }
-
-    // [HEARTH] Authentic stranded-escape hearth in progress: keep STATE flowing to the brain,
-    // own the tick while the Hearthstone cast runs, fire the port on completion, and fall through
-    // to normal AI if the cast just aborted (interrupt / combat / death). See HandleHearthCast.
-    if (m_hearthActive)
-    {
-        UpdateBridgeTick();
-        if (HandleHearthCast())
-            return;
     }
 
     // [FINDING_019] Backstop: un-stick a bot physically wedged in geometry while traveling. Runs on

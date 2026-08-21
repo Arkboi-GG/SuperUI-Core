@@ -45,6 +45,11 @@ enum class DoctrineKind
                 //   a party member's attacker -> sticky), defend, NEVER initiate. Selected
                 //   off FindPartyBoss(), ranked ABOVE TeamAuto (a live human outranks a
                 //   stale directive stamp). AiBotDoctrinePlayerParty.cpp.
+    ,
+    EncounterPlay // (PLAN_19 M-D) fleet raiding under an adopted raid plan:
+                //   TeamAuto COMPOSED with the plan's add-duty targeting.
+                //   Selected on the TeamAuto conditions + HasRaidPlan(); ranked
+                //   below PlayerParty. AiBotDoctrineEncounter.cpp.
 };
 
 // -------------------------------------------------------------------------------------
@@ -118,6 +123,7 @@ std::unique_ptr<IEngagementDoctrine> MakeDoctrine(DoctrineKind kind);
 std::unique_ptr<IEngagementDoctrine> MakeSoloDoctrine();
 std::unique_ptr<IEngagementDoctrine> MakeTeamDoctrine();
 std::unique_ptr<IEngagementDoctrine> MakeDirectedDoctrine();
+std::unique_ptr<IEngagementDoctrine> MakeEncounterDoctrine();
 std::unique_ptr<IEngagementDoctrine> MakePlayerPartyDoctrine();   // escort mode (2026-07-07)
 
 #endif // MANGOS_AIBOTDOCTRINE_H

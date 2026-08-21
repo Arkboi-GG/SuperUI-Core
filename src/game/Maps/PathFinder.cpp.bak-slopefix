@@ -19,7 +19,6 @@
 #include "MoveMap.h"
 #include "GridMap.h"
 #include "Creature.h"
-#include "Player.h"
 #include "PathFinder.h"
 #include "Log.h"
 #include "Map.h"
@@ -671,12 +670,6 @@ void PathInfo::createFilter()
             includeFlags |= (NAV_WATER | NAV_MAGMA | NAV_SLIME);
     }
 
-    // [AIBOT] Bots path like players, not creatures: never route through NAV_STEEP_SLOPES polys
-    // (navmesh baked at 75deg walkable, so cliff faces are walkable and flagged steep). Every other
-    // server-driven mover already excludes these; the AiBot PathInfo did not, so bots walked straight
-    // up mountains. Scoped to bots via IsBot() so ordinary creature chase/leash is unchanged.
-    if (m_sourceUnit->GetTypeId() == TYPEID_PLAYER && ((Player const*)m_sourceUnit)->IsBot())
-        excludeFlags |= NAV_STEEP_SLOPES;
     m_filter.setIncludeFlags(includeFlags);
     m_filter.setExcludeFlags(excludeFlags);
 

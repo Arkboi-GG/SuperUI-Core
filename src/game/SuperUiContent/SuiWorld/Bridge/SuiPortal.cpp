@@ -333,7 +333,8 @@ void SuiPortal::WriteCapabilityTrailer(WorldPacket& data)
             catalogComplete = false;
     }
 
-    uint32 capabilities = CAPABILITY_REAL_PORTALS_V1;
+    uint32 capabilities = CAPABILITY_REAL_PORTALS_V1 |
+        CAPABILITY_FACTION_CONTROL_GROUPS_V1;
     if (catalogComplete)
         capabilities |= CAPABILITY_PORTAL_CAST_PREWARM_V1;
 

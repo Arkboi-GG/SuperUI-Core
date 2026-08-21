@@ -1749,6 +1749,11 @@ class Player final: public Unit
 
         void SetHomebindToLocation(WorldLocation const& loc, uint32 areaId);
         void RelocateToHomebind() { SetLocationMapId(m_homebind.mapId); Relocate(m_homebind.x, m_homebind.y, m_homebind.z); }
+        // [AIBOT] In-memory-only homebind override (no DB write) — the bot stranded-escape hearth
+        // points Hearthstone (8690) at a chosen escape town for the duration of the cast, then
+        // restores the real homebind. See AiBotAI::HandleHearthCast.
+        void SetHomebindInMemory(WorldLocation const& loc, uint16 areaId) { m_homebind = loc; m_homebindAreaId = areaId; }
+        WorldLocation const& GetHomebindLoc() const { return m_homebind; }
         bool TeleportToHomebind(uint32 options = 0, bool hearthCooldown = true);
 
         // currently visible objects at player client

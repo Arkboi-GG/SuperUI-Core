@@ -1,4 +1,11 @@
-/* RTS-only same-faction AiBot discovery and direct-control authorization. */
+/* Same-faction AiBot discovery and direct-control authorization.
+ *
+ * BASELINE SuperUI (reclassified 2026-08-21 on the owner's word): every
+ * deployment gets faction bot control groups out of the box, in normal
+ * vanilla-mode worlds — commanding your own faction's AiBots is what SuperUI
+ * IS. The RTS overlay only LAYERS on top of this service (hero row flags,
+ * match mechanics); it is no longer the gate. Advertised to clients as
+ * faction-control-groups-v1 in the SUI1 capability trailer. */
 
 #include "SuiFactionControl.h"
 
@@ -63,9 +70,18 @@ namespace
     }
 }
 
+/// Baseline availability: always on. One seam kept so a future deployment
+/// policy (a config kill-switch, a per-account gate) has exactly one place to
+/// live; SuiRts::FactionControlEnabled() is deliberately NOT consulted — that
+/// module now only decorates rosters with RTS-specific hero state.
+bool Available()
+{
+    return true;
+}
+
 bool CanControl(Player const* actor, Player const* bot)
 {
-    return SuiRts::FactionControlEnabled() && actor && bot && actor->IsInWorld() &&
+    return Available() && actor && bot && actor->IsInWorld() &&
         bot->IsInWorld() && actor->GetSession() && !actor->GetSession()->GetBot() &&
         IsAiBot(bot) && actor->GetTeam() == bot->GetTeam();
 }
@@ -109,7 +125,7 @@ void HandleRoster(WorldSession* session, uint8 flags, uint32 requestId,
     }
 
     std::vector<Row> rows;
-    if (SuiRts::FactionControlEnabled() && actor && actor->IsInWorld() && !session->GetBot())
+    if (Available() && actor && actor->IsInWorld() && !session->GetBot())
     {
         bool const actorReady = session->GetSuiControlledGuid().IsEmpty() &&
             actor->IsAlive() && !actor->IsTaxiFlying() && !actor->GetTransport() &&

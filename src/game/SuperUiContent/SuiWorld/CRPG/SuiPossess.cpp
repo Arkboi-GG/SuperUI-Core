@@ -495,15 +495,30 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     // obey RTS orders too — a group only widens the orderable set. This gate
     // silently ate every order a partyless owner clicked from the free view.
     Group* group = player->GetGroup();
+    bool const freeView = FreecamEyeOf(player) != nullptr;
 
     auto orderBot = [&](Player* pMember)
     {
         if (!pMember)
             return;
-        // In a party: subjects must be members. Solo (group null): ONLY the own
-        // character — matching on GetGroup() alone would let a partyless session
-        // order any ungrouped AI-attached body on the server.
-        if (group ? pMember->GetGroup() != group : pMember != player)
+        // Empty-list expansion retains the real party/own-character law. An
+        // explicit non-group subject may additionally use the faction-control
+        // grant, but only from a live Free View and only while streamed in the
+        // same map/instance. SuiFactionControl revalidates genuine AiBot identity
+        // and team server-side; a friendly-looking or forged client GUID is not
+        // authority.
+        bool const partyAuthorized = pMember == player ||
+            (group && pMember->GetGroup() == group);
+        bool const factionAuthorized = freeView &&
+            SuiFactionControl::CanControl(player, pMember) &&
+            pMember->GetMapId() == player->GetMapId() &&
+            pMember->GetInstanceId() == player->GetInstanceId() &&
+            player->IsInVisibleList(pMember);
+        if (!partyAuthorized && !factionAuthorized)
+            return;
+        if (factionAuthorized &&
+            (pMember->IsDead() || pMember->IsTaxiFlying() ||
+             pMember->GetTransport() || pMember->IsBeingTeleported()))
             return;
         // AI-attached is the real gate: fabricated bots always are; the human's
         // own character only while unattended (possession/freecam), which is
@@ -523,7 +538,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             // The freecam eye is the server's evidence of that camera mode (the client sends
             // CMSG_SUI_CAM only while the free view is up, and HandleCam keeps the eye alive).
             Player* possessor = GetPossessor(pMember);
-            if (!possessor || !FreecamEyeOf(possessor))
+            if (possessor != player || !freeView)
                 return;
         }
 

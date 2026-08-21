@@ -65,6 +65,12 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     Player* me = bot.GetBotPlayer();   // GetBotPlayer() is const but returns the non-const `me`
     bool const grouped = (me != nullptr && me->GetGroup() != nullptr);
 
+    // [RAID-PLAN] Fleet raiding under an adopted plan (PLAN_19 M-D): the whole
+    // TeamAuto group game plus the plan's add-duty targeting. Same activation
+    // conditions as TeamAuto so the composed inner delegate's assumptions hold.
+    if (bot.m_combatDirective.IsActive() && grouped && bot.HasRaidPlan())
+        return DoctrineKind::EncounterPlay;
+
     if (bot.m_combatDirective.IsActive() && grouped)
         return DoctrineKind::TeamAuto;
 
@@ -79,6 +85,7 @@ std::unique_ptr<IEngagementDoctrine> MakeDoctrine(DoctrineKind kind)
         case DoctrineKind::TeamAuto:    return MakeTeamDoctrine();
         case DoctrineKind::Directed:    return MakeDirectedDoctrine();
         case DoctrineKind::PlayerParty: return MakePlayerPartyDoctrine();
+        case DoctrineKind::EncounterPlay: return MakeEncounterDoctrine();
     }
     return MakeSoloDoctrine();   // unreachable — total switch; keeps the compiler happy
 }

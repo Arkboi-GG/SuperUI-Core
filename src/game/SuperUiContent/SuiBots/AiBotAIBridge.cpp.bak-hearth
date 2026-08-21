@@ -1795,57 +1795,36 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
             uint32 fmap = me->GetMapId();
             m_currentTask.Clear();
             StopMoving();
-
-            // [HEARTH] Instead of the old instant TeleportTo, cast a real Hearthstone (8690) so the
-            // escape shows the authentic ~10s cast bar + animation and is interrupted by damage /
-            // movement like a player's. We point the bot's homebind at the escape town for the cast,
-            // so the spell's OWN teleport (TeleportToHomebind) lands it there; HandleHearthCast (in
-            // UpdateAI) restores the homebind + re-anchors spawn on completion, or aborts on interrupt.
-            WorldLocation const& oldHome = me->GetHomebindLoc();
-            m_hearthSavedHomeMap = oldHome.mapId;
-            m_hearthSavedHomeX = oldHome.x; m_hearthSavedHomeY = oldHome.y; m_hearthSavedHomeZ = oldHome.z;
-            m_hearthSavedArea = me->GetHomeBindAreaId();
-            me->SetHomebindInMemory(WorldLocation((uint32)hmap, hx, hy, hz, 0.0f), 0);
-
-            me->CastSpell(me, AIBOT_HEARTH_SPELL_ID, false);
-            if (me->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr)
+            if ((int)me->GetMapId() == hmap)
             {
-                m_hearthX = hx; m_hearthY = hy; m_hearthZ = hz; m_hearthMap = hmap;
-                m_hearthElapsedMs = 0;
-                m_hearthActive = true;
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT] %s HEARTH cast begun (stranded escape): (%.1f, %.1f, %.1f) map=%u -> (%.1f, %.1f, %.1f) map=%d",
-                    me->GetName(), fx, fy, fz, fmap, hx, hy, hz, hmap);
+                // [FINDING_020 round 5] Land on WALKABLE ground, verified. Port to the requested home
+                // (the inn/FP coord); if that exact pixel is inside a wall / on a disconnected island,
+                // the core ring-searches outward for the nearest spot the bot can actually path from
+                // and lands there instead. No more "escaped into a wall".
+                TeleportToWalkable(hx, hy, hz, me->GetOrientation(), "port-home");
+                hx = me->GetPositionX(); hy = me->GetPositionY(); hz = me->GetPositionZ();   // reflect the validated landing
             }
             else
             {
-                // Hearth could not start (silenced / spell unavailable) — restore the homebind and
-                // fall back to the proven instant port so the escape still happens (never a regress
-                // to "stuck forever").
-                me->SetHomebindInMemory(
-                    WorldLocation(m_hearthSavedHomeMap, m_hearthSavedHomeX, m_hearthSavedHomeY, m_hearthSavedHomeZ, 0.0f),
-                    m_hearthSavedArea);
-                m_hearthActive = false;
-                if ((int)me->GetMapId() == hmap)
-                {
-                    TeleportToWalkable(hx, hy, hz, me->GetOrientation(), "port-home");
-                    hx = me->GetPositionX(); hy = me->GetPositionY(); hz = me->GetPositionZ();
-                }
-                else
-                {
-                    m_pendingWalkableLanding = true;
-                    m_pendingWalkableMap = (uint32)hmap;
-                    m_pendingWalkableX = hx;
-                    m_pendingWalkableY = hy;
-                    m_pendingWalkableZ = hz;
-                    me->TeleportTo((uint32)hmap, hx, hy, hz, me->GetOrientation());
-                }
-                m_spawnMapId = (uint32)hmap;
-                m_spawnX = hx; m_spawnY = hy; m_spawnZ = hz; m_spawnO = me->GetOrientation();
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT] %s PORT_HOME (instant fallback, hearth unavailable): (%.1f, %.1f, %.1f) map=%u -> (%.1f, %.1f, %.1f) map=%d",
-                    me->GetName(), fx, fy, fz, fmap, hx, hy, hz, hmap);
+                // Far teleports complete asynchronously, so validate against the destination
+                // navmesh on the first post-worldport UpdateAI tick (same guarantee as the
+                // immediate same-map TeleportToWalkable path above).
+                m_pendingWalkableLanding = true;
+                m_pendingWalkableMap = (uint32)hmap;
+                m_pendingWalkableX = hx;
+                m_pendingWalkableY = hy;
+                m_pendingWalkableZ = hz;
+                me->TeleportTo((uint32)hmap, hx, hy, hz, me->GetOrientation());
             }
+            // [FINDING_020] Re-anchor the "spawn" fallback to the home we just ported to. m_spawn* is
+            // the bot's LOGIN position (AiBotAI ctor), and the STRANDED / stalemate HARD-TELEPORT /
+            // no-graveyard rez paths all "port to spawn" — for the 43 bots that re-logged INSIDE the
+            // Menethil gate-tower pocket that anchor pointed straight back into the trap.
+            m_spawnMapId = (uint32)hmap;
+            m_spawnX = hx; m_spawnY = hy; m_spawnZ = hz; m_spawnO = me->GetOrientation();
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT] %s PORT_HOME (stranded escape): (%.1f, %.1f, %.1f) map=%u -> (%.1f, %.1f, %.1f) map=%d (spawn anchor re-based)",
+                me->GetName(), fx, fy, fz, fmap, hx, hy, hz, hmap);
         }
         else
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -2960,44 +2939,13 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         // Primary: zone-linked nearest graveyard for the death position.
         WorldSafeLocsEntry const* grave = sObjectMgr.GetClosestGraveYard(dx, dy, dz, mapId, me->GetTeam());
 
-        // [AIBOT-NEWBIE-GRAVE] Starter-valley graveyard gap: the starter SUB-zones (Coldridge
-        // Valley, Northshire, Shadowglen, Valley of Trials, Deathknell, Camp Narache, ...) have NO
-        // game_graveyard_zone link in the world DB, so the stock GetClosestGraveYard above falls back
-        // to the nearest MAIN-zone graveyard and flings a dead newbie clear out of its valley (a
-        // Coldridge death -> Kharanos, ~1300yd, observed live). For a low-level bot, if its racial
-        // START — the playercreateinfo spawn, which sits in the newbie valley by its spirit healer —
-        // is CLOSER to the death than the graveyard the core picked, rez THERE instead. Race-correct
-        // for every start (GetPlayerInfo by race/class); self-limiting: a newbie that genuinely died
-        // out by the main-zone graveyard keeps the stock pick (that one is then the closer of the two).
-        bool  newbieGrave = false;
-        float ngx = 0.0f, ngy = 0.0f, ngz = 0.0f;
-        if (me->GetLevel() <= AIBOT_NEWBIE_GRAVE_LEVEL)
-        {
-            if (PlayerInfo const* startInfo = sObjectMgr.GetPlayerInfo(me->GetRace(), me->GetClass()))
-            {
-                if ((int)startInfo->mapId == mapId)
-                {
-                    float const rsdx = startInfo->positionX - dx, rsdy = startInfo->positionY - dy;
-                    float const rsDistSq = rsdx * rsdx + rsdy * rsdy;
-                    float const gvDistSq = grave
-                        ? (grave->x - dx) * (grave->x - dx) + (grave->y - dy) * (grave->y - dy)
-                        : 1e18f;
-                    if (rsDistSq < gvDistSq)
-                    {
-                        newbieGrave = true;
-                        ngx = startInfo->positionX; ngy = startInfo->positionY; ngz = startInfo->positionZ;
-                    }
-                }
-            }
-        }
-
         // Fallback: the death pos resolves to a zone with NO graveyard link (areaId 0 /
         // out-of-bounds pocket — the Odugi/Haxixaw 200+ death loop). GetClosestGraveYard
         // returns null there, and the OLD code rez'd in place => infinite re-death. Probe
         // outward in rings; a probe point that lands in a REAL adjacent zone makes
         // GetClosestGraveYard return that zone's nearest valid, same-faction, level-
         // appropriate graveyard. Keep the hit closest to the actual death position.
-        if (!grave && !newbieGrave)
+        if (!grave)
         {
             static const float kRings[] = { 150.0f, 350.0f, 600.0f, 1000.0f };
             float bestSq = 0.0f;
@@ -3027,7 +2975,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 
         // Last resort: still nothing AND spawn point is on this map — port to spawn
         // (always a valid, level-appropriate starter loc). Never rez-in-place into the pocket.
-        if (!grave && !newbieGrave && m_spawnMapId == mapId)
+        if (!grave && m_spawnMapId == mapId)
         {
             // [GROUND] Spawn coords are authored, but ground them anyway so a bad spawn row
             // can't float the ghost. Local copy → snap → stash the grounded value so the
@@ -3046,7 +2994,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
             return;
         }
 
-        if (!grave && !newbieGrave)
+        if (!grave)
         {
             // Genuinely nowhere on this map (cross-map spawn + no graveyard) — degrade to the
             // old in-place rez, but log loudly so this rare case is visible if it ever bites.
@@ -3062,12 +3010,9 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         }
 
         // [GROUND] Graveyard rows are authored on the ground (no-op in the normal case), but
-        // snapping catches a bad/edge graveyard entry. A newbie override (racial start) wins over
-        // the stock pick — see [AIBOT-NEWBIE-GRAVE] above. const grave → local copy.
-        float gx, gy, gz;
-        if (newbieGrave) { gx = ngx; gy = ngy; gz = ngz; }
-        else             { gx = grave->x; gy = grave->y; gz = grave->z; }
-        ReGroundZ(gx, gy, gz, newbieGrave ? "rez-newbie-start" : "rez-grave");
+        // snapping catches a bad/edge graveyard entry. const grave → local copy.
+        float gx = grave->x, gy = grave->y, gz = grave->z;
+        ReGroundZ(gx, gy, gz, "rez-grave");
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT] %s graveyard port (ghost): (%.1f, %.1f, %.1f) -> (%.1f, %.1f, %.1f) map=%u",

@@ -203,6 +203,9 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotAIBridge.cpp
     SuperUiContent/SuiBots/AiBotAITeamPlay.cpp
     SuperUiContent/SuiBots/AiBotDoctrine.cpp
+    SuperUiContent/SuiBots/RaidPlanLaw.cpp
+    SuperUiContent/SuiBots/AiBotAIRaidPlan.cpp
+    SuperUiContent/SuiBots/AiBotDoctrineEncounter.cpp
     SuperUiContent/SuiBots/AiBotDoctrineSolo.cpp
     SuperUiContent/SuiBots/AiBotDoctrineTeam.cpp
     SuperUiContent/SuiBots/AiBotDoctrineDirected.cpp
