@@ -26,6 +26,13 @@
 #include <cstdio>
 #include <cstring>
 
+// [WIN-COMPAT] MSVC/Windows lacks the POSIX strtok_r used by the parsers below.
+// Map it to the equivalent strtok_s so this TU compiles on MSVC. (_WIN32 matches
+// the same guard AiBotAIBridge.cpp uses for its own strtok_r shim.)
+#ifdef _WIN32
+#define strtok_r strtok_s
+#endif
+
 // ============================================================
 // Minimal flat-JSON extractors (file-local, same contract as the
 // bridge's own: naive, flat keys only, good enough for machine-
