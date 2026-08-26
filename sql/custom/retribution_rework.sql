@@ -98,6 +98,37 @@ INSERT INTO `npc_trainer_template` (`entry`, `spell`, `spellcost`, `reqskill`, `
 (29, 40004, 0, 0, 0, 32), (29, 40005, 0, 0, 0, 40), (29, 40006, 0, 0, 0, 48), (29, 40007, 0, 0, 0, 56),
 (29, 40008, 0, 0, 0, 8),  (29, 40009, 0, 0, 0, 22), (29, 40010, 0, 0, 0, 36), (29, 40011, 0, 0, 0, 50), (29, 40012, 0, 0, 0, 60);
 
+-- Zealotry (40013) presentation fix (found from live testing, 2026-08-26): the
+-- Spell Creator clone above inherited Clearcasting's real gameplay shape
+-- verbatim -- correct for the mechanic (Spell.cpp/Unit.cpp reference 40013
+-- directly and only ever CastSpell(this, 40013, true) it server-side), but
+-- wrong for presentation. Two problems:
+--   1. rangeIndex 6 (40yd) with no SPELL_ATTR_PASSIVE meant a GM `.learn`ing it
+--      for testing saw it in the spellbook as a directly-castable, ranged
+--      instant spell -- Zealotry is only ever applied by the DealMeleeDamage
+--      proc, never player-cast. rangeIndex -> 1 (self) and attributes gains
+--      SPELL_ATTR_PASSIVE (327680 -> 327744, +0x40) -- the exact pattern
+--      MangosSuperUI's own SuiHero.cpp requires for its hidden hero buffs.
+--      HandleCastSpellOpcode rejects any client-issued cast of a passive
+--      spell outright, regardless of what a stale client DBC still shows.
+--   2. auraDescription still literally read Clearcasting's real tooltip
+--      ("Your next elemental damage spell has its mana cost reduced by
+--      $s1%.") -- the original clone only overrode name/icon, never
+--      description/tooltip. Fixed here on spell_template for documentation;
+--      spell_template.description/auraDescription are NOT what the client
+--      actually reads (see [[Spell Pages]]'s corrected-assumption note) --
+--      the real fix is `custom_spell_meta.tooltip` below, delivered via
+--      MSUI's `POST /Patch/RebuildClientPatch`. nameSubtext cleared too --
+--      "Rank 1" is meaningless on a single-rank passive.
+UPDATE `spell_template` SET
+    `attributes` = 327744, `rangeIndex` = 1, `nameSubtext` = '',
+    `auraDescription` = 'Holy Shock and, if the target is below 20% health, Hammer of Wrath have had their cooldowns reset. Your next Exorcism is instant and costs no mana.'
+WHERE `entry` = 40013;
+UPDATE `custom_spell_meta` SET
+    `tooltip` = 'Holy Shock and, if the target is below 20% health, Hammer of Wrath have had their cooldowns reset. Your next Exorcism is instant and costs no mana.',
+    `name_subtext` = ''
+WHERE `entry` = 40013;
+
 -- Spellbook categorization: being trainer-taught is NOT enough to land in the
 -- Paladin tab -- that's driven separately by `skill_line_ability`. The Spell
 -- Creator's own "auto-copy from source" step (PatchController.cs) only copies an
