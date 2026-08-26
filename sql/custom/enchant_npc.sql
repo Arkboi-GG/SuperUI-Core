@@ -5,5 +5,11 @@
 -- in-game with `.npc add 190000` wherever/whenever you're ready.
 
 DELETE FROM `creature_template` WHERE `entry` = 190000;
-INSERT INTO `creature_template` (`entry`, `patch`, `KillCredit1`, `KillCredit2`, `modelid_1`, `modelid_2`, `modelid_3`, `modelid_4`, `name`, `subname`, `gossip_menu_id`, `minlevel`, `maxlevel`, `minhealth`, `maxhealth`, `minmana`, `maxmana`, `armor`, `faction_A`, `faction_H`, `npcflag`, `speed_walk`, `speed_run`, `scale`, `rank`, `mindmg`, `maxdmg`, `dmgschool`, `attackpower`, `dmg_multiplier`, `baseattacktime`, `rangeattacktime`, `unit_class`, `unit_flags`, `dynamicflags`, `family`, `trainer_type`, `trainer_spell`, `trainer_class`, `trainer_race`, `minrangedmg`, `maxrangedmg`, `rangedattackpower`, `type`, `type_flags`, `lootid`, `pickpocketloot`, `skinloot`, `resistance1`, `resistance2`, `resistance3`, `resistance4`, `resistance5`, `resistance6`, `spell1`, `spell2`, `spell3`, `spell4`, `PetSpellDataId`, `mingold`, `maxgold`, `AIName`, `MovementType`, `InhabitType`, `Civilian`, `RacialLeader`, `RegenHealth`, `equipment_id`, `trainer_id`, `vendor_id`, `MechanicImmuneMask`, `SchoolImmuneMask`, `flags_extra`, `ScriptName`)
-VALUES (190000, 0, 0, 0, 6630, 0, 0, 0, 'Elowen Duskweave', 'Enchanter', 0, 60, 60, 4000, 5000, 200, 300, 200, 120, 120, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1000, 1000, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '', 0, 3, 1, 0, 1, 0, 0, 0, 0, 0, 0, 'custom_enchant_npc');
+INSERT INTO `creature_template`
+    (`entry`, `patch`, `name`, `subname`, `level_min`, `level_max`, `faction`, `npc_flags`,
+     `gossip_menu_id`, `display_id1`, `unit_class`, `civilian`, `movement_type`, `inhabit_type`,
+     `ai_name`, `script_name`)
+VALUES
+    (190000, 0, 'Elowen Duskweave', 'Enchanter', 60, 60, 120, 1,
+     0, 6630, 1, 1, 0, 3,
+     '', 'custom_enchant_npc');
