@@ -28,12 +28,25 @@ enum PlayerBotState
     PB_STATE_ONLINE
 };
 
+enum PlayerBotTalentProfileState
+{
+    PB_TALENT_PROFILE_UNCHECKED,
+    PB_TALENT_PROFILE_USABLE,
+    PB_TALENT_PROFILE_CONFLICT,
+    PB_TALENT_PROFILE_INVALID,
+    PB_TALENT_PROFILE_DISABLED,
+    PB_TALENT_PROFILE_ERROR,
+};
+
 struct PlayerBotEntry
 {
     uint64 playerGUID;
     std::string name;
     uint32 accountId;
 
+    uint8 specTab; // Class-local profile: 0..2; 255 means unassigned.
+    CombatBotRoles activeRole; // Persisted independently from the talent profile.
+    PlayerBotTalentProfileState talentProfileState; // Runtime compatibility result; UI derives its own DB view.
     uint32 chance;
     uint8 state; //Online, in queue or offline
     bool isChatBot; // bot des joueurs en discussion via le site.
@@ -41,9 +54,13 @@ struct PlayerBotEntry
     bool requestRemoval;
     std::unique_ptr<PlayerBotAI> ai;
 
-    PlayerBotEntry(uint64 guid, uint32 account, uint32 chance_): playerGUID(guid), accountId(account), chance(chance_), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
+    PlayerBotEntry(uint64 guid, uint32 account, uint32 chance_)
+        : playerGUID(guid), accountId(account), specTab(255), activeRole(ROLE_INVALID), talentProfileState(PB_TALENT_PROFILE_UNCHECKED),
+          chance(chance_), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
     {}
-    PlayerBotEntry(): playerGUID(0), accountId(0), chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
+    PlayerBotEntry()
+        : playerGUID(0), accountId(0), specTab(255), activeRole(ROLE_INVALID), talentProfileState(PB_TALENT_PROFILE_UNCHECKED),
+          chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
     {}
 };
 

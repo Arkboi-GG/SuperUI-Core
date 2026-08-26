@@ -129,6 +129,13 @@ void CombatBotBaseAI::ResetSpellData()
     m_spellListDirectHeal.clear();
     m_spellListPeriodicHeal.clear();
     m_spellListTaunt.clear();
+    m_knownSpellRanks.clear();
+}
+
+SpellEntry const* CombatBotBaseAI::GetHighestKnownRank(uint32 firstRankSpellId) const
+{
+    auto const itr = m_knownSpellRanks.find(firstRankSpellId);
+    return itr != m_knownSpellRanks.end() ? itr->second : nullptr;
 }
 
 void CombatBotBaseAI::PopulateSpellData()
@@ -213,6 +220,15 @@ void CombatBotBaseAI::PopulateSpellData()
         SpellEntry const* pSpellEntry = sSpellMgr.GetSpellEntry(spell.first);
         if (!pSpellEntry)
             continue;
+
+        // Key every learned spell by its first rank.  Unlike the legacy name
+        // switch below this is locale independent and also covers talent spells
+        // that are intentionally absent from the fixed 45-pointer union.
+        uint32 const firstRankId = sSpellMgr.GetFirstSpellInChain(pSpellEntry->Id);
+        auto knownItr = m_knownSpellRanks.find(firstRankId);
+        if (knownItr == m_knownSpellRanks.end() ||
+            sSpellMgr.IsHighRankOfSpell(pSpellEntry->Id, knownItr->second->Id))
+            m_knownSpellRanks[firstRankId] = pSpellEntry;
 
         if (pSpellEntry->HasAttribute(SPELL_ATTR_PASSIVE))
             continue;
@@ -545,7 +561,7 @@ void CombatBotBaseAI::PopulateSpellData()
                     if (IsHigherRankSpell(pFireResistanceTotem))
                         pFireResistanceTotem = pSpellEntry;
                 }
-                else if (pSpellEntry->SpellName[0].find("Disease Resistance Totem") != std::string::npos)
+                else if (pSpellEntry->SpellName[0].find("Disease Cleansing Totem") != std::string::npos)
                 {
                     if (IsHigherRankSpell(pDiseaseCleansingTotem))
                         pDiseaseCleansingTotem = pSpellEntry;
@@ -1637,54 +1653,104 @@ void CombatBotBaseAI::PopulateSpellData()
     {
         case CLASS_PALADIN:
         {
-            if (pSealOfFury && m_role == ROLE_TANK)
-                m_spells.paladin.pSeal = pSealOfFury;
-            else if (pSealOfCommand)
-                m_spells.paladin.pSeal = pSealOfCommand;
-            else
-                m_spells.paladin.pSeal = pSealOfRighteousness;
-
-            if (pBlessingOfSanctuary && m_role == ROLE_TANK)
-                m_spells.paladin.pBlessingBuff = pBlessingOfSanctuary;
+            uint8 const spec = GetCombatSpecTab();
+            if (spec <= 2)
+            {
+                // Holy / Protection / Retribution: stable, role-appropriate
+                // loadouts.  Resistance auras remain available to explicit raid
+                // plans, but never replace the spec's baseline at random.
+                if (spec == 1)
+                {
+                    m_spells.paladin.pSeal = pSealOfFury ? pSealOfFury : pSealOfRighteousness;
+                    m_spells.paladin.pBlessingBuff = pBlessingOfSanctuary ? pBlessingOfSanctuary :
+                        (pBlessingOfKings ? pBlessingOfKings : pBlessingOfMight);
+                    m_spells.paladin.pAura = pDevotionAura ? pDevotionAura : pRetributionAura;
+                }
+                else if (spec == 2)
+                {
+                    m_spells.paladin.pSeal = pSealOfCommand ? pSealOfCommand : pSealOfRighteousness;
+                    m_spells.paladin.pBlessingBuff = pBlessingOfMight ? pBlessingOfMight : pBlessingOfKings;
+                    m_spells.paladin.pAura = pSanctityAura ? pSanctityAura :
+                        (pRetributionAura ? pRetributionAura : pDevotionAura);
+                }
+                else
+                {
+                    m_spells.paladin.pSeal = pSealOfRighteousness;
+                    m_spells.paladin.pBlessingBuff = pBlessingOfWisdom ? pBlessingOfWisdom :
+                        (pBlessingOfKings ? pBlessingOfKings : pBlessingOfLight);
+                    m_spells.paladin.pAura = pConcentrationAura ? pConcentrationAura : pDevotionAura;
+                }
+            }
             else
             {
-                std::vector<SpellEntry const*> blessings;
-                if (pBlessingOfLight)
-                    blessings.push_back(pBlessingOfLight);
-                if (pBlessingOfMight)
-                    blessings.push_back(pBlessingOfMight);
-                if (pBlessingOfWisdom)
-                    blessings.push_back(pBlessingOfWisdom);
-                if (pBlessingOfKings)
-                    blessings.push_back(pBlessingOfKings);
-                if (pBlessingOfSanctuary)
-                    blessings.push_back(pBlessingOfSanctuary);
-                if (!blessings.empty())
-                    m_spells.paladin.pBlessingBuff = SelectRandomContainerElement(blessings);
-            }
+                if (pSealOfFury && m_role == ROLE_TANK)
+                    m_spells.paladin.pSeal = pSealOfFury;
+                else if (pSealOfCommand)
+                    m_spells.paladin.pSeal = pSealOfCommand;
+                else
+                    m_spells.paladin.pSeal = pSealOfRighteousness;
 
-            std::vector<SpellEntry const*> auras;
-            if (pDevotionAura)
-                auras.push_back(pDevotionAura);
-            if (pConcentrationAura)
-                auras.push_back(pConcentrationAura);
-            if (pRetributionAura)
-                auras.push_back(pRetributionAura);
-            if (pSanctityAura)
-                auras.push_back(pSanctityAura);
-            if (pShadowResistanceAura)
-                auras.push_back(pShadowResistanceAura);
-            if (pFrostResistanceAura)
-                auras.push_back(pFrostResistanceAura);
-            if (pFireResistanceAura)
-                auras.push_back(pFireResistanceAura);
-            if (!auras.empty())
-                m_spells.paladin.pAura = SelectRandomContainerElement(auras);
+                if (pBlessingOfSanctuary && m_role == ROLE_TANK)
+                    m_spells.paladin.pBlessingBuff = pBlessingOfSanctuary;
+                else
+                {
+                    std::vector<SpellEntry const*> blessings;
+                    if (pBlessingOfLight) blessings.push_back(pBlessingOfLight);
+                    if (pBlessingOfMight) blessings.push_back(pBlessingOfMight);
+                    if (pBlessingOfWisdom) blessings.push_back(pBlessingOfWisdom);
+                    if (pBlessingOfKings) blessings.push_back(pBlessingOfKings);
+                    if (pBlessingOfSanctuary) blessings.push_back(pBlessingOfSanctuary);
+                    if (!blessings.empty())
+                        m_spells.paladin.pBlessingBuff = SelectRandomContainerElement(blessings);
+                }
+
+                std::vector<SpellEntry const*> auras;
+                if (pDevotionAura) auras.push_back(pDevotionAura);
+                if (pConcentrationAura) auras.push_back(pConcentrationAura);
+                if (pRetributionAura) auras.push_back(pRetributionAura);
+                if (pSanctityAura) auras.push_back(pSanctityAura);
+                if (pShadowResistanceAura) auras.push_back(pShadowResistanceAura);
+                if (pFrostResistanceAura) auras.push_back(pFrostResistanceAura);
+                if (pFireResistanceAura) auras.push_back(pFireResistanceAura);
+                if (!auras.empty())
+                    m_spells.paladin.pAura = SelectRandomContainerElement(auras);
+            }
 
             break;
         }
         case CLASS_SHAMAN:
         {
+            uint8 const spec = GetCombatSpecTab();
+            if (spec <= 2)
+            {
+                if (spec == 1) // Enhancement
+                {
+                    m_spells.shaman.pAirTotem = pWindfuryTotem ? pWindfuryTotem : pGraceOfAirTotem;
+                    m_spells.shaman.pEarthTotem = pStrengthOfEarthTotem ? pStrengthOfEarthTotem : pStoneskinTotem;
+                    m_spells.shaman.pFireTotem = pSearingTotem ? pSearingTotem : pMagmaTotem;
+                    m_spells.shaman.pWaterTotem = pHealingStreamTotem ? pHealingStreamTotem : pManaSpringTotem;
+                    m_spells.shaman.pWeaponBuff = pWindfuryWeapon ? pWindfuryWeapon :
+                        (pRockbiterWeapon ? pRockbiterWeapon : pFrostbrandWeapon);
+                }
+                else if (spec == 2) // Restoration
+                {
+                    m_spells.shaman.pAirTotem = pTranquilAirTotem ? pTranquilAirTotem : pGraceOfAirTotem;
+                    m_spells.shaman.pEarthTotem = pStoneskinTotem ? pStoneskinTotem : pStrengthOfEarthTotem;
+                    m_spells.shaman.pFireTotem = pSearingTotem;
+                    m_spells.shaman.pWaterTotem = pManaSpringTotem ? pManaSpringTotem : pHealingStreamTotem;
+                    m_spells.shaman.pWeaponBuff = pRockbiterWeapon ? pRockbiterWeapon : pFrostbrandWeapon;
+                }
+                else // Elemental
+                {
+                    m_spells.shaman.pAirTotem = pTranquilAirTotem ? pTranquilAirTotem : pGraceOfAirTotem;
+                    m_spells.shaman.pEarthTotem = pStoneskinTotem ? pStoneskinTotem : pStrengthOfEarthTotem;
+                    m_spells.shaman.pFireTotem = pSearingTotem ? pSearingTotem : pMagmaTotem;
+                    m_spells.shaman.pWaterTotem = pManaSpringTotem ? pManaSpringTotem : pHealingStreamTotem;
+                    m_spells.shaman.pWeaponBuff = pFrostbrandWeapon ? pFrostbrandWeapon : pRockbiterWeapon;
+                }
+                break;
+            }
+
             std::vector<SpellEntry const*> airTotems;
             if (pGraceOfAirTotem)
                 airTotems.push_back(pGraceOfAirTotem);
@@ -1773,7 +1839,8 @@ void CombatBotBaseAI::PopulateSpellData()
             if (pPolymorphTurtle)
                 polymorph.push_back(pPolymorphTurtle);
             if (!polymorph.empty())
-                m_spells.mage.pPolymorph = SelectRandomContainerElement(polymorph);
+                m_spells.mage.pPolymorph = GetCombatSpecTab() <= 2 && pPolymorphSheep ?
+                    pPolymorphSheep : SelectRandomContainerElement(polymorph);
 
             break;
         }
@@ -1799,22 +1866,41 @@ void CombatBotBaseAI::PopulateSpellData()
             };
 
             SpellEntry const* pPoisonSpell = nullptr;
+            SpellEntry const* pDeadlyPoison = nullptr;
+            SpellEntry const* pInstantPoison = nullptr;
+            SpellEntry const* pCripplingPoison = nullptr;
+            SpellEntry const* pWoundPoison = nullptr;
             std::vector<SpellEntry const*> vPoisons;
             if (hasDeadlyPoison && (pPoisonSpell = GetHighestRankOfPoisonByName("Deadly Poison", me->GetLevel())))
-                vPoisons.push_back(pPoisonSpell);
+                vPoisons.push_back(pDeadlyPoison = pPoisonSpell);
             if (hasInstantPoison && (pPoisonSpell = GetHighestRankOfPoisonByName("Instant Poison", me->GetLevel())))
-                vPoisons.push_back(pPoisonSpell);
+                vPoisons.push_back(pInstantPoison = pPoisonSpell);
             if (hasCripplingPoison && (pPoisonSpell = GetHighestRankOfPoisonByName("Crippling Poison", me->GetLevel())))
-                vPoisons.push_back(pPoisonSpell);
+                vPoisons.push_back(pCripplingPoison = pPoisonSpell);
             if (hasWoundPoison && (pPoisonSpell = GetHighestRankOfPoisonByName("Wound Poison", me->GetLevel())))
-                vPoisons.push_back(pPoisonSpell);
+                vPoisons.push_back(pWoundPoison = pPoisonSpell);
             if (HasMindNumbingPoison && (pPoisonSpell = GetHighestRankOfPoisonByName("Mind-numbing Poison", me->GetLevel())))
                 vPoisons.push_back(pPoisonSpell);
 
             if (!vPoisons.empty())
             {
-                m_spells.rogue.pMainHandPoison = SelectRandomContainerElement(vPoisons);
-                m_spells.rogue.pOffHandPoison = SelectRandomContainerElement(vPoisons);
+                uint8 const spec = GetCombatSpecTab();
+                if (spec <= 2)
+                {
+                    m_spells.rogue.pMainHandPoison = pInstantPoison ? pInstantPoison :
+                        (pWoundPoison ? pWoundPoison : vPoisons.front());
+                    if (spec == 0)
+                        m_spells.rogue.pOffHandPoison = pDeadlyPoison ? pDeadlyPoison :
+                            (pInstantPoison ? pInstantPoison : vPoisons.front());
+                    else
+                        m_spells.rogue.pOffHandPoison = pCripplingPoison ? pCripplingPoison :
+                            (pWoundPoison ? pWoundPoison : vPoisons.front());
+                }
+                else
+                {
+                    m_spells.rogue.pMainHandPoison = SelectRandomContainerElement(vPoisons);
+                    m_spells.rogue.pOffHandPoison = SelectRandomContainerElement(vPoisons);
+                }
             }
 
             break;
@@ -1987,45 +2073,57 @@ bool CombatBotBaseAI::IsValidHealTarget(Unit const* pTarget, float healthPercent
 
 Unit* CombatBotBaseAI::SelectHealTarget(float selfHealPercent, float groupHealPercent) const
 {
-    if (me->GetHealthPercent() < selfHealPercent)
-        return me;
-
-    if (IsInDuel())
-        return nullptr;
-
     Unit* pTarget = nullptr;
     float healthPercent = 100.0f;
 
-    if (Group* pGroup = me->GetGroup())
+    if (me->GetHealthPercent() < selfHealPercent)
     {
-        for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
-        {
-            if (Unit* pMember = itr->getSource())
-            {
-                // We already checked self.
-                if (pMember == me)
-                    continue;
-
-                // Avoid all healers picking same target.
-                if (pTarget && !IsTankClass(pMember->GetClass()) && AreOthersOnSameTarget(pMember->GetObjectGuid(), false, true))
-                    continue;
-
-                // Check if we should heal party member.
-                if ((IsValidHealTarget(pMember, groupHealPercent) &&
-                    healthPercent > pMember->GetHealthPercent()) ||
-                    // Or a pet if there are no injured players.
-                    (!pTarget && (pMember = pMember->GetPet()) &&
-                      IsValidHealTarget(pMember, groupHealPercent)))
-                {
-                    healthPercent = pMember->GetHealthPercent();
-                    pTarget = pMember;
-                }
-            }
-        }
+        pTarget = me;
+        healthPercent = me->GetHealthPercent();
     }
 
-    if (healthPercent == 100.0f)
-        return nullptr;
+    // Duel assistance remains self-only.
+    if (IsInDuel())
+        return pTarget;
+
+    if (Group* pGroup = me->GetGroup())
+    {
+        // Players always take priority over pets.  Seeded self remains the
+        // choice unless an eligible party member is at lower health.
+        for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* pMember = itr->getSource();
+            if (!pMember || pMember == me ||
+                !IsValidHealTarget(pMember, groupHealPercent) ||
+                healthPercent <= pMember->GetHealthPercent())
+                continue;
+
+            // Avoid all healers picking the same non-tank target once this
+            // healer already has a viable candidate.
+            if (pTarget && !IsTankClass(pMember->GetClass()) &&
+                AreOthersOnSameTarget(pMember->GetObjectGuid(), false, true))
+                continue;
+
+            healthPercent = pMember->GetHealthPercent();
+            pTarget = pMember;
+        }
+
+        if (pTarget)
+            return pTarget;
+
+        // Heal a pet only when no player (including self) needs healing.
+        for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* pMember = itr->getSource();
+            Unit* pPet = pMember ? pMember->GetPet() : nullptr;
+            if (!pPet || !IsValidHealTarget(pPet, groupHealPercent) ||
+                healthPercent <= pPet->GetHealthPercent())
+                continue;
+
+            healthPercent = pPet->GetHealthPercent();
+            pTarget = pPet;
+        }
+    }
 
     return pTarget;
 }
@@ -2351,9 +2449,29 @@ void CombatBotBaseAI::SummonPetIfNeeded()
             return;
         }
 
-        uint32 petId = PickRandomValue( PET_WOLF, PET_CAT, PET_BEAR, PET_CRAB, PET_GORILLA, PET_BIRD,
-                                        PET_BOAR, PET_BAT, PET_CROC, PET_SPIDER, PET_OWL, PET_STRIDER,
-                                        PET_SCORPID, PET_SERPENT, PET_RAPTOR, PET_TURTLE, PET_HYENA );
+        uint32 petId;
+        switch (GetCombatSpecTab())
+        {
+            case 0: petId = PET_WOLF; break; // Beast Mastery: durable all-purpose pet
+            case 1: petId = PET_CAT;  break; // Marksmanship: fast damage pet
+            case 2: petId = PET_BOAR; break; // Survival: reliable charge/control pet
+            default:
+                // Unassigned spec tames like a real hunter of this race would:
+                // the fauna of its homeland, never the world zoo (a gorilla in
+                // Northshire is impossible in vanilla — owner 2026-08-25).
+                switch (me->GetRace())
+                {
+                    case RACE_ORC:      petId = PickRandomValue(PET_WOLF, PET_BOAR, PET_SCORPID, PET_RAPTOR); break;
+                    case RACE_TROLL:    petId = PickRandomValue(PET_RAPTOR, PET_CAT, PET_SPIDER, PET_BAT); break;
+                    case RACE_TAUREN:   petId = PickRandomValue(PET_STRIDER, PET_WOLF, PET_BOAR); break;
+                    case RACE_UNDEAD:   petId = PickRandomValue(PET_SPIDER, PET_BAT, PET_WOLF); break;
+                    case RACE_DWARF:
+                    case RACE_GNOME:    petId = PickRandomValue(PET_BEAR, PET_BOAR, PET_WOLF, PET_OWL); break;
+                    case RACE_NIGHTELF: petId = PickRandomValue(PET_CAT, PET_OWL, PET_SPIDER, PET_BEAR); break;
+                    default:            petId = PickRandomValue(PET_WOLF, PET_CAT, PET_BOAR); break;
+                }
+                break;
+        }
         if (Creature* pCreature = me->SummonCreature(petId,
             me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), 0.0f,
             TEMPSUMMON_TIMED_COMBAT_OR_DEAD_DESPAWN, 3000, false, 3000))
@@ -2377,29 +2495,122 @@ void CombatBotBaseAI::SummonPetIfNeeded()
         if (me->HasSpell(SPELL_SUMMON_SUCCUBUS))
             vSummons.push_back(SPELL_SUMMON_SUCCUBUS);
         if (!vSummons.empty())
-            me->CastSpell(me, SelectRandomContainerElement(vSummons), true);
+        {
+            uint32 summon = 0;
+            uint8 const spec = GetCombatSpecTab();
+            if (spec == 0 && me->HasSpell(SPELL_SUMMON_VOIDWALKER))
+                summon = SPELL_SUMMON_VOIDWALKER;
+            else if (spec == 1)
+            {
+                // Demonology keeps one stable encounter pet.  Prefer the
+                // mature control pet, then the durable quest pet, and use the
+                // Imp only until those class abilities have been learned.
+                if (me->HasSpell(SPELL_SUMMON_FELHUNTER))
+                    summon = SPELL_SUMMON_FELHUNTER;
+                else if (me->HasSpell(SPELL_SUMMON_VOIDWALKER))
+                    summon = SPELL_SUMMON_VOIDWALKER;
+                else if (me->HasSpell(SPELL_SUMMON_IMP))
+                    summon = SPELL_SUMMON_IMP;
+                else
+                    summon = vSummons.front();
+            }
+            else if (spec == 2 && me->HasSpell(SPELL_SUMMON_IMP))
+                summon = SPELL_SUMMON_IMP;
+            else if (spec <= 2)
+                summon = vSummons.front();
+            else
+                summon = SelectRandomContainerElement(vSummons);
+            me->CastSpell(me, summon, true);
+        }
     }
 }
 
-void CombatBotBaseAI::LearnArmorProficiencies()
+uint32 CombatBotBaseAI::LearnArmorProficiencies()
 {
+    uint32 learned = 0;
     switch (me->GetClass())
     {
         case CLASS_WARRIOR:
         case CLASS_PALADIN:
         {
             if (me->GetLevel() >= 40 && !me->HasSpell(SPELL_PLATE_PROFICIENCY))
+            {
                 me->LearnSpell(SPELL_PLATE_PROFICIENCY, false, false);
+                ++learned;
+            }
             break;
         }
         case CLASS_HUNTER:
         case CLASS_SHAMAN:
         {
             if (me->GetLevel() >= 40 && !me->HasSpell(SPELL_MAIL_PROFICIENCY))
+            {
                 me->LearnSpell(SPELL_MAIL_PROFICIENCY, false, false);
+                ++learned;
+            }
             break;
         }
     }
+    return learned;
+}
+
+uint32 CombatBotBaseAI::LearnBotClassQuestSpells()
+{
+    struct ClassQuestSpell
+    {
+        uint8 playerClass;
+        uint8 requiredLevel;
+        uint32 spellId;
+    };
+
+    // These are class quest/fundamental abilities present in the old premade
+    // templates but absent from trainer/item teaching in build 5875.  Keep the
+    // list explicit: importing whole premade templates would also import their
+    // obsolete talent spells and conflict with the persisted talent profile.
+    static ClassQuestSpell const spells[] =
+    {
+        { CLASS_WARRIOR, 10, 71 }, { CLASS_WARRIOR, 10, 355 },
+        { CLASS_WARRIOR, 10, 7386 }, { CLASS_WARRIOR, 30, 2458 },
+        { CLASS_WARRIOR, 30, 20252 }, { CLASS_WARRIOR, 20, 674 },
+        { CLASS_PALADIN, 12, 7328 }, { CLASS_PALADIN, 40, 13819 },
+        { CLASS_PALADIN, 60, 23214 },
+        { CLASS_HUNTER, 10, 883 }, { CLASS_HUNTER, 10, 982 },
+        { CLASS_HUNTER, 10, 1515 }, { CLASS_HUNTER, 10, 2641 },
+        { CLASS_HUNTER, 10, 6991 }, { CLASS_HUNTER, 10, 5149 },
+        { CLASS_HUNTER, 24, 1462 },
+        { CLASS_HUNTER, 20, 674 },
+        { CLASS_ROGUE, 16, 1804 }, { CLASS_ROGUE, 20, 2842 }, { CLASS_ROGUE, 10, 674 },
+        { CLASS_SHAMAN, 6, 2484 }, { CLASS_SHAMAN, 10, 3599 },
+        { CLASS_SHAMAN, 20, 5394 }, { CLASS_SHAMAN, 20, 2645 },
+        { CLASS_SHAMAN, 30, 20608 }, { CLASS_SHAMAN, 32, 8512 },
+        { CLASS_WARLOCK, 1, 688 }, { CLASS_WARLOCK, 10, 697 },
+        { CLASS_WARLOCK, 10, 6201 }, { CLASS_WARLOCK, 20, 712 },
+        { CLASS_WARLOCK, 30, 691 }, { CLASS_WARLOCK, 40, 5784 },
+        { CLASS_WARLOCK, 60, 23161 },
+        { CLASS_DRUID, 10, 5487 }, { CLASS_DRUID, 10, 6795 },
+        { CLASS_DRUID, 16, 1066 },
+        { CLASS_DRUID, 20, 768 }, { CLASS_DRUID, 30, 783 },
+        { CLASS_DRUID, 40, 9634 },
+    };
+
+    uint32 learned = 0;
+    for (ClassQuestSpell const& spell : spells)
+    {
+        if (spell.playerClass != me->GetClass() ||
+            spell.requiredLevel > me->GetLevel() || me->HasSpell(spell.spellId) ||
+            !sSpellMgr.GetSpellEntry(spell.spellId))
+            continue;
+
+        me->LearnSpell(spell.spellId, false, false);
+        ++learned;
+    }
+    return learned;
+}
+
+void CombatBotBaseAI::LearnTrainerAndItemSpells()
+{
+    ChatHandler(me).HandleLearnAllTrainerCommand("");
+    ChatHandler(me).HandleLearnAllItemsCommand("");
 }
 
 void CombatBotBaseAI::LearnPremadeSpecForClass()
@@ -2802,6 +3013,26 @@ void CombatBotBaseAI::AutoEquipGear(uint32 option)
 
 bool CombatBotBaseAI::CanTryToCastSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const
 {
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, false);
+}
+
+bool CombatBotBaseAI::CanTryToCastStackingSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const
+{
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, true, false);
+}
+
+bool CombatBotBaseAI::CanTryToCastSpellAfterLeavingForm(Unit const* pTarget,
+                                                        SpellEntry const* pSpellEntry) const
+{
+    if (!pTarget || !pSpellEntry || me->GetShapeshiftForm() == FORM_NONE ||
+        pSpellEntry->GetErrorAtShapeshiftedCast(me->GetShapeshiftForm()) == SPELL_CAST_OK)
+        return false;
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, true);
+}
+
+bool CombatBotBaseAI::CanTryToCastSpellInternal(Unit const* pTarget, SpellEntry const* pSpellEntry,
+                                                bool allowExistingAuraStack, bool ignoreShapeshift) const
+{
     if (m_preventCasting)
         return false;
 
@@ -2835,11 +3066,20 @@ bool CombatBotBaseAI::CanTryToCastSpell(Unit const* pTarget, SpellEntry const* p
     if (pTarget->IsImmuneToSpell(pSpellEntry, false))
         return false;
 
-    if (pSpellEntry->GetErrorAtShapeshiftedCast(me->GetShapeshiftForm()) != SPELL_CAST_OK)
+    if (!ignoreShapeshift &&
+        pSpellEntry->GetErrorAtShapeshiftedCast(me->GetShapeshiftForm()) != SPELL_CAST_OK)
         return false;
 
     if (pSpellEntry->IsSpellAppliesAura() && pTarget->HasAura(pSpellEntry->Id))
-        return false;
+    {
+        if (!allowExistingAuraStack)
+            return false;
+
+        SpellAuraHolder* holder = pTarget->GetSpellAuraHolder(pSpellEntry->Id);
+        if (!holder || !pSpellEntry->StackAmount ||
+            holder->GetStackAmount() >= pSpellEntry->StackAmount)
+            return false;
+    }
 
     SpellRangeEntry const* srange = sSpellRangeStore.LookupEntry(pSpellEntry->rangeIndex);
     if (me != pTarget && pSpellEntry->EffectImplicitTargetA[0] != TARGET_UNIT_CASTER)
@@ -3016,7 +3256,7 @@ void CombatBotBaseAI::UpdateVisualHonorRankBasedOnItems()
     me->SetByteValue(PLAYER_FIELD_BYTES, PLAYER_FIELD_BYTES_OFFSET_HIGHEST_HONOR_RANK, m_visualHonorRank);
 }
 
-bool CombatBotBaseAI::SummonShamanTotems()
+bool CombatBotBaseAI::SummonShamanTotems(bool allowFireTotem)
 {
     if (m_spells.shaman.pAirTotem &&
         !me->GetTotem(TOTEM_SLOT_AIR) &&
@@ -3034,7 +3274,7 @@ bool CombatBotBaseAI::SummonShamanTotems()
             return true;
     }
 
-    if (m_spells.shaman.pFireTotem &&
+    if (allowFireTotem && m_spells.shaman.pFireTotem &&
         !me->GetTotem(TOTEM_SLOT_FIRE) &&
         CanTryToCastSpell(me, m_spells.shaman.pFireTotem))
     {

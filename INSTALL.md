@@ -55,7 +55,7 @@ The missing columns make the query fail and mangosd exits at **`[PlayerBotMgr] L
   mysql -u mangos -pmangos characters < sql/migrations/20260820120000_characters.sql
   ```
 
-### 2b. `vmangos_admin.lootifier_generated_items` — required, or mangosd won't finish loading
+### 2b. Shared `vmangos_admin` prerequisites
 
 SuperUI-Core's Lootifier makes the **core** read this table while loading quest reward variants:
 
@@ -68,7 +68,9 @@ Your database structure is not up to date...
 ```
 
 It lives in the `vmangos_admin` database (shared with MangosSuperUI). Create it **before
-first boot** — the web app that would otherwise create it may not have run yet:
+first boot** — the web app that would otherwise create it may not have run yet. The same
+idempotent script also creates MangosSuperUI's durable `bot_combat_loadout_queue`, so a
+fresh core + web setup has the queue and its dispatch indexes before the web service starts:
 
 ```bash
 sudo mysql -e "CREATE DATABASE IF NOT EXISTS vmangos_admin; GRANT ALL PRIVILEGES ON vmangos_admin.* TO 'mangos'@'localhost'; FLUSH PRIVILEGES;"
@@ -95,11 +97,13 @@ See [`sql/superui/README.md`](sql/superui/README.md) for the table-by-table brea
 ```bash
 # playerbot should report 12 columns
 mysql -u mangos -pmangos -e "SELECT COUNT(*) AS playerbot_cols FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='characters' AND TABLE_NAME='playerbot';"
-# lootifier table should exist (no 1146 error)
+# shared admin prerequisite tables should exist (no 1146 error)
 mysql -u mangos -pmangos -e "SELECT 'ok' FROM vmangos_admin.lootifier_generated_items LIMIT 0;"
+mysql -u mangos -pmangos -e "SELECT 'ok' FROM vmangos_admin.bot_combat_loadout_queue LIMIT 0;"
 ```
 
-If both pass, mangosd will load the world instead of terminating.
+The `playerbot` and Lootifier checks are what gate mangosd startup; the queue check confirms
+the paired MangosSuperUI install is ready for durable combat-build requests.
 
 ---
 

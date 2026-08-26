@@ -74,6 +74,13 @@ namespace SuiPossess
         ORDER_PATROL = 4,       // loop the queued waypoints until MOVE/STOP clears them
         ORDER_FOLLOW = 5,       // targetGuid = group member to escort; empty = auto split
         ORDER_LINK = 6,         // x >= 0.5 links the member into the chain; else unlinks
+        // 7 is reserved: the Windows client already emits ORDER_AUTO_GROUP = 7
+        // from its control-group palette; implementing it is separate work.
+        ORDER_FORMATION_LINE   = 8,   // standing army: ranks of five facing the commander
+        ORDER_FORMATION_CIRCLE = 9,   // evenly spaced ring around the anchor, facing out
+        ORDER_SHEATH           = 10,  // x >= 0.5 draws weapons; else sheathes until combat
+        ORDER_CONSCRIPT        = 11,  // enlist: the brain planner stands down for these bots
+        ORDER_DISMISS          = 12,  // muster out: the brain resumes questing in place
     };
 
     // SMSG_SUI_CONTROL_ROSTER member flags
@@ -81,6 +88,7 @@ namespace SuiPossess
     {
         ROSTER_CONTROLLABLE = 0x01,    // AiBot in your group you may possess
         ROSTER_POSSESSED    = 0x02,    // currently driven by a real player
+        ROSTER_CONSCRIPTED  = 0x04,    // enlisted in someone's RTS army (brain off)
     };
 
     /// Attempt possession. Sends the ACK (grant or deny) itself.
@@ -142,8 +150,91 @@ namespace SuiPossess
     // ── Roster ────────────────────────────────────────────────────────────────
     /// Push SMSG_SUI_CONTROL_ROSTER to one real player (their current group view).
     void SendRoster(Player* realPlayer);
-    /// Push the roster to every real-session member of a group.
+    /// Push the roster to every real-session member of a group. A member-facts
+    /// era roster edge also re-pushes every party AiBot's bags + known spells
+    /// to each real SUI member (party = full facts, faction = orders).
     void BroadcastRoster(Group* group);
+
+    // ── Party member facts (owner decision 2026-08-25) ────────────────────────
+    /// CMSG_SUI_MEMBER_FACTS: push the inventory snapshot + known spells of
+    /// party/raid AiBot members to the asking real player, no possession
+    /// required. Empty subjects = every AiBot in the requester's group.
+    /// Rate-limited per session, independent of movement. Faction-control
+    /// authority is deliberately NOT sufficient — same-group membership is.
+    void HandleMemberFacts(WorldSession* session,
+        std::vector<ObjectGuid> const& subjects);
+
+    // ── Party quest facts (PLAN_20 P1) ────────────────────────────────────────
+    /// CMSG_SUI_QUEST_FACTS: push the quest logs of party/raid members to the
+    /// asking real player. Empty subjects = the whole group AND the requester's
+    /// own character — the latter is the only way a client can see quests it
+    /// holds past the twenty update-field slots. Rate-limited per session,
+    /// separately from the bag/spell pull.
+    void HandleQuestFacts(WorldSession* session,
+        std::vector<ObjectGuid> const& subjects);
+
+    // ── Party quest acts (PLAN_20 P3) ─────────────────────────────────────────
+    /// SMSG_SUI_PARTY_QUEST_RESULT codes. Fine-grained on purpose: a party act
+    /// must be able to say WHICH member was refused and WHY.
+    enum PartyQuestResult : uint8
+    {
+        PARTY_QUEST_OK               = 0,
+        PARTY_QUEST_DENIED           = 1,   // not on the party line / no authority
+        PARTY_QUEST_REQUIREMENTS     = 2,   // level, prerequisites, race, class
+        PARTY_QUEST_LOG_FULL         = 3,   // Quests.MaxHeld reached
+        PARTY_QUEST_NO_QUEST         = 4,   // giver does not offer/end it, or not in their log
+        PARTY_QUEST_TOO_FAR          = 5,   // outside share range, or cannot interact
+        PARTY_QUEST_BAD_REWARD       = 6,   // reward index outside the quest's choices
+        PARTY_QUEST_CANNOT_REWARD    = 7,   // bags full, not complete, already rewarded
+        PARTY_QUEST_ALREADY_HELD     = 8,   // accept: already in their log (benign)
+        PARTY_QUEST_ALREADY_REWARDED = 9,   // accept: already turned in
+        PARTY_QUEST_NEEDS_CHOICE     = 10,  // turn-in: "auto" asked for, nobody to choose
+        PARTY_QUEST_CANNOT_ABANDON   = 11,  // quest start items cannot be un-equipped
+    };
+
+    /// One subject of a party quest act. Deliberately a local POD rather than the
+    /// wire packet's nested type: this header sees only Common.h and ObjectGuid.h,
+    /// and HandleMemberFacts/HandleQuestFacts already keep the packet types on the
+    /// session-shim side of the boundary.
+    struct PartyQuestSubject
+    {
+        ObjectGuid guid;
+        uint8 rewardChoice = 0;   // 255 = let the server choose
+    };
+
+    /// CMSG_SUI_PARTY_QUEST: act on a quest for an explicit set of party members.
+    /// Every subject is authorized and answered individually.
+    /// PLAN_20 P4a: take group leadership back from a companion bot, so a
+    /// commander in a bot-led group can rearrange or break up their own party.
+    void HandlePartyLead(WorldSession* session, uint8 action, ObjectGuid subject);
+
+    /// PLAN_20 P5: what every party member would see over these questgivers'
+    /// heads, so the world marker can wear an honest "(4)".
+    void HandleGiverStatus(WorldSession* session,
+        std::vector<ObjectGuid> const& givers);
+
+    void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
+        ObjectGuid npcGuid, std::vector<PartyQuestSubject> const& subjects);
+
+    // SMSG_SUI_MEMBER_ITEM_MOVE_RESULT codes.
+    enum MemberItemMoveResult : uint8
+    {
+        ITEM_MOVE_OK           = 0,
+        ITEM_MOVE_DENIED       = 1,   // party line / authority / endpoints invalid
+        ITEM_MOVE_NO_ITEM      = 2,   // nothing at that bag/slot any more
+        ITEM_MOVE_TARGET_FULL  = 3,   // receiver cannot store it
+        ITEM_MOVE_UNAVAILABLE  = 4,   // different map, or a live trade window
+        ITEM_MOVE_REFUSED_ITEM = 5,   // conjured etc.
+    };
+
+    /// CMSG_SUI_MEMBER_ITEM_MOVE (Phase C v1, owner 2026-08-25): move one bag
+    /// item between two party endpoints — the requester's own character or a
+    /// party AiBot member — instantly, no trade window. Binding deliberately
+    /// does NOT gate the move (this is the CRPG party's shared backpack, not
+    /// the auction house); conjured items are refused. Both endpoints
+    /// re-snapshot to every real SUI member of the group afterwards.
+    void HandleMemberItemMove(WorldSession* session, ObjectGuid from,
+        ObjectGuid to, uint8 bag, uint8 slot);
 
     // ── Owner-data mirror (M3) ────────────────────────────────────────────────
     /// Wrap whitelisted owner-only packets of a possessed bot's socket-less

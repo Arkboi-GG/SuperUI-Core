@@ -13,7 +13,9 @@
  */
 
 #include "AiBotAIMain.h"
+#include "AiBotTalents.h"
 #include "SuiHero.h"
+#include "Server/Packets/Quest.h"   // shared-quest accept/decline reply packets (PLAN_20 P3)
 #include "Server/Packet.h"   // NullClientPacket — the typed empty client packet the group accept/decline handlers take
 #include "AiBotAITeamPlay.h"   // [TEAMPLAY] ResolveCombatTarget — the group focus-fire resolver
 #include "SuiPossess.h"      // [SUI] possessed-bot-as-boss precedence in FindPartyBoss
@@ -83,7 +85,7 @@ void AiBotAI::SuiQueueWaypoint(float x, float y, float z)
     snprintf(json, sizeof(json),
         "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
         me->GetMapId(), x, y, z);
-    BridgeProcessLine(json);
+    SuiInjectCommandLine(json);   // commander line: passes the conscription fence
 }
 
 AiBotAI* AiBotAI::AttachToRealCharacter(Player* owner)
@@ -470,6 +472,95 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         return;   // handled — never fall through to the base class's own invite policy
     }
 
+    // ── Shared quests (PLAN_20 P3) ───────────────────────────────────────────
+    // A party member sharing a quest sends the bot SMSG_QUESTGIVER_QUEST_DETAILS
+    // with the SHARER's player guid as the giver. Nothing in the bot AI answered
+    // it, so a shared quest died silently and left the sharer waiting.
+    //
+    // Two deviations from the group-invite block above, both forced:
+    //  * we answer through QueuePacket, not a direct Handle... call. The send is
+    //    synchronous inside HandlePushQuestToParty, which sets the share info
+    //    AFTER the send -- accepting inline would run before that exists, kill
+    //    the sharer's confirmation and strand m_questShareInfo at BUSY forever.
+    //  * a details packet whose giver is a CREATURE is the bridge driving this
+    //    bot through a normal questgiver. Leave it alone; only a PLAYER giver
+    //    means "someone shared this with you".
+    if (packet->GetOpcode() == SMSG_QUESTGIVER_QUEST_DETAILS)
+    {
+        if (!me || packet->size() < 12)
+        {
+            CombatBotBaseAI::OnPacketReceived(packet);
+            return;
+        }
+        ObjectGuid giverGuid;
+        uint32 questId = 0;
+        {
+            WorldPacket copy(*packet);
+            copy.rpos(0);
+            copy >> giverGuid >> questId;
+        }
+        if (!giverGuid.IsPlayer() || !questId)
+        {
+            CombatBotBaseAI::OnPacketReceived(packet);
+            return;   // an NPC offer -- the bridge owns that path
+        }
+
+        Player* pSharer = sObjectMgr.GetPlayer(giverGuid);
+        bool fromRealPartyMember = pSharer && pSharer->GetSession() &&
+            !pSharer->GetSession()->GetBot() &&
+            me->GetGroup() && pSharer->GetGroup() == me->GetGroup();
+
+        Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId);
+        bool accept = fromRealPartyMember && pQuest &&
+            me->CanTakeQuest(pQuest, false) && me->CanAddQuest(pQuest, false);
+
+        if (accept)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-QUEST] %s: accepting quest %u shared by %s",
+                me->GetName(), questId, pSharer->GetName());
+            auto data = std::make_unique<WorldPackets::Quest::QuestgiverAcceptQuest>();
+            data->guid = giverGuid;
+            data->quest = questId;
+            me->GetSession()->QueuePacket(std::move(data));
+        }
+        else if (fromRealPartyMember)
+        {
+            // Decline explicitly. Silence would leave the sharer's share info on
+            // this bot, and every later share to it would answer BUSY.
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-QUEST] %s: declining quest %u shared by %s (cannot take it)",
+                me->GetName(), questId, pSharer->GetName());
+            auto data = std::make_unique<WorldPackets::Quest::QuestPushResult>();
+            data->guid = me->GetObjectGuid();
+            data->msg = QUEST_PARTY_MSG_DECLINE_QUEST;
+            me->GetSession()->QueuePacket(std::move(data));
+        }
+        return;
+    }
+
+    // Escort quests (QUEST_FLAGS_PARTY_ACCEPT) confirm separately. Safe to answer
+    // inline-ish here because that path sets the share info BEFORE it sends.
+    if (packet->GetOpcode() == SMSG_QUEST_CONFIRM_ACCEPT)
+    {
+        if (me && packet->size() >= 4)
+        {
+            uint32 questId = 0;
+            {
+                WorldPacket copy(*packet);
+                copy.rpos(0);
+                copy >> questId;
+            }
+            if (questId)
+            {
+                auto data = std::make_unique<WorldPackets::Quest::QuestConfirmAccept>();
+                data->questId = questId;
+                me->GetSession()->QueuePacket(std::move(data));
+            }
+        }
+        return;
+    }
+
     CombatBotBaseAI::OnPacketReceived(packet);
 }
 
@@ -615,6 +706,14 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
                 m_currentTask.y = next[1];
                 m_currentTask.z = next[2];
                 MoveToDestination(next[0], next[1], next[2], false);
+            }
+            else if (m_suiFormationFacing > -100.f)
+            {
+                // [SUI] Formation slot reached: take the ordered facing. The
+                // stamp survives exactly one arrival; every new order clears it
+                // through SuiClearWaypoints.
+                me->SetFacingTo(m_suiFormationFacing);
+                m_suiFormationFacing = -1000.f;
             }
         }
         else if (Data == AIBOT_POINT_GRIND_PATROL)
@@ -1119,22 +1218,32 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // Handle pending teleports from base class
     PlayerBotAI::UpdateAI(diff);
 
-    // [ROTATION] Combat sub-tick (2026-07-16): with a slate loaded, evaluate it at 4 Hz
+    // [ROTATION/SPEC] Combat sub-tick: external slates and validated built-in
+    // spec policies evaluate at 4 Hz
     // AHEAD of the 1s behaviour gate — the 1 Hz loop can't weave a GCD, and its wand
     // autorepeat early-return silences a wanding bot's spell evaluation entirely. This
     // runs ONLY the cast attempt; every behaviour decision (tasks, doctrine, bridge,
-    // loot, kill detection) stays on the 1s tick below. Slate-less bots skip in one
-    // branch — vanilla cadence bit-for-bit.
+    // loot, kill detection) stays on the 1s tick below. Legacy/fallback bots skip in
+    // one branch and retain the original cadence.
     m_rotationSubTick.Update(diff);
     if (m_rotationSubTick.Passed())
     {
         m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
         if (!m_possessed
-            && !m_rotation.empty() && me && me->IsInWorld() && !me->IsBeingTeleported()
+            && HasFastCombatPolicy() && me && me->IsInWorld() && !me->IsBeingTeleported()
             && me->IsAlive() && me->IsInCombat()
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
             && !me->IsNonMeleeSpellCasted(false, false, true))
-            UpdateRotationSlate();
+        {
+            if (!m_rotation.empty())
+                UpdateRotationSlate(); // absolute external override
+            // Built-in policies yield while the movement spine owns a pull or
+            // escape hop.  Casting here can stop the isolated tag-and-drag or a
+            // stalemate/overpull retreat before its 1 Hz handler advances it.
+            // External LOAD_ROTATION remains the absolute override above.
+            else if (!m_pullActive && !m_stalemateHoldMs && !m_overpullFleeHoldMs)
+                UpdateSpecCombatAI();
+        }
     }
 
     // [RAID-PLAN] Act cadence for the adopted raid plan (PLAN_19 M-D): formation
@@ -1264,12 +1373,34 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Initialization (once, on first update after login) ---
     if (!m_initialized)
     {
-        if (m_freshSpawn)
+        uint32 learnedTalentPoints = 0;
+        uint32 learnedClassSpells = 0;
+        uint32 learnedArmorSpells = 0;
+
+        // Attached real characters deliberately bypass all fabricated-bot mutations.
+        if (!m_ownedDummyEntry)
         {
-            LearnPremadeSpecForClass();
-            // Only give starting gear, not premade BG gear
-            AutoEquipGear(PLAYER_BOT_AUTO_EQUIP_STARTING_GEAR);
+            AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
+            learnedTalentPoints = repair.learnedPoints;
+            if (repair.role != ROLE_INVALID)
+                m_role = repair.role;
+
+            // Quest/fundamental abilities unlock trainer chains, so repair the
+            // curated class set after talents but before refreshing trainer and
+            // item spells.  Attached real characters never enter this block.
+            learnedClassSpells = LearnBotClassQuestSpells();
+            if (m_freshSpawn || learnedTalentPoints || learnedClassSpells)
+                LearnTrainerAndItemSpells();
+            learnedArmorSpells = LearnArmorProficiencies();
+
+            if (learnedClassSpells || learnedArmorSpells)
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT] %s learned lifecycle spells: class=%u armor=%u",
+                    me->GetName(), learnedClassSpells, learnedArmorSpells);
         }
+
+        if (m_freshSpawn)
+            AutoEquipGear(PLAYER_BOT_AUTO_EQUIP_STARTING_GEAR);
 
         if (m_role == ROLE_INVALID)
             AutoAssignRole();
@@ -1322,6 +1453,8 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
         }
 
+        if (m_freshSpawn || learnedTalentPoints || learnedClassSpells || learnedArmorSpells)
+            me->SaveToDB();
         m_initialized = true;
         m_lastKnownLevel = me->GetLevel();
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s initialized - class %u, level %u, role %u",
@@ -1455,12 +1588,34 @@ void AiBotAI::UpdateAI(uint32 const diff)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s leveled up: %u -> %u",
             me->GetName(), m_lastKnownLevel, me->GetLevel());
+        if (!m_ownedDummyEntry)
+        {
+            AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
+            if (repair.role != ROLE_INVALID)
+                m_role = repair.role;
+
+            uint32 const learnedClassSpells = LearnBotClassQuestSpells();
+            LearnTrainerAndItemSpells();
+            uint32 const learnedArmorSpells = LearnArmorProficiencies();
+            if (learnedClassSpells || learnedArmorSpells)
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT] %s learned level-up lifecycle spells: class=%u armor=%u",
+                    me->GetName(), learnedClassSpells, learnedArmorSpells);
+        }
+
         SendLevelUpEvent(me->GetLevel());
         m_lastKnownLevel = me->GetLevel();
 
-        // Re-learn spells and update skills for new level
+        // Refresh spell caches for both fabricated bots and attached real
+        // characters, but never mutate an attached character's skills/items.
+        ResetSpellData();
         PopulateSpellData();
-        me->UpdateSkillsToMaxSkillsForLevel();
+        if (!m_ownedDummyEntry)
+        {
+            AddAllSpellReagents();
+            me->UpdateSkillsToMaxSkillsForLevel();
+            me->SaveToDB();
+        }
     }
 
     // --- Auto-loot timer ---
@@ -1485,20 +1640,27 @@ void AiBotAI::UpdateAI(uint32 const diff)
         return;
     }
 
-    // --- Auto-repeat spell handling (Hunter auto shot) ---
+    // --- Auto-repeat spell handling (Hunter Auto Shot / caster wands) ---
     if (me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
     {
+        bool const fastPolicy = HasFastCombatPolicy();
         if (!me->GetVictim())
             me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL, true);
         else if (me->GetClass() == CLASS_HUNTER)
         {
             if (me->GetCombatDistance(me->GetVictim()) < 8.0f)
                 me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL, true);
-            else
+            else if (!fastPolicy)
                 UpdateInCombatAI_Hunter();
         }
 
-        return;
+        // Preserve the inherited behavior exactly for legacy/fallback bots.
+        // A loaded slate or validated spec policy already owns its 250 ms cast
+        // lane, so autorepeat must not freeze this one-second doctrine/task/
+        // movement/retreat spine.  The guard below skips autorepeat but still
+        // blocks real casts and channels.
+        if (!fastPolicy)
+            return;
     }
 
     if (me->IsNonMeleeSpellCasted(false, false, true))
@@ -1552,7 +1714,12 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (me->GetStandState() != UNIT_STAND_STATE_STAND)
         me->SetStandState(UNIT_STAND_STATE_STAND);
 
-    if (me->GetSheath() == SHEATH_STATE_UNARMED && !me->IsMounted())
+    // [SUI] Combat cancels a commanded sheath; otherwise the ORDER_SHEATH
+    // override holds and the auto-arm below must not fight it every tick.
+    if (m_suiSheathOverride >= 0 && me->IsInCombat())
+        m_suiSheathOverride = -1;
+    if (me->GetSheath() == SHEATH_STATE_UNARMED && !me->IsMounted() &&
+        m_suiSheathOverride < 0)
         me->SetSheath(SHEATH_STATE_MELEE);
 
     // --- Out of combat behavior ---
@@ -2187,6 +2354,13 @@ void AiBotAI::UpdateAI(uint32 const diff)
             return;
     }
 
+    // Fast policies already ran ahead of this behaviour tick.  Do not dispatch
+    // them again here at 1 Hz (which otherwise creates duplicate same-frame tries).
     if (me->IsInCombat())
-        UpdateInCombatAI();
+    {
+        if (!HasFastCombatPolicy())
+            UpdateInCombatAI();
+        else if (me->GetVictim())
+            UseTrinketEffects();
+    }
 }

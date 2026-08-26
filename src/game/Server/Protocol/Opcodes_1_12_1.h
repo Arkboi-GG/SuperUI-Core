@@ -851,5 +851,32 @@ enum OpcodesList
     SMSG_SUI_PORTAL_DESCRIPTOR             = 845,
     CMSG_SUI_PORTAL_READY                  = 846,
     SMSG_SUI_PORTAL_STATE                  = 847,
-    NUM_MSG_TYPES                          = 848
+
+    // 848/849 are provisionally spoken for by the dynamic-combat rotation pair
+    // (MSUIClient docs/plans/DYNAMIC_COMBAT_RULES_AND_ENCOUNTER_INTELLIGENCE.md);
+    // PARTY_MEMBER_FACTS therefore starts one audited pair later.
+    CMSG_SUI_MEMBER_FACTS                  = 850,
+    SMSG_SUI_MEMBER_SPELLS                 = 851,
+    CMSG_SUI_MEMBER_ITEM_MOVE              = 852,
+    SMSG_SUI_MEMBER_ITEM_MOVE_RESULT       = 853,
+
+    // PLAN_20 party questing & vendoring. P1 claims the quest-facts pair; 856-859
+    // stay reserved for the quest-act and vendor pairs so a half-deployed server
+    // can never renumber them out from under a client.
+    CMSG_SUI_QUEST_FACTS                   = 854,      // 0x0356
+    SMSG_SUI_QUEST_LOG                     = 855,      // 0x0357
+    CMSG_SUI_PARTY_QUEST                   = 856,      // 0x0358
+    SMSG_SUI_PARTY_QUEST_RESULT            = 857,      // 0x0359
+    // 858/859 (0x035A/0x035B) are reserved for PLAN_20 P4's party vendor. P5
+    // shipped first but does NOT take them: they are named in the plan and in
+    // the client's Opcodes.cs, and renumbering a frozen wire to save two
+    // indices is how a client and a core quietly stop agreeing.
+    CMSG_SUI_GIVER_STATUS                  = 860,      // 0x035C
+    SMSG_SUI_GIVER_STATUS                  = 861,      // 0x035D
+    // P4a. 858/859 stay reserved -- the owner narrowed P4's vendor slice but has
+    // not abandoned it, and re-using a pair a live design still names is exactly
+    // the ambiguity the P5 note above exists to avoid.
+    CMSG_SUI_PARTY_LEAD                    = 862,      // 0x035E
+    SMSG_SUI_PARTY_LEAD_RESULT             = 863,      // 0x035F
+    NUM_MSG_TYPES                          = 864
 };

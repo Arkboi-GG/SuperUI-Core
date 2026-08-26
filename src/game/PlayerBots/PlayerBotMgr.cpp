@@ -19,6 +19,7 @@
 #include "Language.h"
 #include "Spell.h"
 #include "AiBotAI.h" 
+#include "AiBotTalents.h"
 
 INSTANTIATE_SINGLETON_1(PlayerBotMgr);
 
@@ -75,6 +76,9 @@ void PlayerBotMgr::Load()
     // 2- Configuration
     LoadConfig();
 
+    // Refuse to spend any bot talents if the compiled build-5875 catalog drifted from the installed DBCs.
+    AiBotTalents::ValidateProfiles();
+
     // 3- Load usable account ID
     std::unique_ptr<QueryResult> result = LoginDatabase.PQuery(
                               "SELECT MAX(`id`)"
@@ -90,7 +94,7 @@ void PlayerBotMgr::Load()
     // 4- LoadFromDB
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> [PlayerBotMgr] Loading Bots ...");
     result = CharacterDatabase.PQuery(
-                 "SELECT char_guid, chance, ai, race, class, level, map, position_x, position_y, position_z, name"
+                 "SELECT char_guid, chance, ai, race, class, level, map, position_x, position_y, position_z, name, spec_tab, active_role"
                  " FROM playerbot");
     if (!result)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Table `playerbot` is empty.");
@@ -112,6 +116,8 @@ void PlayerBotMgr::Load()
             float  pbY     = fields[8].GetFloat();
             float  pbZ     = fields[9].GetFloat();
             std::string pbName = fields[10].GetCppString();
+            entry->specTab = fields[11].GetUInt8();
+            entry->activeRole = CombatBotRoles(fields[12].GetUInt8());
             entry->ai.reset(CreatePlayerBotAI(fields[2].GetCppString(), pbRace, pbClass, pbLevel, pbMap, pbX, pbY, pbZ, pbName));
               if (fields[2].GetCppString() == "AiBotAI")
                 entry->customBot = true;

@@ -4,6 +4,7 @@
 #include "PlayerBotAI.h"
 #include "SpellEntry.h"
 #include "Player.h"
+#include <map>
 
 struct HealSpellCompare
 {
@@ -90,9 +91,13 @@ public:
     void AutoAssignRole();
     void PopulateSpellData();
     void ResetSpellData();
+    SpellEntry const* GetHighestKnownRank(uint32 firstRankSpellId) const;
+    virtual uint8 GetCombatSpecTab() const { return 255; }
     void AddAllSpellReagents();
     void SummonPetIfNeeded();
-    void LearnArmorProficiencies();
+    uint32 LearnArmorProficiencies();
+    uint32 LearnBotClassQuestSpells();
+    void LearnTrainerAndItemSpells();
     void LearnPremadeSpecForClass();
     void EquipPremadeGearTemplate();
     void EquipRandomGearInEmptySlots();
@@ -124,6 +129,10 @@ public:
 
     SpellCastResult DoCastSpell(Unit* pTarget, SpellEntry const* pSpellEntry);
     virtual bool CanTryToCastSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool CanTryToCastStackingSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool CanTryToCastSpellAfterLeavingForm(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool CanTryToCastSpellInternal(Unit const* pTarget, SpellEntry const* pSpellEntry,
+                                   bool allowExistingAuraStack, bool ignoreShapeshift) const;
     bool IsWearingShield(Player* pPlayer) const;
     bool IsInDuel() const;
     CombatBotRoles GetRole() const;
@@ -134,7 +143,7 @@ public:
     uint8 GetHighestHonorRankFromEquippedItems() const;
     void UpdateVisualHonorRankBasedOnItems();
 
-    bool SummonShamanTotems();
+    bool SummonShamanTotems(bool allowFireTotem = true);
     SpellCastResult CastWeaponBuff(SpellEntry const* pSpellEntry, EquipmentSlots slot);
     bool UseTrinketEffects(bool onlyToBreakCC = false);
     bool UseItemEffect(Item* pItem, bool onlyToBreakCC = false);
@@ -283,6 +292,10 @@ public:
     std::vector<SpellEntry const*> m_spellListTaunt;
     std::set<SpellEntry const*, HealAuraCompare> m_spellListPeriodicHeal;
     std::set<SpellEntry const*, HealSpellCompare> m_spellListDirectHeal;
+    // Language-independent lookup used by typed combat policies.  The legacy
+    // per-class union is deliberately fixed-size; indexing spell chains here
+    // lets new policies use every learned capstone without growing that union.
+    std::map<uint32, SpellEntry const*> m_knownSpellRanks;
     union
     {
         struct

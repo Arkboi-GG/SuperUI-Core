@@ -422,6 +422,9 @@ void AiBotAI::DoGrindPatrol()
 {
     if (me->IsMoving() || me->IsInCombat())
         return;
+    // [SUI] An RTS-commanded or enlisted bot stands where it was told; no grind stroll.
+    if (m_suiRtsHold || IsSuiConscripted())
+        return;
     if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
         return;
     if (m_wanderTimer > 0)

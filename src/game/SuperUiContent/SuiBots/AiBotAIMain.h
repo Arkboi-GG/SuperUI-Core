@@ -48,6 +48,7 @@
 #include "PathFinder.h"   // Vector3, PointsArray — needed for SmoothPathCorners' signature
 #include "AiBotDoctrine.h" // [DOCTRINE] IEngagementDoctrine + ResolveDoctrine/MakeDoctrine (Layer D)
 #include "PlayerBotMgr.h"  // PlayerBotEntry (complete type for m_ownedDummyEntry)
+#include <initializer_list>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -457,14 +458,53 @@ public:
     // [SUI] RTS waypoint chain (Ctrl+RightClick in the free view). ORDER_MOVE_QUEUE
     // appends; arrival chains into the next leg; ORDER_MOVE / ORDER_STOP clear it.
     void SuiQueueWaypoint(float x, float y, float z);
-    void SuiClearWaypoints() { m_suiWaypoints.clear(); m_suiPatrolLoop = false; }
-    // [SUI] Void the whole journey — brain task, stored path, queued RTS waypoints.
-    // Called when a human takes the body (TryBegin) and when a Solo-era errand must
-    // not survive joining a human's party (RefreshDoctrine).
-    void SuiAbandonJourney() { m_currentTask.Clear(); ClearStoredPath(); SuiClearWaypoints(); }
+    void SuiClearWaypoints()
+    {
+        m_suiWaypoints.clear();
+        m_suiPatrolLoop = false;
+        m_suiFormationFacing = -1000.f;
+    }
+    // [SUI] Void the whole journey — brain task, stored path, queued RTS waypoints,
+    // and the RTS discipline latches. Called when a human takes the body (TryBegin)
+    // and when a Solo-era errand must not survive joining a human's party
+    // (RefreshDoctrine).
+    void SuiAbandonJourney()
+    {
+        m_currentTask.Clear();
+        ClearStoredPath();
+        SuiClearWaypoints();
+        m_suiRtsHold = false;
+        m_suiSheathOverride = -1;
+    }
     std::deque<std::array<float, 3>> m_suiWaypoints;
     bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
     bool m_suiUnlinked = false;     // chain broken (ORDER_LINK): never formation-follows
+    // [SUI] RTS discipline. Any explicit RTS order stands the bot at attention:
+    // the idle wander/stroll stays suppressed until the journey is abandoned
+    // (doctrine change, possession). Formation orders also stamp a slot facing
+    // taken on arrival, and ORDER_SHEATH overrides the auto-arm until combat.
+    bool m_suiRtsHold = false;
+    float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
+    int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
+
+    // [SUI] Conscription: this bot is enlisted in a commander's RTS army
+    // (ORDER_CONSCRIPT, sent when the client assigns it to a control group).
+    // The brain planner stands down — STATE carries conscripted:1 and mutating
+    // bridge lines are dropped — while combat AI, doctrine reactions and
+    // explicit RTS orders keep working. Empty = free. Cleared by ORDER_DISMISS
+    // and by the commander's logout; deliberately survives SuiAbandonJourney
+    // (possessing your own soldier must not muster it out).
+    ObjectGuid m_suiConscriptedBy;
+    bool IsSuiConscripted() const { return !m_suiConscriptedBy.IsEmpty(); }
+    // Commander-injected bridge lines (RTS orders synthesized by SuiPossess and
+    // SuiQueueWaypoint) must pass the conscription fence that drops brain lines.
+    bool m_suiCommanderLine = false;
+    void SuiInjectCommandLine(char const* line)
+    {
+        m_suiCommanderLine = true;
+        BridgeProcessLine(line);
+        m_suiCommanderLine = false;
+    }
 
     // The REAL character's autonomy while its human drives a bot or the free camera
     // (SuiPossess Attach/DetachUnattendedAI). The character runs this same fleet AI —
@@ -566,6 +606,32 @@ public:
     // post-fight healing) is untouched either way.
     bool UpdateRotationSlate();                 // walk the slate, first castable match wins; true = slate present (combat handled)
     Unit* ResolveRotationTarget(uint8 kind);    // 0=SELF 1=CURRENT_TARGET 2=LOWEST_HP_PARTY
+    uint8 GetCombatSpecTab() const override;
+    CombatBotRoles GetCombatActiveRole() const;
+    bool HasUsableSpecCombat() const;
+    bool HasFastCombatPolicy() const;
+    bool UpdateSpecCombatAI();
+    bool UpdateSpecOutOfCombatAI();
+    bool TrySpecSpell(Unit* target, uint32 firstRankSpellId);
+    bool TrySpecSpell(Unit* target, SpellEntry const* spell);
+    bool TrySpecAura(Unit* target, uint32 firstRankSpellId);
+    bool TrySpecStackingAura(Unit* target, uint32 firstRankSpellId);
+    bool HasAuraFromSpellChain(Unit const* target, uint32 firstRankSpellId) const;
+    bool CanUseSpecAoE(Unit* center, float radius, uint32 minimumTargets = 2) const;
+    Unit* SelectSafeSpecAdd(Unit const* primary) const;
+    bool TrySpecInterrupt(Unit* target, std::initializer_list<uint32> spellIds);
+    bool TrySpecTaunt(Unit* target);
+    bool CommandSpecPet(Unit* target, bool mendHunterPet);
+    bool UpdateSpecCombatWarrior(uint8 spec);
+    bool UpdateSpecCombatPaladin(uint8 spec);
+    bool UpdateSpecCombatHunter(uint8 spec);
+    bool UpdateSpecCombatRogue(uint8 spec);
+    bool UpdateSpecCombatPriest(uint8 spec);
+    bool UpdateSpecCombatShaman(uint8 spec);
+    bool UpdateSpecCombatMage(uint8 spec);
+    bool UpdateSpecCombatWarlock(uint8 spec);
+    bool UpdateSpecCombatDruid(uint8 spec);
+    bool UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec);
     void UpdateOutOfCombatAI() override;
     void UpdateInCombatAI_Paladin() override;
     void UpdateOutOfCombatAI_Paladin() override;
@@ -683,8 +749,12 @@ public:
     void BridgeHandleDisbandGroup(const char* json);
     void BridgeHandleSetEscort(const char* json);   // [FOLLOW-CMD] "{bot} follow {player}" — sets/clears m_escortOverrideName
     void BridgeHandleLoadRotation(const char* json); // [ROTATION] load/replace/clear the custom slate (pipe payload, resolves SpellEntry at load)
+    void BridgeHandleApplyCombatLoadout(const char* json); // correlated, core-authoritative talent/profile/role/rotation mutation
     void BridgeHandleLoadRaidPlan(const char* json); // [RAID-PLAN] adopt this bot's raid-plan slice (PLAN_19 M-C; executes at M-D)
     void BridgeHandleRepairItems(const char* json);
+    char const* GetTalentProfileStateName() const;
+    char const* GetEffectiveRotationSource() const;
+    char const* GetEffectiveRotationProfile() const;
 
     // --- Quest/combat/event helpers ---
     void SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow);
@@ -745,7 +815,9 @@ public:
     float  m_travelRefY = 0.0f;
     uint32 m_travelRefMs = 0;
     ShortTimeTracker m_rotationSubTick;   // [ROTATION] 250ms in-combat slate cadence (see AIBOT_ROTATION_SUBTICK_MS)
+    bool m_reportedArmsWeaponMismatch = false;
     bool m_wasDead = false;
+    uint32 m_lastCombatMs = 0;        // last in-combat tick; anchors the OOC form-drop grace
     bool m_loggedFirstUpdate = false;
     bool m_freshSpawn = false;
     bool m_possessed = false;         // SUI possession: autonomous behaviour suspended
@@ -896,6 +968,11 @@ public:
     };
     std::vector<RotationInstruction> m_rotation;
     std::string m_rotationProfile;            // observability: echoed in logs/acks
+    uint32 m_rotationInstructionCount = 0;    // source entries, including rejected legacy LOAD_ROTATION rows
+    uint32 m_rotationCastableCount = 0;       // entries installed after strict spell resolution
+    uint32 m_combatConfigRevision = 0;        // live-session optimistic concurrency token
+    std::string m_lastCombatLoadoutRequest;   // idempotency: duplicate request gets the original ACK
+    std::string m_lastCombatLoadoutAck;
 
     // [RAID-PLAN] this bot's adopted slice of the raid plan (PLAN_19 M-C).
     // Stored by BridgeHandleLoadRaidPlan; the EncounterPlay doctrine and the

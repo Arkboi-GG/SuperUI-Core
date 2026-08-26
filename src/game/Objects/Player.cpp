@@ -12721,6 +12721,23 @@ bool Player::CanAddQuest(Quest const* pQuest, bool msg) const
     if (!SatisfyQuestLog(msg))
         return false;
 
+    // PLAN_20 4.4(7): a timed quest keeps its deadline in the update-field SLOT.
+    // Accepting one when all twenty are taken produces a quest that is counting
+    // down with no countdown visible in ANY client -- the player finds out by
+    // failing it. Refuse with the ordinary log-full message instead, so a slot is
+    // freed and the quest is accepted deliberately. (This was written up as a
+    // deliberate limitation during P2; it is not, it is the spec unimplemented.)
+    if (pQuest && pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED) &&
+        FindQuestSlot(0) >= MAX_QUEST_LOG_SIZE)
+    {
+        if (msg)
+        {
+            WorldPacket data(SMSG_QUESTLOG_FULL, 0);
+            GetSession()->SendPacket(&data);
+        }
+        return false;
+    }
+
     if (!CanGiveQuestSourceItemIfNeed(pQuest))
         return false;
 
@@ -12963,8 +12980,9 @@ void Player::SendPetTameFailure(PetTameFailureReason reason) const
 
 void Player::AddQuest(Quest const* pQuest, Object* questGiver)
 {
+    // PLAN_20 P2: a full slot array is no longer fatal -- it means this quest is
+    // held without an update-field mirror. SatisfyQuestLog caps the HELD count.
     uint16 log_slot = FindQuestSlot(0);
-    MANGOS_ASSERT(log_slot < MAX_QUEST_LOG_SIZE);
 
     uint32 questId = pQuest->GetQuestId();
 
@@ -13011,7 +13029,9 @@ void Player::AddQuest(Quest const* pQuest, Object* questGiver)
     if (pQuest->GetType() == QUEST_TYPE_PVP)
         UpdatePvP(true, true);
 
-    SetQuestSlot(log_slot, questId, qtime);
+    if (log_slot < MAX_QUEST_LOG_SIZE)
+        SetQuestSlot(log_slot, questId, qtime);
+    QuestHeldAdd(questId);
 
     if (questStatusData.uState != QUEST_NEW)
         questStatusData.uState = QUEST_CHANGED;
@@ -13178,47 +13198,65 @@ void Player::IncompleteQuest(uint32 questId)
 
 void Player::RemoveQuest(uint32 questId)
 {
+    // PLAN_20 P2: id-keyed, so it also reaches a quest held without a slot.
+    // It used to route through the slot and was a silent no-op for those.
+    RemoveQuestById(questId);
+}
+
+/// Abandon by quest id. Everything here is slot-independent; clearing and
+/// refilling the update-field mirror is the caller's business (RemoveQuestAtSlot).
+void Player::RemoveQuestById(uint32 questId)
+{
+    if (!questId)
+        return;
+
+    // can't un-equip some items, reject quest cancel
+    if (!TakeOrReplaceQuestStartItems(questId, true, true))
+        return;
+
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId))
     {
-        uint16 slot = FindQuestSlot(questId);
+        if (pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED))
+            RemoveTimedQuest(questId);
 
-        RemoveQuestAtSlot(slot);
+        // Destroying items on abandoning quest was added in 1.12.1.
+        // https://www.engadget.com/2006-10-10-quest-items-disappear-when-abandoning-quests.html
+#if SUPPORTED_CLIENT_BUILD >= CLIENT_BUILD_1_12_1
+        for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; i++)
+        {
+            if (uint32 itemId = pQuest->ReqItemId[i])
+                if (ItemPrototype const* pItem = sObjectMgr.GetItemPrototype(itemId))
+                    if (pItem->Bonding == BIND_QUEST_ITEM || pItem->Bonding == BIND_QUEST_ITEM1)
+                        if (uint32 count = GetItemCount(itemId, true))
+                            DestroyItemCount(itemId, count, true, false, true);
+        }
+#endif
+    }
+
+    SetQuestStatus(questId, QUEST_STATUS_NONE);   // also drops it from m_questsHeld
+
+    // If it held a slot, free it and pull an overflow quest up in its place.
+    uint16 slot = FindQuestSlot(questId);
+    if (slot < MAX_QUEST_LOG_SIZE)
+    {
+        SetQuestSlot(slot, 0);
+        PromoteOverflowQuestToSlot(slot, questId);
     }
 }
 
 void Player::RemoveQuestAtSlot(uint32 slot)
 {
+    // The bounds check stays at the field-layout size forever: this slot comes
+    // off the wire as a uint8 from the client (QuestHandler HandleQuestLogRemoveQuest).
     if (slot < MAX_QUEST_LOG_SIZE)
     {
         if (uint32 quest = GetQuestSlotQuestId(slot))
         {
-            // can't un-equip some items, reject quest cancel
-            if (!TakeOrReplaceQuestStartItems(quest, true, true))
-                return;
-
-            if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(quest))
-            {
-                if (pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED))
-                    RemoveTimedQuest(quest);
-
-                // Destroying items on abandoning quest was added in 1.12.1.
-                // https://www.engadget.com/2006-10-10-quest-items-disappear-when-abandoning-quests.html
-#if SUPPORTED_CLIENT_BUILD >= CLIENT_BUILD_1_12_1
-                for (int i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; i++)
-                {
-                    if (uint32 itemId = pQuest->ReqItemId[i])
-                        if (ItemPrototype const* pItem = sObjectMgr.GetItemPrototype(itemId))
-                            if (pItem->Bonding == BIND_QUEST_ITEM || pItem->Bonding == BIND_QUEST_ITEM1)
-                                if (uint32 count = GetItemCount(itemId, true))
-                                    DestroyItemCount(itemId, count, true, false, true);
-                }
-#endif
-            }
-
-            SetQuestStatus(quest, QUEST_STATUS_NONE);
+            RemoveQuestById(quest);
+            return;                 // RemoveQuestById cleared and refilled the slot
         }
 
-        SetQuestSlot(slot, 0);
+        SetQuestSlot(slot, 0);      // stale field with no quest behind it
     }
 }
 
@@ -13320,10 +13358,14 @@ void Player::RewardQuest(Quest const* pQuest, uint32 reward, WorldObject* questE
     }
  
     q_status.m_rewarded = true;
+    QuestHeldRemove(questId);
     if (!pQuest->IsRepeatable())
         SetQuestStatus(questId, QUEST_STATUS_COMPLETE);
     else
         SetQuestStatus(questId, QUEST_STATUS_NONE);
+    // The slot freed above is now available to a quest that had none.
+    if (log_slot < MAX_QUEST_LOG_SIZE)
+        PromoteOverflowQuestToSlot(log_slot, questId);
  
     if (q_status.uState != QUEST_NEW)
         q_status.uState = QUEST_CHANGED;
@@ -13411,7 +13453,7 @@ void Player::FailQuest(uint32 questId)
         if (pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_REPEATABLE) && !pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED))
         {
             SendQuestFailed(questId);
-            RemoveQuestAtSlot(log_slot);
+            RemoveQuestById(questId);
             return;
         }
 
@@ -13419,8 +13461,11 @@ void Player::FailQuest(uint32 questId)
         {
             SetQuestSlotTimer(log_slot, 1);
             SetQuestSlotState(log_slot, QUEST_STATE_FAIL);
-            SetQuestStatus(questId, QUEST_STATUS_FAILED);
         }
+        // PLAN_20 P2: the status is server state, not a field mirror -- it must
+        // be set whether or not this quest owns a slot. Inside the guard above,
+        // a quest held past the slots could never be marked failed at all.
+        SetQuestStatus(questId, QUEST_STATUS_FAILED);
 
         if (pQuest->HasSpecialFlag(QUEST_SPECIAL_FLAG_TIMED))
         {
@@ -13485,8 +13530,10 @@ bool Player::SatisfyQuestLevel(Quest const* qInfo, bool msg) const
 
 bool Player::SatisfyQuestLog(bool msg) const
 {
-    // exist free slot
-    if (FindQuestSlot(0) < MAX_QUEST_LOG_SIZE)
+    // PLAN_20 P2: the cap is how many quests may be HELD, not how many fit in
+    // the twenty update-field slots. Quests past the slots are invisible to a
+    // stock 1.12 client and reach a SuperUI client over SMSG_SUI_QUEST_LOG.
+    if (GetHeldQuestCount() < sWorld.getConfig(CONFIG_UINT32_MAX_QUEST_HELD))
         return true;
 
     if (msg)
@@ -13963,6 +14010,8 @@ void Player::SetQuestStatus(uint32 questId, QuestStatus status)
         QuestStatusData& q_status = mQuestStatus[questId];
 
         q_status.m_status = status;
+        if (status == QUEST_STATUS_NONE)
+            QuestHeldRemove(questId);
 
         if (q_status.uState != QUEST_NEW)
             q_status.uState = QUEST_CHANGED;
@@ -13989,6 +14038,97 @@ void Player::AdjustQuestReqItemCount(Quest const* pQuest, QuestStatusData& quest
     }
 }
 
+// PLAN_20 P2. The single definition of "this character is working on it".
+//
+// m_rewarded -- not m_status -- is what means finished, because VMaNGOS leaves a
+// turned-in quest at QUEST_STATUS_COMPLETE forever. But rewarded alone is NOT
+// enough: a REPEATABLE quest keeps m_rewarded set after its first turn-in (see
+// GetQuestRewardStatus, which ignores it for exactly that reason) and AddQuest
+// does not clear it on re-accept, so a re-accepted repeatable is INCOMPLETE and
+// rewarded at the same time.
+//
+// This must stay identical to the condition _LoadQuestStatus uses to decide
+// whether a row is held. The two disagreeing is what silently pruned every
+// re-accepted repeatable out of m_questsHeld and stopped it earning credit.
+bool Player::IsHeldQuestStatus(uint32 questId, QuestStatusData const& data)
+{
+    if (data.m_status != QUEST_STATUS_INCOMPLETE &&
+        data.m_status != QUEST_STATUS_COMPLETE &&
+        data.m_status != QUEST_STATUS_FAILED)
+        return false;
+    if (!data.m_rewarded)
+        return true;
+    Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId);
+    return pQuest && pQuest->IsRepeatable();
+}
+
+void Player::QuestHeldAdd(uint32 questId)
+{
+    if (!questId)
+        return;
+    if (std::find(m_questsHeld.begin(), m_questsHeld.end(), questId) == m_questsHeld.end())
+        m_questsHeld.push_back(questId);
+}
+
+void Player::QuestHeldRemove(uint32 questId)
+{
+    std::vector<uint32>::iterator itr =
+        std::find(m_questsHeld.begin(), m_questsHeld.end(), questId);
+    if (itr != m_questsHeld.end())
+        m_questsHeld.erase(itr);
+}
+
+/// Write a held quest into an update-field slot: the id + deadline, the state
+/// flags, and both counter banks. Lifted from the _LoadQuestStatus body so the
+/// load path and slot promotion cannot drift apart.
+void Player::PopulateQuestSlot(uint16 slot, uint32 questId)
+{
+    if (slot >= MAX_QUEST_LOG_SIZE || !questId)
+        return;
+    QuestStatusMap::const_iterator itr = mQuestStatus.find(questId);
+    if (itr == mQuestStatus.end())
+        return;
+    Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId);
+    if (!pQuest)
+        return;
+    QuestStatusData const& data = itr->second;
+
+    uint32 questTime = data.m_timer
+        ? uint32(time(nullptr) + data.m_timer / IN_MILLISECONDS) : 0;
+    SetQuestSlot(slot, questId, questTime);
+
+    if (data.m_explored || data.m_status == QUEST_STATUS_COMPLETE)
+        SetQuestSlotState(slot, QUEST_STATE_COMPLETE);
+    if (data.m_status == QUEST_STATUS_FAILED)
+        SetQuestSlotState(slot, QUEST_STATE_FAIL);
+
+    for (uint8 idx = 0; idx < QUEST_OBJECTIVES_COUNT; ++idx)
+        if (data.m_creatureOrGOcount[idx])
+            SetQuestSlotCounter(slot, idx, data.m_creatureOrGOcount[idx]);
+    // No item counters -- see SendQuestUpdateAddItem. Only four counter indices
+    // exist per slot and the creature/GO objectives own them, which is why the
+    // load path this was lifted from does not write them either.
+    (void)pQuest;
+}
+
+/// A slot just came free: pull the oldest held quest that has no slot into it.
+/// m_questsHeld is in accept order, so promotion is oldest-first rather than
+/// quest-id-ordered.
+void Player::PromoteOverflowQuestToSlot(uint16 slot, uint32 excludeQuestId)
+{
+    if (slot >= MAX_QUEST_LOG_SIZE)
+        return;
+    for (uint32 questId : m_questsHeld)
+    {
+        if (questId == excludeQuestId)
+            continue;
+        if (FindQuestSlot(questId) != MAX_QUEST_LOG_SIZE)
+            continue;               // already visible in some slot
+        PopulateQuestSlot(slot, questId);
+        return;
+    }
+}
+
 uint16 Player::FindQuestSlot(uint32 questId) const
 {
     for (uint16 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
@@ -14003,13 +14143,19 @@ void Player::AreaExploredOrEventHappens(uint32 questId)
     if (questId)
     {
         uint16 log_slot = FindQuestSlot(questId);
-        if (log_slot < MAX_QUEST_LOG_SIZE)
+        QuestStatusMap::iterator itr = mQuestStatus.find(questId);
+        if (itr != mQuestStatus.end())
         {
-            QuestStatusData& q_status = mQuestStatus[questId];
+            QuestStatusData& q_status = itr->second;
 
             if (!q_status.m_explored)
             {
-                SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
+                // PLAN_20 P2: only the FIELD MIRROR is slot-gated. m_explored is
+                // server state, and CanCompleteQuest hard-requires it, so leaving
+                // this inside the slot guard made every exploration/event quest
+                // held past the twenty slots permanently uncompletable.
+                if (log_slot < MAX_QUEST_LOG_SIZE)
+                    SetQuestSlotState(log_slot, QUEST_STATE_COMPLETE);
                 SendQuestCompleteEvent(questId);
                 q_status.m_explored = true;
 
@@ -14059,10 +14205,15 @@ void Player::GroupEventFailHappens(uint32 questId)
 
 void Player::ItemAddedQuestCheck(uint32 entry, uint32 count)
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
-        if (questid == 0)
+        if (!questid)
             continue;
 
         QuestStatusData& q_status = mQuestStatus[questid];
@@ -14103,9 +14254,14 @@ void Player::ItemAddedQuestCheck(uint32 entry, uint32 count)
 
 void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
             continue;
 
@@ -14113,6 +14269,14 @@ void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
         if (!qInfo)
             continue;
         if (!qInfo->HasSpecialFlag(QUEST_SPECIAL_FLAG_DELIVER))
+            continue;
+
+        // This function has no status check of its own -- the slot loop's
+        // implicit "owns a slot" filter used to stand in for one. State it, or
+        // IncompleteQuest below resurrects a finished DELIVER quest the next
+        // time one of its items leaves the bags.
+        QuestStatusMap::const_iterator heldItr = mQuestStatus.find(questid);
+        if (heldItr == mQuestStatus.end() || !IsHeldQuestStatus(questid, heldItr->second))
             continue;
 
         for (int j = 0; j < QUEST_ITEM_OBJECTIVES_COUNT; ++j)
@@ -14156,9 +14320,14 @@ void Player::KilledMonsterCredit(uint32 entry, ObjectGuid guid)
 {
     uint32 addkillcount = 1;
 
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
             continue;
 
@@ -14213,9 +14382,14 @@ void Player::CastedCreatureOrGO(uint32 entry, ObjectGuid guid, uint32 spellId, b
     bool isCreature = guid.IsCreature();
 
     uint32 addCastCount = 1;
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
             continue;
 
@@ -14284,9 +14458,14 @@ void Player::CastedCreatureOrGO(uint32 entry, ObjectGuid guid, uint32 spellId, b
 void Player::TalkedToCreature(uint32 entry, ObjectGuid guid)
 {
     uint32 addTalkCount = 1;
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
             continue;
 
@@ -14363,9 +14542,14 @@ uint32 Player::GetMaxMoney() const
 
 void Player::MoneyChanged(uint32 count)
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (!questid)
             continue;
 
@@ -14393,9 +14577,15 @@ void Player::MoneyChanged(uint32 count)
 
 void Player::ReputationChanged(FactionEntry const* factionEntry)
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // PLAN_20 P2: iterate HELD quests, not the twenty update-field slots, or a
+    // quest held past the slots silently stops earning credit. Snapshotted
+    // because the body can complete a quest, and CompleteQuest -> RewardQuest
+    // inserts into mQuestStatus -- an ordered map, so a key sorting after the
+    // cursor would otherwise be picked up mid-update in the same pass.
+    std::vector<uint32> const heldQuests = m_questsHeld;
+    for (uint32 questid : heldQuests)
     {
-        if (uint32 questid = GetQuestSlotQuestId(i))
+        if (questid)
         {
             if (Quest const* qInfo = sObjectMgr.GetQuestTemplate(questid))
             {
@@ -14421,9 +14611,10 @@ void Player::ReputationChanged(FactionEntry const* factionEntry)
 
 bool Player::HasQuestForItem(uint32 itemid) const
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // Held list, not the whole status map: mQuestStatus keeps every quest the
+    // character ever touched for the whole session, and this runs per loot roll.
+    for (uint32 questid : m_questsHeld)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (questid == 0)
             continue;
 
@@ -14607,11 +14798,18 @@ void Player::SendQuestUpdateAddItem(Quest const* pQuest, uint32 item_idx, uint32
         data << batchCount;
         GetSession()->SendPacket(&data);
 
-        // Update player field and fire UNIT_QUEST_LOG_CHANGED for self for the current batch
-        uint16 slot = FindQuestSlot(pQuest->GetQuestId());
-        if (slot < MAX_QUEST_LOG_SIZE) {
-            SetQuestSlotCounter(slot + pQuest->GetReqCreatureOrGOcount(), uint8(item_idx), uint8(current + batchCount));
-        }
+        // NO update-field write here, deliberately. The quest slot holds four
+        // six-bit counters plus a state byte, so counter indices are 0-3 only --
+        // there is no room to mirror item objectives alongside creature ones.
+        // The original code wrote to `slot + objectiveCount`, corrupting another
+        // quest's slot (or, past slot 20, PLAYER_VISIBLE_ITEM_1_CREATOR); the
+        // obvious "fix" of moving that addend to the counter index is worse,
+        // reaching index 7 -- clobbering the state byte at 4 and shifting off
+        // the end of the word above that. Vanilla's own _LoadQuestStatus writes
+        // creature counters and not item ones for the same reason, and the 1.12
+        // client reads item progress from the player's own bags. The
+        // SMSG_QUESTUPDATE_ADD_ITEM above is what actually drives the client;
+        // a SuperUI client gets the authoritative count over SMSG_SUI_QUEST_LOG.
 
         count -= batchCount;
     }
@@ -14768,9 +14966,18 @@ bool Player::LoadFromDB(ObjectGuid guid, SqlQueryHolder* holder)
 
     // check name limitations
     m_name = fields[2].GetCppString();
-    if (ObjectMgr::CheckPlayerName(m_name) != CHAR_NAME_SUCCESS ||
-       (GetSession()->GetSecurity() == SEC_PLAYER && sObjectMgr.IsReservedName(m_name)))
+    // [SUI] Bots are waived exactly like the account check above: fleet names
+    // are the owner's policy, and the DBC reserved/profanity regexes
+    // (\<mister, \<uber, queen\>, king\>...) were silently killing
+    // owner-created bots on their FIRST load-from-DB (creation bypasses this
+    // check; login did not) — flagged RENAME, session kicked, no log line.
+    if (!IsBot() &&
+        (ObjectMgr::CheckPlayerName(m_name) != CHAR_NAME_SUCCESS ||
+        (GetSession()->GetSecurity() == SEC_PLAYER && sObjectMgr.IsReservedName(m_name))))
     {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "%s name '%s' fails validation - flagged for rename, login refused.",
+            guid.GetString().c_str(), m_name.c_str());
         CharacterDatabase.PExecute("UPDATE `characters` SET `character_flags` = `character_flags` | '%u' WHERE `guid` ='%u'",
                                    uint32(CHARACTER_FLAG_RENAME), guid.GetCounter());
         return false;
@@ -15855,6 +16062,7 @@ void Player::LoadPet()
 
 void Player::_LoadQuestStatus(std::unique_ptr<QueryResult> result)
 {
+    m_questsHeld.clear();
     mQuestStatus.clear();
 
     uint32 slot = 0;
@@ -15913,12 +16121,17 @@ void Player::_LoadQuestStatus(std::unique_ptr<QueryResult> result)
 
                 questStatusData.uState = QUEST_UNCHANGED;
 
+                // PLAN_20 P2: being HELD no longer implies owning a slot. The
+                // condition is unchanged -- it is just asked before the slot
+                // test now, so the held list and slot population cannot drift.
+                // One predicate, one answer -- see IsHeldQuestStatus. This used
+                // to be a second, subtly different copy of the same rule.
+                bool const questHeld = IsHeldQuestStatus(questId, questStatusData);
+                if (questHeld)
+                    m_questsHeld.push_back(questId);
+
                 // add to quest log
-                if (slot < MAX_QUEST_LOG_SIZE &&
-                        ((questStatusData.m_status == QUEST_STATUS_INCOMPLETE ||
-                          questStatusData.m_status == QUEST_STATUS_COMPLETE ||
-                          questStatusData.m_status == QUEST_STATUS_FAILED) &&
-                         (!questStatusData.m_rewarded || pQuest->IsRepeatable())))
+                if (slot < MAX_QUEST_LOG_SIZE && questHeld)
                 {
                     SetQuestSlot(slot, questId, uint32(quest_time));
 
@@ -16941,6 +17154,38 @@ void Player::_SaveInventory()
     m_itemUpdateQueue.clear();
 }
 
+/// Reconcile the hand-maintained held list against mQuestStatus. Called on
+/// every save. Missing entries are REPAIRED (a quest that silently stops
+/// earning credit is the worst outcome here) and always logged: a repair means
+/// a mutation path is not calling QuestHeldAdd/Remove and needs finding.
+void Player::ValidateHeldQuests()
+{
+    for (auto const& pair : mQuestStatus)
+    {
+        if (!IsHeldQuestStatus(pair.first, pair.second))
+            continue;
+        if (std::find(m_questsHeld.begin(), m_questsHeld.end(), pair.first) != m_questsHeld.end())
+            continue;
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[QUEST-HELD] %s: quest %u is held but was missing from the held list "
+            "- repaired. A quest-status mutation path is not maintaining it.",
+            GetName(), pair.first);
+        m_questsHeld.push_back(pair.first);
+    }
+    for (size_t i = m_questsHeld.size(); i > 0; --i)
+    {
+        uint32 questId = m_questsHeld[i - 1];
+        QuestStatusMap::const_iterator itr = mQuestStatus.find(questId);
+        if (itr != mQuestStatus.end() && IsHeldQuestStatus(questId, itr->second))
+            continue;
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "[QUEST-HELD] %s: quest %u was in the held list but is not held - dropped. "
+            "If that quest was still being worked on, a mutation path is wrong.",
+            GetName(), questId);
+        m_questsHeld.erase(m_questsHeld.begin() + (i - 1));
+    }
+}
+
 void Player::_SaveQuestStatus()
 {
     static SqlStatementID insertQuestStatus ;
@@ -17005,6 +17250,12 @@ void Player::_SaveQuestStatus()
         i->second.uState = QUEST_UNCHANGED;
         ++i;
     }
+
+    // AFTER the QUEST_DELETED erase above, never before it. Reconciling first
+    // left every erased id dangling in m_questsHeld for a whole save cycle, and
+    // the credit scans' mQuestStatus[questid] would then re-insert the row that
+    // was just deleted -- resurrecting it on the next save.
+    ValidateHeldQuests();
 }
 
 void Player::_SaveSkills()
@@ -19676,9 +19927,10 @@ bool Player::IsSpellFitByClassAndRace(uint32 spellId, uint32* pReqlevel /*= null
 
 bool Player::HasQuestForGO(int32 GOId) const
 {
-    for (int i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    // Held list, not the whole status map -- UpdateForQuestWorldObjects calls
+    // this for every visible game object.
+    for (uint32 questid : m_questsHeld)
     {
-        uint32 questid = GetQuestSlotQuestId(i);
         if (questid == 0)
             continue;
 
@@ -21681,6 +21933,7 @@ bool Player::ChangeQuestsForRace(uint8 oldRace, uint8 newRace)
                         RemoveTimedQuest(removeQuestId);
                     SetQuestSlotState(log_slot, QUEST_STATUS_NONE);
                     SetQuestSlot(log_slot, 0);
+                    QuestHeldRemove(removeQuestId);
                     TakeOrReplaceQuestStartItems(removeQuestId, true, false);
                     // Et prendre la nouvelle
                     if (!CanAddQuest(pNewQuest, true))
@@ -21703,8 +21956,15 @@ bool Player::ChangeQuestsForRace(uint8 oldRace, uint8 newRace)
                     // Pas de duplicate dans les quetes
                     QuestStatusMap::iterator eraseNewQuest = mQuestStatus.find(pNewQuest->GetQuestId());
                     if (eraseNewQuest != mQuestStatus.end())
+                    {
                         mQuestStatus.erase(eraseNewQuest);
+                        QuestHeldRemove(pNewQuest->GetQuestId());
+                    }
                     mQuestStatus[pNewQuest->GetQuestId()] = newQuestStatus;
+                    // PLAN_20 P2: the replacement row carries the old row's
+                    // status, so it may well be held -- keep the list in step.
+                    if (IsHeldQuestStatus(pNewQuest->GetQuestId(), newQuestStatus))
+                        QuestHeldAdd(pNewQuest->GetQuestId());
                     itr.second.uState = QUEST_DELETED;
                 }
                 break;

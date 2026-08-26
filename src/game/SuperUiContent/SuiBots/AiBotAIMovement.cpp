@@ -147,6 +147,10 @@ void AiBotAI::DoRandomWander()
     if (me->IsMoving() || me->IsInCombat())
         return;
 
+    // [SUI] An RTS-commanded or enlisted bot stands where it was told; no idle stroll.
+    if (m_suiRtsHold || IsSuiConscripted())
+        return;
+
     if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
         return;
 

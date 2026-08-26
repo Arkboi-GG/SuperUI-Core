@@ -746,6 +746,14 @@ void World::LoadConfigSettings(bool reload)
     setConfig(CONFIG_INT32_QUEST_LOW_LEVEL_HIDE_DIFF, "Quests.LowLevelHideDiff", 4);
     setConfig(CONFIG_INT32_QUEST_HIGH_LEVEL_HIDE_DIFF, "Quests.HighLevelHideDiff", 7);
 
+    // PLAN_20 P2 held-quest cap. MAX_QUEST_LOG_SIZE (20) stays frozen -- it is
+    // the vanilla update-field slot count. Quests past the twenty slots are held
+    // server-side with no field mirror and reach a SuperUI client over
+    // SMSG_SUI_QUEST_LOG; a stock 1.12 client simply never sees them, which is
+    // why the floor is 20 rather than 0.
+    setConfigMinMax(CONFIG_UINT32_MAX_QUEST_HELD, "Quests.MaxHeld", 100,
+        uint32(MAX_QUEST_LOG_SIZE), 1000);
+
     setConfig(CONFIG_BOOL_QUEST_IGNORE_RAID, "Quests.IgnoreRaid", false);
 
     setConfig(CONFIG_BOOL_DETECT_POS_COLLISION, "DetectPosCollision", true);

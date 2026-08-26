@@ -871,6 +871,8 @@ CREATE TABLE IF NOT EXISTS `playerbot` (
   `ai` varchar(50) DEFAULT NULL,
   `race` tinyint(3) unsigned NOT NULL DEFAULT '0',
   `class` tinyint(3) unsigned NOT NULL DEFAULT '0',
+  `spec_tab` tinyint(3) unsigned NOT NULL DEFAULT '255' COMMENT 'Class-local talent profile 0..2; 255 means unassigned',
+  `active_role` tinyint(3) unsigned NOT NULL DEFAULT '0' COMMENT 'CombatBotRoles: 0 unassigned/invalid, 1 melee, 2 ranged, 3 tank, 4 healer',
   `level` tinyint(3) unsigned NOT NULL DEFAULT '0',
   `map` smallint(5) unsigned NOT NULL DEFAULT '0' COMMENT 'Map Identifier',
   `position_x` float NOT NULL DEFAULT '0',

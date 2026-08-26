@@ -196,7 +196,9 @@ set (game_SRCS
     PlayerBots/CombatBotBaseAI.cpp
     PlayerBots/BattleBotAI.cpp
     SuperUiContent/SuiBots/AiBotAIMain.cpp
+    SuperUiContent/SuiBots/AiBotTalents.cpp
     SuperUiContent/SuiBots/AiBotAICombat.cpp
+    SuperUiContent/SuiBots/AiBotAISpecCombat.cpp
     SuperUiContent/SuiBots/AiBotAIMovement.cpp
     SuperUiContent/SuiBots/AiBotAILoot.cpp
     SuperUiContent/SuiBots/AiBotAIGrind.cpp
@@ -470,6 +472,7 @@ set (game_SRCS
     PlayerBots/PartyBotAI.h
     PlayerBots/BattleBotAI.h
     SuperUiContent/SuiBots/AiBotAIMain.h
+    SuperUiContent/SuiBots/AiBotTalents.h
     SuperUiContent/SuiBots/AiBotAI.h
     SuperUiContent/SuiBots/AiBotAITeamPlay.h
     SuperUiContent/SuiWorld/Shared/SuiWorldState.h

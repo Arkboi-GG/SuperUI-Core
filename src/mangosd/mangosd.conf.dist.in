@@ -984,6 +984,14 @@ PerformanceLog.SlowPacketBroadcast      = 0
 #        Default: 0 (not allowed)
 #                 1 (allowed)
 #
+#    Quests.MaxHeld
+#        Maximum number of quests a character may hold at once.
+#        Only the first 20 held quests occupy a client quest log slot; the rest
+#        are tracked server-side and are invisible to the original 1.12 client's
+#        quest log (a SuperUI client shows them all).
+#        Default: 100
+#        Minimum: 20
+#
 #    Group.OfflineLeaderDelay
 #        A grace period for an offline group leader to reconnect before tranfering leadership to the next suitable member of the group (in secs)
 #        Default: 300 (5 minutes)
@@ -1144,6 +1152,7 @@ Item.PreventDataMining = 1
 Quests.LowLevelHideDiff = 4
 Quests.HighLevelHideDiff = 7
 Quests.IgnoreRaid = 0
+Quests.MaxHeld = 100
 Group.OfflineLeaderDelay = 300
 Guild.EventLogRecordsCount = 100
 MirrorTimer.Fatigue.Max = 60

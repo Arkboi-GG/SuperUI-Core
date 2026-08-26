@@ -32,6 +32,16 @@ class Player;
 class ObjectMgr;
 
 #define MAX_QUEST_LOG_SIZE 20
+// PLAN_20 P2. MAX_QUEST_LOG_SIZE above is the UPDATE-FIELD SLOT count and is
+// frozen forever -- it is the vanilla field layout that the 1.12 client, every
+// packet builder and the anticheat all depend on.
+//
+// How many quests a character may HOLD is a DIFFERENT number and lives in the
+// config as `Quests.MaxHeld` (CONFIG_UINT32_MAX_QUEST_HELD, default 100, floor
+// MAX_QUEST_LOG_SIZE). Quests beyond the twenty slots live in mQuestStatus and
+// the DB with no field mirror, and reach a SuperUI client over
+// SMSG_SUI_QUEST_LOG; a stock client simply never sees them. Do not
+// reintroduce a compile-time held cap -- there would then be two answers.
 
 #define QUEST_OBJECTIVES_COUNT 4
 #define QUEST_ITEM_OBJECTIVES_COUNT QUEST_OBJECTIVES_COUNT

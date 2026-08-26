@@ -22,6 +22,31 @@ namespace SuiPortal
     // Faction bot control groups (census + non-party possession + RTS orders)
     // are served by this core. Baseline SuperUI — advertised unconditionally.
     constexpr uint32 CAPABILITY_FACTION_CONTROL_GROUPS_V1 = 1u << 2;
+    // Party member facts: party/raid AiBot inventory snapshots + known spells
+    // pushed without possession (owner rule: party = full facts, faction =
+    // orders). Advertised unconditionally; the client never pulls without it.
+    constexpr uint32 CAPABILITY_PARTY_MEMBER_FACTS_V1 = 1u << 3;
+    // Phase C v1: instant item moves between party members (the CRPG shared
+    // backpack). Both endpoints re-snapshot after every accepted move.
+    constexpr uint32 CAPABILITY_PARTY_ITEM_MOVE_V1 = 1u << 4;
+    // PLAN_20 P1: party/raid quest logs pushed without possession, and the
+    // requester's own quests held past the twenty update-field slots. Both ride
+    // SMSG_SUI_QUEST_LOG — the subject guid says which.
+    constexpr uint32 CAPABILITY_PARTY_QUEST_FACTS_V1 = 1u << 5;
+    // PLAN_20 P3: accept / turn in / abandon on behalf of party members, with the
+    // reward chosen per member. Also the id-addressed abandon that the vanilla
+    // slot-indexed CMSG_QUESTLOG_REMOVE_QUEST cannot express.
+    constexpr uint32 CAPABILITY_PARTY_QUEST_ACTS_V1 = 1u << 6;
+    // Bit 7 is reserved for PLAN_20 P4 (party-vendor-v1) and left unclaimed even
+    // though P5 shipped first.
+    // PLAN_20 P5: per-member questgiver dialog status, so a world marker can wear
+    // an honest "(4)". The client cannot compute this -- eligibility needs level,
+    // prerequisites, race, class and exclusive groups it never receives for a
+    // companion, and it is never told which quests an NPC offers at all.
+    constexpr uint32 CAPABILITY_PARTY_GIVER_STATUS_V1 = 1u << 8;
+    // PLAN_20 P4a: take group leadership back from a companion bot. Only ever
+    // from a BOT -- taking it from a real player would be a griefing verb.
+    constexpr uint32 CAPABILITY_PARTY_LEAD_V1 = 1u << 9;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

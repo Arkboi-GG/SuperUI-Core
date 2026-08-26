@@ -24,14 +24,19 @@ Every statement is idempotent (`CREATE TABLE IF NOT EXISTS`), safe to re-run.
 |------|-----------|----------|
 | `01_characters_superui_rts.sql` | `characters` | RTS World-State rules & live state — `superui_worldstate`, `superui_rules_*`, `superui_faction`, `superui_heroes`, `superui_zone_control`, `superui_dungeon_control` |
 | `02_world_superui.sql` | world | Spell Creator (`custom_spell_meta`), RTS spell preservation (`superui_rts_spell_original`, `..._state`), and `custom_texts` (no-op if your base already ships it) |
-| `03_vmangos_admin_lootifier.sql` | `vmangos_admin` | **Boot-critical.** `lootifier_generated_items` — the core reads it while loading quest reward variants; must exist before mangosd's first world load |
+| `03_vmangos_admin_lootifier.sql` | `vmangos_admin` | Shared prerequisites: boot-critical `lootifier_generated_items`, plus MangosSuperUI's durable `bot_combat_loadout_queue` and dispatch indexes |
 
 ## Applying
 
 ```bash
 mysql -u <user> -p characters      < sql/superui/01_characters_superui_rts.sql
 mysql -u <user> -p <world-db-name> < sql/superui/02_world_superui.sql
-mysql -u <user> -p                 < sql/superui/03_vmangos_admin_lootifier.sql   # creates the DB + table
+mysql -u <user> -p                 < sql/superui/03_vmangos_admin_lootifier.sql   # creates the DB + required admin tables
 ```
 
 Replace `<world-db-name>` with your world database (commonly `mangos`).
+
+MangosSuperUI also ships its broader base admin schema at
+`MangosSuperUI/sql/vmangos_admin_schema.sql`. Both definitions of
+`bot_combat_loadout_queue` are intentionally identical. The web application's
+startup migrations remain authoritative for upgrading an existing queue table.

@@ -314,6 +314,15 @@ class WorldSession
         void SetSuiControlledGuid(ObjectGuid guid) { m_suiControlledGuid = guid; }
         bool IsSuiCapable() const { return m_suiCapable; }
         void SetSuiCapable(bool on) { m_suiCapable = on; }
+        // Member-facts pulls are rate-limited independently of movement (wire law).
+        uint32 GetSuiMemberFactsPullMs() const { return m_suiMemberFactsPullMs; }
+        void SetSuiMemberFactsPullMs(uint32 ms) { m_suiMemberFactsPullMs = ms; }
+        // Quest-facts pulls are limited separately: a quest panel and a bag panel
+        // are different user actions and must not starve each other.
+        uint32 GetSuiQuestFactsPullMs() const { return m_suiQuestFactsPullMs; }
+        void SetSuiQuestFactsPullMs(uint32 ms) { m_suiQuestFactsPullMs = ms; }
+        uint32 GetSuiGiverStatusPullMs() const { return m_suiGiverStatusPullMs; }
+        void SetSuiGiverStatusPullMs(uint32 ms) { m_suiGiverStatusPullMs = ms; }
         Player* GetSuiActor();                              // possessed bot while driving one, else _player
 
         // Warden / Anticheat
@@ -512,6 +521,12 @@ class WorldSession
         void HandleSuiRtsStateOpcode(WorldPackets::SuiRts::RtsState const& packet);
         void HandleSuiRtsActionOpcode(WorldPackets::SuiRts::RtsAction const& packet);
         void HandleSuiForceRosterOpcode(WorldPackets::SuiControl::ForceRoster const& packet);
+        void HandleSuiMemberFactsOpcode(WorldPackets::SuiControl::MemberFacts const& packet);
+        void HandleSuiMemberItemMoveOpcode(WorldPackets::SuiControl::MemberItemMove const& packet);
+        void HandleSuiQuestFactsOpcode(WorldPackets::SuiControl::QuestFacts const& packet);
+        void HandleSuiPartyQuestOpcode(WorldPackets::SuiControl::PartyQuest const& packet);
+        void HandleSuiGiverStatusOpcode(WorldPackets::SuiControl::GiverStatus const& packet);
+        void HandleSuiPartyLeadOpcode(WorldPackets::SuiControl::PartyLead const& packet);
         void HandleSuiPortalPrepareOpcode(WorldPackets::SuiPortal::Prepare const& packet);
         void HandleSuiPortalReadyOpcode(WorldPackets::SuiPortal::Ready const& packet);
 
@@ -896,6 +911,9 @@ class WorldSession
         uint32 m_moveRejectTime;
         ObjectGuid m_suiControlledGuid;                     // bot this session drives (SuiPossess)
         bool m_suiCapable = false;                          // session spoke CMSG_SUI_* - may receive SUI SMSGs
+        uint32 m_suiMemberFactsPullMs = 0;                  // last CMSG_SUI_MEMBER_FACTS (rate limit)
+        uint32 m_suiQuestFactsPullMs = 0;                   // last CMSG_SUI_QUEST_FACTS (rate limit)
+        uint32 m_suiGiverStatusPullMs = 0;                  // last CMSG_SUI_GIVER_STATUS (rate limit)
         ObjectGuid m_suiPortalGuid;                         // currently prepared real-portal object
         uint32 m_suiPortalGeneration = 0;                  // increments when this session prepares a new object
         uint32 m_suiPortalRevision = 0;                    // descriptor schema/data revision

@@ -17,6 +17,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "AiBotTalents.h"
 #include "SuiHero.h"
 #include "SuiPossess.h"      // [SUI] free-view command waiver on the possessed drop
 #include "Player.h"
@@ -203,14 +204,25 @@ void AiBotAI::BridgeSendHello()
     if (!m_bridgeConnected || m_bridgeHelloSent)
         return;
 
-    char json[512];
+    char const* specProfile = botEntry
+        ? AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab)
+        : "unassigned";
+    char json[768];
     snprintf(json, sizeof(json),
         "{\"type\":\"HELLO\",\"payload\":{"
         "\"guid\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
-        "\"level\":%u,\"mapId\":%u,\"zoneId\":%u,"
+        "\"level\":%u,\"specTab\":%u,\"specProfile\":\"%s\",\"activeRole\":%u,"
+        "\"talentProfileState\":\"%s\",\"rotationSource\":\"%s\","
+        "\"rotationProfile\":\"%s\",\"rotationInstructionCount\":%u,"
+        "\"rotationCastableCount\":%u,\"combatConfigRevision\":%u,"
+        "\"mapId\":%u,\"zoneId\":%u,"
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
         me->GetGUIDLow(), me->GetName(), me->GetRace(), me->GetClass(),
-        me->GetLevel(), me->GetMapId(), me->GetZoneId(),
+        me->GetLevel(), botEntry ? uint32(botEntry->specTab) : 255u,
+        specProfile, uint32(m_role), GetTalentProfileStateName(),
+        GetEffectiveRotationSource(), GetEffectiveRotationProfile(),
+        m_rotationInstructionCount, m_rotationCastableCount, m_combatConfigRevision,
+        me->GetMapId(), me->GetZoneId(),
         me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
 
     BridgeSend(json);
@@ -232,6 +244,37 @@ void AiBotAI::BridgeSendHello()
 
     m_bridgeHelloSent = true;
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: HELLO sent (guid=%u)", me->GetName(), me->GetGUIDLow());
+}
+
+char const* AiBotAI::GetTalentProfileStateName() const
+{
+    if (!botEntry)
+        return "unavailable";
+    switch (botEntry->talentProfileState)
+    {
+        case PB_TALENT_PROFILE_USABLE: return "usable";
+        case PB_TALENT_PROFILE_CONFLICT: return "conflict";
+        case PB_TALENT_PROFILE_INVALID: return "invalid";
+        case PB_TALENT_PROFILE_DISABLED: return "disabled";
+        case PB_TALENT_PROFILE_ERROR: return "error";
+        default: return "unchecked";
+    }
+}
+
+char const* AiBotAI::GetEffectiveRotationSource() const
+{
+    if (!m_rotation.empty())
+        return "custom";
+    return HasUsableSpecCombat() ? "builtin_spec" : "legacy_class";
+}
+
+char const* AiBotAI::GetEffectiveRotationProfile() const
+{
+    if (!m_rotation.empty())
+        return m_rotationProfile.c_str();
+    if (HasUsableSpecCombat() && botEntry)
+        return AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab);
+    return "legacy_class";
 }
 
 // ============================================================
@@ -414,10 +457,17 @@ void AiBotAI::BridgeSendState()
     }
 
     char json[4096];
+    char const* specProfile = botEntry
+        ? AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab)
+        : "unassigned";
     snprintf(json, sizeof(json),
         "{\"type\":\"STATE\",\"payload\":{"
         "\"guid\":%u,\"health\":%u,\"maxHealth\":%u,"
         "\"mana\":%u,\"maxMana\":%u,\"level\":%u,"
+        "\"specTab\":%u,\"specProfile\":\"%s\",\"activeRole\":%u,"
+        "\"talentProfileState\":\"%s\",\"rotationSource\":\"%s\","
+        "\"rotationProfile\":\"%s\",\"rotationInstructionCount\":%u,"
+        "\"rotationCastableCount\":%u,\"combatConfigRevision\":%u,"
         "\"mapId\":%u,\"zoneId\":%u,"
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,"
         "\"inCombat\":%s,\"isDead\":%s,"
@@ -426,11 +476,14 @@ void AiBotAI::BridgeSendState()
         "\"taskKind\":\"%s\",\"taskActivity\":\"%s\","
         "\"taskCreature\":%u,\"taskDestX\":%.2f,\"taskDestY\":%.2f,\"taskDestZ\":%.2f,\"taskKills\":%d,"
         "\"quests\":\"%s\","
-        "\"questId\":%u,\"questStatus\":%u,\"possessed\":%u}}",
+        "\"questId\":%u,\"questStatus\":%u,\"possessed\":%u,\"conscripted\":%u}}",
         me->GetGUIDLow(),
         me->GetHealth(), me->GetMaxHealth(),
         me->GetPower(POWER_MANA), me->GetMaxPower(POWER_MANA),
         me->GetLevel(),
+        botEntry ? uint32(botEntry->specTab) : 255u, specProfile, uint32(m_role),
+        GetTalentProfileStateName(), GetEffectiveRotationSource(), GetEffectiveRotationProfile(),
+        m_rotationInstructionCount, m_rotationCastableCount, m_combatConfigRevision,
         me->GetMapId(), me->GetZoneId(),
         me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
         me->IsInCombat() ? "true" : "false",
@@ -441,7 +494,8 @@ void AiBotAI::BridgeSendState()
         taskKindStr, activityStr,
         m_currentTask.creatureEntry, m_currentTask.x, m_currentTask.y, m_currentTask.z, m_currentTask.killCount,
         questBlob.c_str(),
-        m_trackedQuestId, questStatus, m_possessed ? 1u : 0u);
+        m_trackedQuestId, questStatus, m_possessed ? 1u : 0u,
+        IsSuiConscripted() ? 1u : 0u);
 
     BridgeSend(json);
 }
@@ -562,6 +616,56 @@ static bool JsonExtractString(const char* json, const char* key, char* out, int 
     return true;
 }
 
+// Destructive/admin commands must reject truncation rather than quietly applying
+// a prefix of the caller's value. Existing legacy handlers keep their tolerant
+// extractor; APPLY_COMBAT_LOADOUT uses this strict variant exclusively.
+static bool JsonExtractStringStrict(const char* json, const char* key, char* out, int maxLen)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    const char* end = strchr(p, '"');
+    if (!end || end - p >= maxLen)
+        return false;
+    int len = int(end - p);
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return true;
+}
+
+static bool JsonExtractBool(const char* json, const char* key, bool& out)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false;
+    p += strlen(pattern);
+    while (*p == ' ') ++p;
+    if (strncmp(p, "true", 4) == 0 || *p == '1')
+    {
+        out = true;
+        return true;
+    }
+    if (strncmp(p, "false", 5) == 0 || *p == '0')
+    {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+static bool IsSafeBridgeToken(const char* value, bool allowEmpty = false)
+{
+    if (!value || (!allowEmpty && !*value))
+        return false;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
+        if (!std::isalnum(*p) && *p != '_' && *p != '-' && *p != '.' && *p != ':')
+            return false;
+    return true;
+}
+
 void AiBotAI::BridgeProcessLine(const char* line)
 {
     // Extract "type" field
@@ -580,11 +684,30 @@ void AiBotAI::BridgeProcessLine(const char* line)
     // an RTS order is the only thing that can move this bot at all. Dropping the order here is
     // what made a commanded toon the one party member that ignored a move.
     if (m_possessed && strcmp(msgType, "PING") != 0 &&
+        strcmp(msgType, "APPLY_COMBAT_LOADOUT") != 0 &&
         !SuiPossess::IsCommandedFromFreeView(me))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (possessed)",
             me->GetName(), msgType);
         BridgeSendEvent("POSSESSED_DROP", msgType);
+        return;
+    }
+
+    // [SUI] An enlisted bot belongs to its commander, not the planner: brain
+    // lines are dropped with an explicit event so the C# supervisor sees an
+    // answer, not a stall. PING stays (liveness); COMBAT_DIRECTIVE, LOAD_ROTATION
+    // and LOAD_RAID_PLAN stay — conscripts keep their combat AI, and those are
+    // combat configuration, not errands (an enlisted bot is exactly the one you
+    // raid-plan with). Commander-injected RTS orders arrive via
+    // SuiInjectCommandLine and pass the fence.
+    if (IsSuiConscripted() && !m_suiCommanderLine &&
+        strcmp(msgType, "PING") != 0 && strcmp(msgType, "COMBAT_DIRECTIVE") != 0 &&
+        strcmp(msgType, "LOAD_ROTATION") != 0 && strcmp(msgType, "APPLY_COMBAT_LOADOUT") != 0 &&
+        strcmp(msgType, "LOAD_RAID_PLAN") != 0)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (conscripted)",
+            me->GetName(), msgType);
+        BridgeSendEvent("CONSCRIPTED_DROP", msgType);
         return;
     }
 
@@ -630,6 +753,8 @@ void AiBotAI::BridgeProcessLine(const char* line)
         BridgeHandleSetEscort(line);
     else if (strcmp(msgType, "LOAD_ROTATION") == 0)
         BridgeHandleLoadRotation(line);
+    else if (strcmp(msgType, "APPLY_COMBAT_LOADOUT") == 0)
+        BridgeHandleApplyCombatLoadout(line);
     else if (strcmp(msgType, "LOAD_RAID_PLAN") == 0)
         BridgeHandleLoadRaidPlan(line);
     else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0)
@@ -930,12 +1055,20 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
     JsonExtractString(json, "data", dataBuf, sizeof(dataBuf));
 
     m_rotation.clear();
-    m_rotationProfile = profileBuf;
+    m_rotationProfile.clear();
+    m_rotationInstructionCount = 0;
+    m_rotationCastableCount = 0;
 
     if (dataBuf[0] == '\0')
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-ROTATION] %s: slate CLEARED — vanilla class AI resumes", me->GetName());
-        BridgeSendEvent("ROTATION_ACK", "profile=|loaded=0|skipped=0");
+        ++m_combatConfigRevision;
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-ROTATION] %s: slate CLEARED — built-in spec policy (or legacy fallback) resumes",
+            me->GetName());
+        char ack[192];
+        snprintf(ack, sizeof(ack), "profile=|loaded=0|skipped=0|revision=%u", m_combatConfigRevision);
+        BridgeSendEvent("ROTATION_ACK", ack);
+        BridgeSendState();
         return;
     }
 
@@ -943,6 +1076,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
     char* saveptr = nullptr;
     for (char* seg = strtok_r(dataBuf, "|", &saveptr); seg != nullptr; seg = strtok_r(nullptr, "|", &saveptr))
     {
+        ++m_rotationInstructionCount;
         uint32 spellId = 0, auraId = 0;
         int prio = 0, target = 1, hpMin = 0, hpMax = 100, present = 0;
         if (sscanf(seg, "%u:%d:%d:%d:%d:%u:%d", &spellId, &prio, &target, &hpMin, &hpMax, &auraId, &present) != 7)
@@ -951,34 +1085,351 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
             continue;
         }
 
+        SpellEntry const* pSpell = spellId ? sSpellMgr.GetSpellEntry(spellId) : nullptr;
+        if (!pSpell || !me->HasSpell(spellId) || target < 0 || target > 2 ||
+            hpMin < 0 || hpMax > 100 || hpMin > hpMax ||
+            (auraId && !sSpellMgr.GetSpellEntry(auraId)))
+        {
+            ++skipped;
+            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                "[AIBOT-ROTATION] %s: rejected invalid/unlearned spell %u in profile '%s'",
+                me->GetName(), spellId, profileBuf);
+            continue;
+        }
+
         RotationInstruction inst;
         inst.spellId = spellId;
-        inst.pSpell = me->HasSpell(spellId) ? sSpellMgr.GetSpellEntry(spellId) : nullptr;
+        inst.pSpell = pSpell;
         inst.target = (uint8)target;
         inst.hpMin = hpMin;
         inst.hpMax = hpMax;
         inst.auraId = auraId;
         inst.auraPresent = (present != 0);
         m_rotation.push_back(inst);
-
-        if (inst.pSpell)
-            ++loaded;
-        else
-        {
-            ++skipped;
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT-ROTATION] %s: spell %u in profile '%s' unknown/unlearned — instruction will be skipped",
-                me->GetName(), spellId, profileBuf);
-        }
+        ++loaded;
     }
+
+    m_rotationCastableCount = loaded;
+    if (loaded)
+        m_rotationProfile = profileBuf;
+    ++m_combatConfigRevision;
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-ROTATION] %s: slate '%s' loaded — %u castable, %u skipped (of %u instructions)",
         me->GetName(), profileBuf, loaded, skipped, (uint32)m_rotation.size());
 
-    char ack[160];
-    snprintf(ack, sizeof(ack), "profile=%s|loaded=%u|skipped=%u", profileBuf, loaded, skipped);
+    char ack[192];
+    snprintf(ack, sizeof(ack), "profile=%s|loaded=%u|skipped=%u|revision=%u",
+        loaded ? profileBuf : "", loaded, skipped, m_combatConfigRevision);
     BridgeSendEvent("ROTATION_ACK", ack);
+    BridgeSendState();
+}
+
+// One correlated, core-authoritative operation for the web build workshop.
+// Talent/profile/role and the live rotation move together on this bot's world
+// thread; SuperUI never edits character_spell directly.
+void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
+{
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json;
+
+    char requestId[48] = {0};
+    char rotationMode[24] = {0};
+    char rotationProfile[64] = {0};
+    char rotationData[2048] = {0};
+    int expectedRevision = -1;
+    int specTab = -1;
+    int activeRole = 0;
+    bool resetTalents = false;
+
+    bool const requestOk = JsonExtractStringStrict(payload, "requestId", requestId, sizeof(requestId)) &&
+        IsSafeBridgeToken(requestId) &&
+        JsonExtractInt(payload, "expectedRevision", expectedRevision) &&
+        JsonExtractInt(payload, "specTab", specTab) &&
+        JsonExtractInt(payload, "activeRole", activeRole) &&
+        JsonExtractBool(payload, "resetTalents", resetTalents) &&
+        JsonExtractStringStrict(payload, "rotationMode", rotationMode, sizeof(rotationMode)) &&
+        JsonExtractStringStrict(payload, "rotationProfile", rotationProfile, sizeof(rotationProfile)) &&
+        JsonExtractStringStrict(payload, "rotationData", rotationData, sizeof(rotationData));
+
+    auto sendAck = [&](char const* status, char const* code, uint32 learned)
+    {
+        char const* profile = (me && botEntry)
+            ? AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab)
+            : "unassigned";
+        uint32 skipped = m_rotationInstructionCount > m_rotationCastableCount
+            ? m_rotationInstructionCount - m_rotationCastableCount : 0;
+        char ack[480];
+        snprintf(ack, sizeof(ack),
+            "requestId=%s|status=%s|code=%s|revision=%u|specTab=%u|profile=%s|role=%u|"
+            "talentState=%s|learned=%u|rotationSource=%s|rotationProfile=%s|loaded=%u|skipped=%u|reset=%u",
+            requestId, status, code, m_combatConfigRevision,
+            botEntry ? uint32(botEntry->specTab) : 255u, profile, uint32(m_role),
+            GetTalentProfileStateName(), learned, GetEffectiveRotationSource(),
+            GetEffectiveRotationProfile(), m_rotationCastableCount, skipped,
+            resetTalents ? 1u : 0u);
+        if (requestId[0])
+        {
+            m_lastCombatLoadoutRequest = requestId;
+            m_lastCombatLoadoutAck = ack;
+        }
+        BridgeSendEvent("COMBAT_LOADOUT_ACK", ack);
+    };
+
+    if (!requestOk)
+    {
+        // Never reflect an untrusted token into the event's JSON data string.
+        requestId[0] = '\0';
+        sendAck("error", "invalid_request", 0);
+        return;
+    }
+
+    if (m_lastCombatLoadoutRequest == requestId && !m_lastCombatLoadoutAck.empty())
+    {
+        BridgeSendEvent("COMBAT_LOADOUT_ACK", m_lastCombatLoadoutAck.c_str());
+        return;
+    }
+
+    if (expectedRevision < 0 || uint32(expectedRevision) != m_combatConfigRevision)
+    {
+        sendAck("error", "stale_revision", 0);
+        return;
+    }
+    if (!me || !botEntry || m_ownedDummyEntry || !m_initialized)
+    {
+        sendAck("error", "not_managed", 0);
+        return;
+    }
+    if (specTab < 0 || specTab > 2)
+    {
+        sendAck("error", "invalid_profile", 0);
+        return;
+    }
+    CombatBotRoles requestedRole = CombatBotRoles(activeRole);
+    if (!AiBotTalents::IsProfileRoleAllowed(me->GetClass(), uint8(specTab), requestedRole))
+    {
+        sendAck("error", "invalid_role", 0);
+        return;
+    }
+    if (!resetTalents && botEntry->specTab != uint8(specTab))
+    {
+        sendAck("error", "reset_required", 0);
+        return;
+    }
+
+    bool const useSpecRotation = strcmp(rotationMode, "SPEC") == 0 ||
+        strcmp(rotationMode, "spec_default") == 0;
+    bool const useCustomRotation = strcmp(rotationMode, "CUSTOM") == 0 ||
+        strcmp(rotationMode, "custom") == 0;
+    if (!useSpecRotation && !useCustomRotation)
+    {
+        sendAck("error", "invalid_rotation_mode", 0);
+        return;
+    }
+
+    std::vector<RotationInstruction> stagedRotation;
+    uint32 stagedInstructionCount = 0;
+    if (useCustomRotation)
+    {
+        if (!IsSafeBridgeToken(rotationProfile) || !rotationData[0])
+        {
+            sendAck("error", "invalid_rotation", 0);
+            return;
+        }
+
+        char* saveptr = nullptr;
+        for (char* seg = strtok_r(rotationData, "|", &saveptr); seg != nullptr; seg = strtok_r(nullptr, "|", &saveptr))
+        {
+            if (++stagedInstructionCount > 64)
+            {
+                sendAck("error", "rotation_too_large", 0);
+                return;
+            }
+
+            uint32 spellId = 0, auraId = 0;
+            int prio = 0, target = 1, hpMin = 0, hpMax = 100, present = 0;
+            if (sscanf(seg, "%u:%d:%d:%d:%d:%u:%d", &spellId, &prio, &target,
+                    &hpMin, &hpMax, &auraId, &present) != 7 ||
+                !spellId || prio < 0 || target < 0 || target > 2 ||
+                hpMin < 0 || hpMax > 100 || hpMin > hpMax ||
+                (present != 0 && present != 1) ||
+                !sSpellMgr.GetSpellEntry(spellId) ||
+                (auraId && !sSpellMgr.GetSpellEntry(auraId)))
+            {
+                sendAck("error", "invalid_rotation", 0);
+                return;
+            }
+
+            // A non-reset operation cannot change the known spell set, so reject
+            // an unlearned entry before touching even role metadata. A rebuild is
+            // re-resolved after the new talent prefix has been purchased.
+            if (!resetTalents && !me->HasSpell(spellId))
+            {
+                sendAck("error", "rotation_spell_unlearned", 0);
+                return;
+            }
+
+            RotationInstruction inst;
+            inst.spellId = spellId;
+            inst.pSpell = sSpellMgr.GetSpellEntry(spellId);
+            inst.target = uint8(target);
+            inst.hpMin = hpMin;
+            inst.hpMax = hpMax;
+            inst.auraId = auraId;
+            inst.auraPresent = present != 0;
+            stagedRotation.push_back(inst);
+        }
+        if (stagedRotation.empty())
+        {
+            sendAck("error", "invalid_rotation", 0);
+            return;
+        }
+    }
+
+    if (m_possessed)
+    {
+        sendAck("error", "bot_possessed", 0);
+        return;
+    }
+    if (!me->IsAlive())
+    {
+        sendAck("error", "bot_dead", 0);
+        return;
+    }
+    if (me->IsInCombat())
+    {
+        sendAck("error", "bot_in_combat", 0);
+        return;
+    }
+    if (me->IsNonMeleeSpellCasted(false, false, true))
+    {
+        sendAck("error", "bot_casting", 0);
+        return;
+    }
+    if (me->IsBeingTeleported())
+    {
+        sendAck("error", "bot_teleporting", 0);
+        return;
+    }
+    if (!me->GetTaxi().empty() || me->HasUnitState(UNIT_STATE_TAXI_FLIGHT))
+    {
+        sendAck("error", "bot_on_taxi", 0);
+        return;
+    }
+    if (me->InBattleGround())
+    {
+        sendAck("error", "bot_in_battleground", 0);
+        return;
+    }
+
+    AiBotTalents::TalentSnapshot beforeTalents;
+    if (!AiBotTalents::CaptureSnapshot(me, botEntry, beforeTalents))
+    {
+        sendAck("error", "snapshot_failed", 0);
+        return;
+    }
+    std::vector<RotationInstruction> const beforeRotation = m_rotation;
+    std::string const beforeRotationProfile = m_rotationProfile;
+    uint32 const beforeInstructionCount = m_rotationInstructionCount;
+    uint32 const beforeCastableCount = m_rotationCastableCount;
+    CombatBotRoles const beforeRole = m_role;
+
+    // Clear cached talent spell pointers before the free reset. They are restored
+    // only after the corresponding talent snapshot has been restored.
+    m_rotation.clear();
+    m_rotationProfile.clear();
+    m_rotationInstructionCount = 0;
+    m_rotationCastableCount = 0;
+
+    AiBotTalents::ApplyResult applied = AiBotTalents::ApplyProfileAndRole(
+        me, botEntry, uint8(specTab), requestedRole, resetTalents);
+
+    auto refreshLifecycle = [&]()
+    {
+        LearnBotClassQuestSpells();
+        LearnTrainerAndItemSpells();
+        LearnArmorProficiencies();
+        ResetSpellData();
+        PopulateSpellData();
+        AddAllSpellReagents();
+        me->UpdateSkillsToMaxSkillsForLevel();
+        SummonPetIfNeeded();
+    };
+
+    if (applied.status != AiBotTalents::TALENT_APPLY_OK)
+    {
+        if (applied.status != AiBotTalents::TALENT_APPLY_ROLLBACK_FAILED)
+        {
+            m_rotation = beforeRotation;
+            m_rotationProfile = beforeRotationProfile;
+            m_rotationInstructionCount = beforeInstructionCount;
+            m_rotationCastableCount = beforeCastableCount;
+        }
+        m_role = beforeRole;
+        if (applied.resetPerformed)
+            refreshLifecycle();
+        me->SaveToDB();
+        sendAck("error", AiBotTalents::GetApplyStatusCode(applied.status), applied.learnedPoints);
+        BridgeSendState();
+        return;
+    }
+
+    m_role = applied.role;
+    if (applied.resetPerformed)
+        refreshLifecycle();
+
+    if (useCustomRotation)
+    {
+        bool allKnown = true;
+        for (RotationInstruction& inst : stagedRotation)
+        {
+            inst.pSpell = me->HasSpell(inst.spellId) ? sSpellMgr.GetSpellEntry(inst.spellId) : nullptr;
+            if (!inst.pSpell)
+            {
+                allKnown = false;
+                break;
+            }
+        }
+
+        if (!allKnown)
+        {
+            bool const rolledBack = AiBotTalents::RestoreSnapshot(me, botEntry, beforeTalents);
+            m_role = beforeRole;
+            refreshLifecycle();
+            if (rolledBack)
+            {
+                m_rotation = beforeRotation;
+                m_rotationProfile = beforeRotationProfile;
+                m_rotationInstructionCount = beforeInstructionCount;
+                m_rotationCastableCount = beforeCastableCount;
+            }
+            else
+            {
+                m_rotation.clear();
+                m_rotationProfile.clear();
+                m_rotationInstructionCount = 0;
+                m_rotationCastableCount = 0;
+            }
+            me->SaveToDB();
+            sendAck("error", rolledBack ? "rotation_spell_unlearned" : "rollback_failed", applied.learnedPoints);
+            BridgeSendState();
+            return;
+        }
+
+        m_rotation.swap(stagedRotation);
+        m_rotationProfile = rotationProfile;
+        m_rotationInstructionCount = stagedInstructionCount;
+        m_rotationCastableCount = stagedInstructionCount;
+    }
+
+    me->SaveToDB();
+    ++m_combatConfigRevision;
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-LOADOUT] %s request=%s applied profile=%s role=%u reset=%u rotation=%s revision=%u",
+        me->GetName(), requestId, AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab),
+        uint32(m_role), resetTalents ? 1u : 0u, GetEffectiveRotationSource(), m_combatConfigRevision);
+    sendAck("ok", "ok", applied.learnedPoints);
+    BridgeSendState();
 }
 
 // ============================================================
@@ -1368,7 +1819,10 @@ void AiBotAI::BridgeHandleAbandonQuest(const char* json)
         return;
     }
 
-    me->SetQuestStatus(questId, QUEST_STATUS_NONE);
+    // PLAN_20 P2: the full abandon, not just the status poke -- this used to
+    // leave the update-field slot occupied, the timed-quest registration live
+    // and the quest items in the bags.
+    me->RemoveQuestById(questId);
     if (m_trackedQuestId == (uint32)questId)  
         m_trackedQuestId = 0;
 
@@ -2668,6 +3122,17 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
     // --- Cast. Trigger the cast when the bot doesn't "know" the spell (item-granted quest
     //     spells, e.g. a provided rod); otherwise cast it for real so cast time / cost apply.
     //     Called as a plain statement so it compiles whether CastSpell returns void or a result. ---
+    // A planner/slate bug can hand spell=0 or an id the DBCs do not know;
+    // casting it only spams "unknown spell id 0" in the core log. Refuse
+    // honestly through the same failure event instead.
+    if (!spellId || !sSpellMgr.GetSpellEntry(spellId))
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "reason=bad_spell|entry=%d|spell=%u", entryInt, spellId);
+        BridgeSendEvent("QUEST_CAST_FAIL", buf);
+        return;
+    }
+
     me->StopMoving();
     me->SetFacingToObject(pTarget);
 

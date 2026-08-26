@@ -8,6 +8,7 @@
  */
 
 #include "SuiPossess.h"
+#include <algorithm>
 #include <unordered_map>
 #include <cmath>
 
@@ -30,6 +31,9 @@ namespace SuiPossess
 {
 
 static void SendSnapshot(WorldSession* to, Player* bot);   // defined with the M4 block below
+static void SendMemberSpells(WorldSession* to, Player* bot);   // member-facts block below
+static void PushMemberFactsTo(Player* realPlayer);             // member-facts block below
+static void PushMemberQuestsTo(Player* realPlayer);            // quest-facts block below
 static Creature* FreecamEyeOf(Player* player);
 static void EnsureFreecamEye(Player* player);
 static void RemoveFreecamEye(Player* player);
@@ -483,6 +487,154 @@ void ForceRelease(WorldSession* session, AckResult reason)
     DoRelease(session, reason, true);
 }
 
+// ── Conscription ─────────────────────────────────────────────────────────────
+// A bot assigned to a client control group is ENLISTED: the C# brain planner
+// stands down for it (STATE conscripted:1 plus the bridge fence) while combat
+// AI, doctrine reactions and explicit RTS orders keep working. The registry
+// exists so a commander's logout can muster out the whole army; group state is
+// session-local on the client, so the server must not depend on a farewell
+// packet arriving.
+
+static std::unordered_map<ObjectGuid, std::vector<ObjectGuid>> s_conscriptsByCommander;
+
+static void ForgetConscript(ObjectGuid commander, ObjectGuid bot)
+{
+    auto it = s_conscriptsByCommander.find(commander);
+    if (it == s_conscriptsByCommander.end())
+        return;
+    std::vector<ObjectGuid>& roster = it->second;
+    roster.erase(std::remove(roster.begin(), roster.end(), bot), roster.end());
+    if (roster.empty())
+        s_conscriptsByCommander.erase(it);
+}
+
+static void Conscript(Player* commander, Player* pMember, AiBotAI* ai)
+{
+    ObjectGuid const commanderGuid = commander->GetObjectGuid();
+    if (ai->IsSuiConscripted() && ai->m_suiConscriptedBy != commanderGuid)
+        ForgetConscript(ai->m_suiConscriptedBy, pMember->GetObjectGuid());   // takeover
+    ai->m_suiConscriptedBy = commanderGuid;
+    std::vector<ObjectGuid>& roster = s_conscriptsByCommander[commanderGuid];
+    if (std::find(roster.begin(), roster.end(), pMember->GetObjectGuid()) == roster.end())
+        roster.push_back(pMember->GetObjectGuid());
+    // The planner's errand dies here (RefreshDoctrine precedent); the march
+    // stops unless combat AI is mid-fight. Enlisted = at attention.
+    ai->SuiAbandonJourney();
+    ai->m_suiRtsHold = true;
+    if (!pMember->IsInCombat())
+        ai->StopMoving();
+}
+
+static void Dismiss(Player* pMember, AiBotAI* ai)
+{
+    if (!ai->IsSuiConscripted())
+        return;
+    ForgetConscript(ai->m_suiConscriptedBy, pMember->GetObjectGuid());
+    ai->m_suiConscriptedBy.Clear();
+    // Muster out: tactical latches die with the journey (SuiAbandonJourney
+    // clears hold and the sheath override) and the brain resumes questing in
+    // place — the next STATE shows conscripted:0 and the planner re-tasks from
+    // wherever the war left the bot.
+    ai->SuiAbandonJourney();
+}
+
+static void DismissConscriptsOf(Player* commander)
+{
+    auto it = s_conscriptsByCommander.find(commander->GetObjectGuid());
+    if (it == s_conscriptsByCommander.end())
+        return;
+    std::vector<ObjectGuid> roster = std::move(it->second);
+    s_conscriptsByCommander.erase(it);
+    for (ObjectGuid guid : roster)
+        if (Player* bot = sObjectMgr.GetPlayer(guid))
+            if (AiBotAI* ai = dynamic_cast<AiBotAI*>(bot->AI()))
+                if (ai->m_suiConscriptedBy == commander->GetObjectGuid())
+                {
+                    ai->m_suiConscriptedBy.Clear();
+                    ai->SuiAbandonJourney();
+                }
+}
+
+// [SUI] Lay a formation around the anchor and walk every subject to its slot.
+// LINE is a standing army: ranks of five, 2.5 yd files and 3 yd ranks, all
+// facing the commander. CIRCLE spaces the set evenly on a ring, everyone
+// facing outward. The packet coordinate is the anchor; a zero coordinate means
+// "form up where you stand" (the squad's centroid). Slots ride the normal
+// MoveToDestination path (chunked pathfinding, in-combat deferral) and the
+// slot facing is applied by MovementInform on arrival.
+static void DispatchFormation(Player* player,
+    std::vector<std::pair<Player*, AiBotAI*>> const& subjects,
+    bool circle, float x, float y, float z)
+{
+    float const pi = 3.14159265f;
+    auto normalize = [pi](float o)
+    {
+        while (o < 0.f) o += 2.f * pi;
+        while (o >= 2.f * pi) o -= 2.f * pi;
+        return o;
+    };
+
+    float ax = x, ay = y, az = z;
+    if (ax == 0.0f && ay == 0.0f)
+    {
+        az = 0.0f;
+        for (auto const& entry : subjects)
+        {
+            ax += entry.first->GetPositionX();
+            ay += entry.first->GetPositionY();
+            az += entry.first->GetPositionZ();
+        }
+        float const inv = 1.0f / float(subjects.size());
+        ax *= inv; ay *= inv; az *= inv;
+    }
+
+    // The army faces its commander; a commander standing on the anchor keeps
+    // their own facing as the parade direction.
+    float face = player->GetOrientation();
+    float const cdx = player->GetPositionX() - ax;
+    float const cdy = player->GetPositionY() - ay;
+    if (cdx * cdx + cdy * cdy > 1.0f)
+        face = atan2f(cdy, cdx);
+
+    size_t const n = subjects.size();
+    float const fileSpacing = 2.5f, rankSpacing = 3.0f, arcSpacing = 3.0f;
+    float const radius = std::max(2.5f, float(n) * arcSpacing / (2.0f * pi));
+    size_t const files = n < 5 ? n : 5;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        AiBotAI* ai = subjects[i].second;
+        float sx, sy, slotFace;
+        if (circle)
+        {
+            float const theta = face + 2.0f * pi * float(i) / float(n);
+            sx = ax + radius * cosf(theta);
+            sy = ay + radius * sinf(theta);
+            slotFace = theta;   // everyone looks outward
+        }
+        else
+        {
+            float const fileOffset =
+                (float(i % files) - float(files - 1) * 0.5f) * fileSpacing;
+            float const rankOffset = float(i / files) * rankSpacing;
+            // Files span the commander's right hand; ranks stack away from them.
+            sx = ax + cosf(face - pi * 0.5f) * fileOffset - cosf(face) * rankOffset;
+            sy = ay + sinf(face - pi * 0.5f) * fileOffset - sinf(face) * rankOffset;
+            slotFace = face;
+        }
+
+        ai->SuiClearWaypoints();
+        ai->m_currentTask.Clear();
+        ai->m_currentTask.type = TASK_MOVE_TO;
+        ai->m_currentTask.x = sx;
+        ai->m_currentTask.y = sy;
+        ai->m_currentTask.z = az;
+        ai->MoveToDestination(sx, sy, az);
+        // After SuiClearWaypoints — it wipes the facing stamp.
+        ai->m_suiFormationFacing = normalize(slotFace);
+    }
+}
+
 void HandleOrder(WorldSession* session, uint8 orderType,
     std::vector<ObjectGuid> const& subjects, ObjectGuid targetGuid,
     float x, float y, float z)
@@ -496,6 +648,15 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     // silently ate every order a partyless owner clicked from the free view.
     Group* group = player->GetGroup();
     bool const freeView = FreecamEyeOf(player) != nullptr;
+
+    // Enrollment is always explicit: the privileged empty-list party expansion
+    // stays a nudge and must never conscript or dismiss anyone.
+    if ((orderType == ORDER_CONSCRIPT || orderType == ORDER_DISMISS) && subjects.empty())
+        return;
+
+    // Formation slots depend on the whole ordered set, so those subjects are
+    // collected here and laid out after the expansion loop below.
+    std::vector<std::pair<Player*, AiBotAI*>> formationSubjects;
 
     auto orderBot = [&](Player* pMember)
     {
@@ -547,6 +708,10 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         // chunked pathfinding and the in-combat MOVE_TO deferral. The PlayerParty
         // escort loop yields to an active TASK_MOVE_TO, so orders are not
         // formation-snapped on the next tick.
+        // [SUI] Every explicit order is discipline: the idle wander stands down
+        // until the journey is abandoned (doctrine change or possession).
+        ai->m_suiRtsHold = true;
+
         char json[192];
         switch (orderType)
         {
@@ -555,7 +720,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 snprintf(json, sizeof(json),
                     "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
                     pMember->GetMapId(), x, y, z);
-                ai->BridgeProcessLine(json);
+                ai->SuiInjectCommandLine(json);
                 break;
             case ORDER_ATTACK:
                 if (targetGuid.IsCreature())
@@ -567,7 +732,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                     snprintf(json, sizeof(json),
                         "{\"type\":\"ATTACK_TARGET\",\"payload\":{\"guid\":%u,\"entry\":%u}}",
                         targetGuid.GetCounter(), targetGuid.GetEntry());
-                    ai->BridgeProcessLine(json);
+                    ai->SuiInjectCommandLine(json);
                 }
                 break;
             case ORDER_MOVE_QUEUE:
@@ -584,7 +749,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 snprintf(json, sizeof(json),
                     "{\"type\":\"SET_ESCORT\",\"payload\":{\"player_name\":\"%s\"}}",
                     followTarget ? followTarget->GetName() : "");
-                ai->BridgeProcessLine(json);
+                ai->SuiInjectCommandLine(json);
                 break;
             }
             case ORDER_LINK:
@@ -612,6 +777,27 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 ai->m_currentTask.type = TASK_IDLE;
                 pMember->GetMotionMaster()->MoveIdle();
                 break;
+            case ORDER_FORMATION_LINE:
+            case ORDER_FORMATION_CIRCLE:
+                // Cross-map subjects cannot join this anchor's geometry.
+                if (pMember->GetMapId() == player->GetMapId() &&
+                    pMember->GetInstanceId() == player->GetInstanceId())
+                    formationSubjects.emplace_back(pMember, ai);
+                break;
+            case ORDER_SHEATH:
+            {
+                SheathState const want =
+                    x >= 0.5f ? SHEATH_STATE_MELEE : SHEATH_STATE_UNARMED;
+                ai->m_suiSheathOverride = int8(want);
+                pMember->SetSheath(want);
+                break;
+            }
+            case ORDER_CONSCRIPT:
+                Conscript(player, pMember, ai);
+                break;
+            case ORDER_DISMISS:
+                Dismiss(pMember, ai);
+                break;
             default:
                 break;
         }
@@ -625,6 +811,10 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             orderBot(itr->getSource());
     else
         orderBot(player);   // empty subject list solo = the own character
+
+    if (!formationSubjects.empty())
+        DispatchFormation(player, formationSubjects,
+            orderType == ORDER_FORMATION_CIRCLE, x, y, z);
 }
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
@@ -663,6 +853,10 @@ void OnLogout(WorldSession* session)
     DoRelease(session, RELEASED_LOGOUT, true);
     if (Player* player = session->GetPlayer())
     {
+        // The commander leaves: the whole army musters out and the brain
+        // resumes questing everyone in place. Group state is session-local on
+        // the client, so logout is the release edge the server must own.
+        DismissConscriptsOf(player);
         // Freecam logout: the unattended AI is owned here, not by a bot entry —
         // reclaim it before Player teardown.
         DetachUnattendedAI(player);
@@ -703,6 +897,9 @@ void SendRoster(Player* realPlayer)
             flags |= ROSTER_CONTROLLABLE;
         if (IsSuiPossessed(member))
             flags |= ROSTER_POSSESSED;
+        if (AiBotAI* memberAi = dynamic_cast<AiBotAI*>(member->AI()))
+            if (memberAi->IsSuiConscripted())
+                flags |= ROSTER_CONSCRIPTED;
         data << uint64(member->GetObjectGuid().GetRawValue());
         data << flags;
         ++count;
@@ -719,7 +916,14 @@ void BroadcastRoster(Group* group)
     {
         Player* member = itr->getSource();
         if (member && member->GetSession() && !member->GetSession()->GetBot())
+        {
             SendRoster(member);
+            // Party = full facts: the same roster edge re-pushes every party
+            // AiBot's bags + known spells to this SUI human (no possession).
+            PushMemberFactsTo(member);
+            // ...and, since PLAN_20 P1, every party member's quest log.
+            PushMemberQuestsTo(member);
+        }
     }
 }
 
@@ -821,6 +1025,765 @@ static void SendSnapshot(WorldSession* to, Player* bot)
     data << bot->GetFloatValue(UNIT_FIELD_MAXRANGEDDAMAGE);
 
     to->SendPacket(&data);
+}
+
+// ── Party member facts (owner decision 2026-08-25) ───────────────────────────
+// Party = full facts, faction = orders: every party/raid AiBot member's bags
+// (SMSG_SUI_SNAPSHOT, byte-identical to the possession wire) and known spells
+// (SMSG_SUI_MEMBER_SPELLS) go to the party's real SUI clients WITHOUT
+// possession. Pushed on every roster edge (BroadcastRoster) and pulled by
+// CMSG_SUI_MEMBER_FACTS when a client panel opens. Live cooldowns/casts stay
+// possession-only (the proxy wire); inventory dirty-hooks are deliberately
+// deferred — the client stamps snapshot age and re-pulls on panel open.
+
+/// The party/raid line itself: the subject must be an AiBot in the SAME group
+/// as the requester. Faction-control authority is deliberately NOT sufficient.
+static bool IsMemberFactsSubject(Player* requester, Player* member)
+{
+    if (!requester || !member || requester == member)
+        return false;
+    Group* group = requester->GetGroup();
+    if (!group || member->GetGroup() != group)
+        return false;
+    return member->GetSession() && member->GetSession()->GetBot() && BotAiOf(member);
+}
+
+/// u64 guid, u16 count, u32 spellIds[] — the active spellbook under the same
+/// filter SendInitialSpells applies, minus cooldowns (possession-only).
+static void SendMemberSpells(WorldSession* to, Player* bot)
+{
+    if (!to->IsSuiCapable())
+        return;
+    PlayerSpellMap const& spells = bot->GetSpellMap();
+    WorldPacket data(SMSG_SUI_MEMBER_SPELLS, 8 + 2 + 4 * spells.size());
+    data << uint64(bot->GetObjectGuid().GetRawValue());
+    size_t countPos = data.wpos();
+    data << uint16(0);
+    uint16 count = 0;
+    for (auto const& spell : spells)
+    {
+        if (spell.second.state == PLAYERSPELL_REMOVED)
+            continue;
+        if (!spell.second.active || spell.second.disabled)
+            continue;
+        data << uint32(spell.first);
+        ++count;
+    }
+    data.put<uint16>(countPos, count);
+    to->SendPacket(&data);
+}
+
+static void SendMemberFacts(WorldSession* to, Player* bot)
+{
+    SendSnapshot(to, bot);
+    SendMemberSpells(to, bot);
+}
+
+/// Fan the whole group's AiBot facts out to one real SUI member.
+static void PushMemberFactsTo(Player* realPlayer)
+{
+    WorldSession* session = realPlayer ? realPlayer->GetSession() : nullptr;
+    if (!session || session->GetBot() || !session->IsSuiCapable())
+        return;
+    Group* group = realPlayer->GetGroup();
+    if (!group)
+        return;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->getSource();
+        if (member && member->IsInWorld() && IsMemberFactsSubject(realPlayer, member))
+            SendMemberFacts(session, member);
+    }
+}
+
+void HandleMemberFacts(WorldSession* session, std::vector<ObjectGuid> const& subjects)
+{
+    // Only MSUIClient speaks this opcode — same latch as HandleRequest.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot())
+        return;
+    // Rate-limited separately from movement: one pull per second is plenty for
+    // panel-open refreshes; the roster-edge pushes cover everything else.
+    uint32 nowMs = WorldTimer::getMSTime();
+    if (session->GetSuiMemberFactsPullMs() &&
+        WorldTimer::getMSTimeDiff(session->GetSuiMemberFactsPullMs(), nowMs) < 1000)
+        return;
+    session->SetSuiMemberFactsPullMs(nowMs);
+
+    if (subjects.empty())
+    {
+        PushMemberFactsTo(requester);
+        return;
+    }
+    for (ObjectGuid guid : subjects)
+    {
+        Player* member = sObjectMgr.GetPlayer(guid);
+        if (member && member->IsInWorld() && IsMemberFactsSubject(requester, member))
+            SendMemberFacts(session, member);
+    }
+}
+
+// -- Party quest facts (PLAN_20 P1) -------------------------------------------
+// Owner decision 2026-08-25: real per-character quest logs, merged in the view.
+// The party line is unchanged (IsMemberFactsSubject) with ONE widening: the
+// requester's own character is a legal subject, because a client cannot see its
+// own quests held past the twenty update-field slots any other way.
+
+/// The update-field log slot for a quest, or MAX_QUEST_LOG_SIZE when the quest
+/// is held without one. Player::FindQuestSlot is private and this file is not a
+/// friend, so the identical scan runs through the public field accessor. Today
+/// every held quest has a slot; the sentinel is on the wire from day one so the
+/// client needs no second packet shape when PLAN_20 P2 lifts the cap.
+static uint16 QuestLogSlotOf(Player* player, uint32 questId)
+{
+    for (uint16 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        if (player->GetUInt32Value(
+                PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_ID_OFFSET) == questId)
+            return slot;
+    return MAX_QUEST_LOG_SIZE;
+}
+
+/// The quest line itself. Self is allowed (own overflow quests); everyone else
+/// must clear the same party-line predicate the bag/spell facts use, so faction
+/// authority stays insufficient here too.
+static bool IsQuestFactsSubject(Player* requester, Player* member)
+{
+    return requester && member &&
+        (requester == member || IsMemberFactsSubject(requester, member));
+}
+
+/// u64 subject, u8 flags, u16 count, then fixed-stride 19-byte entries:
+/// u32 quest, u8 status, u8 entryFlags, u8 slot, u8 objectives[4], u16 items[4].
+///
+/// The counters are the SERVER-side truth (m_creatureOrGOcount / m_itemcount),
+/// never the packed update-field mirror: a party member's slots were never
+/// streamed to this client, and a quest held past the twenty slots has no
+/// mirror at all. Item progress especially -- vanilla reads the player's own
+/// bags for that, which is structurally unavailable for anyone else.
+static void SendMemberQuests(WorldSession* to, Player* member)
+{
+    if (!to->IsSuiCapable())
+        return;
+    QuestStatusMap& quests = member->GetQuestStatusMap();
+    WorldPacket data(SMSG_SUI_QUEST_LOG, 8 + 1 + 2 + 2 + 19 * quests.size());
+    data << uint64(member->GetObjectGuid().GetRawValue());
+    data << uint8(0);                       // flags, reserved
+    // How many quests this character may HOLD. Not knowable client-side once it
+    // stops being the update-field slot count, and the quest log prints it.
+    data << uint16(sWorld.getConfig(CONFIG_UINT32_MAX_QUEST_HELD));
+    size_t countPos = data.wpos();
+    data << uint16(0);
+    uint16 count = 0;
+    for (auto const& pair : quests)
+    {
+        QuestStatusData const& status = pair.second;
+        // ONE predicate for 'does this character hold this quest', shared with
+        // _LoadQuestStatus and every credit scan. This used to be a THIRD, subtly
+        // different copy that dropped every m_rewarded quest unconditionally --
+        // and AddQuest never clears m_rewarded on re-accept, so a re-accepted
+        // REPEATABLE quest earned credit server-side while being structurally
+        // invisible to the client. VMaNGOS also leaves a turned-in quest at
+        // QUEST_STATUS_COMPLETE forever, which is why m_status alone is not the
+        // test -- IsHeldQuestStatus owns both halves of that rule now.
+        if (!Player::IsHeldQuestStatus(pair.first, status))
+            continue;
+
+        uint16 slot = QuestLogSlotOf(member, pair.first);
+        uint8 entryFlags = 0;
+        if (status.m_status == QUEST_STATUS_COMPLETE)
+            entryFlags |= 0x01;
+        if (status.m_status == QUEST_STATUS_FAILED)
+            entryFlags |= 0x02;
+        if (slot >= MAX_QUEST_LOG_SIZE)
+            entryFlags |= 0x04;             // held without a log slot
+
+        data << uint32(pair.first);
+        data << uint8(status.m_status);
+        data << uint8(entryFlags);
+        data << uint8(slot >= MAX_QUEST_LOG_SIZE ? 255 : uint8(slot));
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+            data << uint8(std::min<uint32>(status.m_creatureOrGOcount[i], 255));
+        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+            data << uint16(std::min<uint32>(status.m_itemcount[i], 65535));
+        ++count;
+    }
+    data.put<uint16>(countPos, count);
+    to->SendPacket(&data);
+}
+
+/// Fan the whole group's quest logs out to one real SUI member, including that
+/// member's own log.
+static void PushMemberQuestsTo(Player* realPlayer)
+{
+    WorldSession* session = realPlayer ? realPlayer->GetSession() : nullptr;
+    if (!session || session->GetBot() || !session->IsSuiCapable())
+        return;
+    SendMemberQuests(session, realPlayer);
+    Group* group = realPlayer->GetGroup();
+    if (!group)
+        return;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->getSource();
+        if (member && member->IsInWorld() && IsMemberFactsSubject(realPlayer, member))
+            SendMemberQuests(session, member);
+    }
+}
+
+void HandleQuestFacts(WorldSession* session, std::vector<ObjectGuid> const& subjects)
+{
+    // Only MSUIClient speaks this opcode -- same latch as HandleRequest.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot())
+        return;
+    uint32 nowMs = WorldTimer::getMSTime();
+    if (session->GetSuiQuestFactsPullMs() &&
+        WorldTimer::getMSTimeDiff(session->GetSuiQuestFactsPullMs(), nowMs) < 1000)
+        return;
+    session->SetSuiQuestFactsPullMs(nowMs);
+
+    if (subjects.empty())
+    {
+        PushMemberQuestsTo(requester);
+        return;
+    }
+    for (ObjectGuid guid : subjects)
+    {
+        Player* member = sObjectMgr.GetPlayer(guid);
+        if (member && member->IsInWorld() && IsQuestFactsSubject(requester, member))
+            SendMemberQuests(session, member);
+    }
+}
+
+// -- Party lead claim (PLAN_20 P4a) -------------------------------------------
+// BridgeHandleFormGroup has bots create their OWN groups (Group::Create with the
+// bot as leader) and add members to them, so "an AiBot holds the lead" is a state
+// the fleet produces by design, not an accident. Vanilla then offers no way out:
+// HandleGroupSetLeaderOpcode requires group->IsLeader(GetPlayer()) before it will
+// promote anyone, and refuses player == GetPlayer() outright -- so a commander in
+// a bot-led group can neither promote themselves nor rearrange the party.
+//
+// This is the way back, and it is deliberately narrow. Leadership is taken ONLY
+// from an AiBot in the requester's own group; from a real player it is refused,
+// because a verb that seizes lead from a human is a griefing verb whatever the
+// intent behind it. Vanilla's handler is left untouched.
+enum SuiPartyLeadResult
+{
+    SUI_LEAD_OK                  = 0,
+    SUI_LEAD_NOT_IN_GROUP        = 1,
+    SUI_LEAD_ALREADY_LEADER      = 2,
+    SUI_LEAD_LEADER_IS_PLAYER    = 3,
+    SUI_LEAD_SUBJECT_NOT_IN_GROUP = 4,
+    SUI_LEAD_SUBJECT_NOT_SELF    = 5,
+    SUI_LEAD_NO_SUBJECT          = 6,
+    SUI_LEAD_BAD_ACTION          = 7,
+};
+
+static void SendPartyLeadResult(WorldSession* to, uint8 action, ObjectGuid subject, uint8 result)
+{
+    if (!to->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_PARTY_LEAD_RESULT, 10);
+    data << uint8(action);
+    data << uint64(subject.GetRawValue());
+    data << uint8(result);
+    to->SendPacket(&data);
+}
+
+void HandlePartyLead(WorldSession* session, uint8 action, ObjectGuid subject)
+{
+    // Only MSUIClient speaks this opcode -- same latch as HandleRequest.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot())
+        return;
+
+    if (action != 1)
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_BAD_ACTION);
+        return;
+    }
+    if (subject.IsEmpty())
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_NO_SUBJECT);
+        return;
+    }
+    // v1 claims the lead for yourself only. Promoting one bot over another is a
+    // separate decision with its own failure modes; it is not smuggled in here.
+    if (subject != requester->GetObjectGuid())
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_SUBJECT_NOT_SELF);
+        return;
+    }
+
+    Group* group = requester->GetGroup();
+    if (!group)
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_NOT_IN_GROUP);
+        return;
+    }
+    if (group->IsLeader(requester->GetObjectGuid()))
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_ALREADY_LEADER);
+        return;
+    }
+
+    // The one rule that matters. IsMemberFactsSubject is the established test for
+    // "an AiBot in my group I am allowed to act on" -- reused rather than
+    // restated, because a second copy of an authorization rule is how the two
+    // quietly stop agreeing.
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    if (!leader || !IsMemberFactsSubject(requester, leader))
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_LEADER_IS_PLAYER);
+        return;
+    }
+
+    group->ChangeLeader(requester->GetObjectGuid());
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[SUI-LEAD] %s took group leadership from bot %s",
+        requester->GetName(), leader->GetName());
+    SendPartyLeadResult(session, action, subject, SUI_LEAD_OK);
+}
+
+// -- Party questgiver status (PLAN_20 P5) -------------------------------------
+// Owner decision 5: keep the exact vanilla !/? art, font and yellow, and hang a
+// parenthesised numeral over it -- (4) when four of your group can take what
+// this NPC offers.
+//
+// This lives on the server because the client cannot compute it and must not
+// guess it. Vanilla SMSG_QUESTGIVER_STATUS answers for the asking session and
+// nobody else; eligibility turns on level, prerequisites, race, class and
+// exclusive groups the client never receives for a companion; and the client is
+// never told which quests an NPC offers or ends in the first place. A wrong
+// number over an NPC's head is worse than no number.
+//
+// The verdict is produced by exactly the path CMSG_QUESTGIVER_STATUS_QUERY uses
+// -- the script hook first, the core rule as the fallback, and the same
+// hostility gate -- so a scripted questgiver answers identically for a
+// companion and for you.
+static uint8 GiverStatusFor(WorldSession* session, Player* member, Object* questgiver)
+{
+    uint32 dialogStatus = DIALOG_STATUS_NONE;
+    switch (questgiver->GetTypeId())
+    {
+        case TYPEID_UNIT:
+        {
+            Creature* creature = static_cast<Creature*>(questgiver);
+            if (creature->IsHostileTo(member))   // not show quest status to enemies
+                return DIALOG_STATUS_NONE;
+            dialogStatus = sScriptMgr.GetDialogStatus(member, creature);
+            if (dialogStatus > 6)
+                dialogStatus = session->GetDialogStatus(member, creature, DIALOG_STATUS_NONE);
+            break;
+        }
+        case TYPEID_GAMEOBJECT:
+        {
+            GameObject* go = static_cast<GameObject*>(questgiver);
+            dialogStatus = sScriptMgr.GetDialogStatus(member, go);
+            if (dialogStatus > 6)
+                dialogStatus = session->GetDialogStatus(member, go, DIALOG_STATUS_NONE);
+            break;
+        }
+        default:
+            return DIALOG_STATUS_NONE;
+    }
+    return dialogStatus > 7 ? uint8(DIALOG_STATUS_NONE) : uint8(dialogStatus);
+}
+
+void HandleGiverStatus(WorldSession* session,
+    std::vector<ObjectGuid> const& givers)
+{
+    // Only MSUIClient speaks this opcode -- same latch as HandleRequest.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot() || givers.empty())
+        return;
+    uint32 nowMs = WorldTimer::getMSTime();
+    if (session->GetSuiGiverStatusPullMs() &&
+        WorldTimer::getMSTimeDiff(session->GetSuiGiverStatusPullMs(), nowMs) < 1000)
+        return;
+    session->SetSuiGiverStatusPullMs(nowMs);
+
+    // Resolve the countable members once, not once per questgiver.
+    std::vector<Player*> members;
+    if (Group* group = requester->GetGroup())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            if (member && member != requester && member->IsInWorld() &&
+                IsMemberFactsSubject(requester, member))
+                members.push_back(member);
+        }
+    }
+
+    std::vector<std::pair<std::pair<ObjectGuid, ObjectGuid>, uint8>> entries;
+    entries.reserve(givers.size() * (members.size() + 1));
+
+    for (ObjectGuid giverGuid : givers)
+    {
+        // Resolved against the REQUESTER: they are the one looking at the marker,
+        // and a companion across the zone has no view of this NPC to resolve from.
+        Object* questgiver =
+            requester->GetObjectByTypeMask(giverGuid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+        if (!questgiver)
+            continue;
+
+        // The requester's own row is always emitted, even at NONE. It is what
+        // tells the client "this giver was answered for" -- without it a giver
+        // whose whole party went to NONE would simply be absent from the reply
+        // and the client would keep showing the previous answer forever.
+        entries.push_back({ { giverGuid, requester->GetObjectGuid() },
+            GiverStatusFor(session, requester, questgiver) });
+
+        for (Player* member : members)
+        {
+            uint8 status = GiverStatusFor(session, member, questgiver);
+            if (status == DIALOG_STATUS_NONE)
+                continue;                       // absent means zero; do not pay for it
+            entries.push_back({ { giverGuid, member->GetObjectGuid() }, status });
+        }
+    }
+
+    if (!session->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_GIVER_STATUS, 3 + 17 * entries.size());
+    data << uint8(0);                           // flags, reserved
+    data << uint16(entries.size());
+    for (auto const& entry : entries)
+    {
+        data << uint64(entry.first.first.GetRawValue());
+        data << uint64(entry.first.second.GetRawValue());
+        data << uint8(entry.second);
+    }
+    session->SendPacket(&data);
+}
+
+// -- Party quest acts (PLAN_20 P3) --------------------------------------------
+// Owner decision 2026-08-25: accept and turn in for the party in one gesture,
+// with the reward CHOSEN PER BOT BY THE PLAYER. Every subject is authorized and
+// answered individually -- a party act that collapsed five outcomes into one
+// "failed" would be worse than no party act at all.
+
+static void SendPartyQuestResult(WorldSession* to, uint8 action, uint32 questId,
+    std::vector<std::pair<ObjectGuid, uint8>> const& outcomes)
+{
+    if (!to->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_PARTY_QUEST_RESULT, 6 + 9 * outcomes.size());
+    data << uint8(action);
+    data << uint32(questId);
+    data << uint8(outcomes.size());
+    for (auto const& outcome : outcomes)
+    {
+        data << uint64(outcome.first.GetRawValue());
+        data << uint8(outcome.second);
+    }
+    to->SendPacket(&data);
+}
+
+/// Is this subject close enough to be included in a party act?
+///
+/// The requester is TALKING to the giver, so they answer to the ordinary
+/// interaction rule. Companions answer to QUEST_SHARE_DISTANCE measured from the
+/// REQUESTER -- which is exactly vanilla's own rule for "this party member is
+/// close enough to be shared with" (HandlePushQuestToParty). Using
+/// INTERACTION_DISTANCE for everyone would be unusable: five bodies cannot all
+/// stand within five yards of one NPC.
+static bool IsPartyQuestInRange(Player* requester, Player* subject, Object* giver)
+{
+    if (!requester || !subject)
+        return false;
+    if (subject == requester)
+        return giver && requester->CanInteractWithQuestGiver(giver);
+    if (subject->GetMapId() != requester->GetMapId())
+        return false;
+    // The requester's CanInteractWithQuestGiver already covers alive, ghost,
+    // taxi and lost-control. A companion used to get only the two positional
+    // tests, which made a corpse a legal subject -- and RewardQuest would then
+    // hand XP, money and items to a dead player, a state the game cannot
+    // otherwise produce.
+    if (!subject->IsAlive() || subject->IsTaxiFlying())
+        return false;
+    return requester->IsWithinDist(subject, QUEST_SHARE_DISTANCE, true, SizeFactor::None);
+}
+
+void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
+    ObjectGuid npcGuid, std::vector<PartyQuestSubject> const& subjects)
+{
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot() || subjects.empty())
+        return;
+
+    Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId);
+    if (!pQuest)
+        return;
+
+    std::vector<std::pair<ObjectGuid, uint8>> outcomes;
+    outcomes.reserve(subjects.size());
+
+    // Abandon needs no giver at all; accept and turn-in must prove this object
+    // really offers/ends the quest, exactly as the real handlers do.
+    Object* pGiver = nullptr;
+    if (action != 3)
+    {
+        pGiver = requester->GetObjectByTypeMask(npcGuid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+        bool offers = pGiver &&
+            (action == 1 ? pGiver->HasQuest(questId) : pGiver->HasInvolvedQuest(questId));
+        if (!offers)
+        {
+            for (PartyQuestSubject const& subject : subjects)
+                outcomes.push_back({ subject.guid, PARTY_QUEST_NO_QUEST });
+            SendPartyQuestResult(session, action, questId, outcomes);
+            return;
+        }
+    }
+
+    std::vector<Player*> touched;
+
+    for (PartyQuestSubject const& entry : subjects)
+    {
+        Player* subject = (entry.guid == requester->GetObjectGuid())
+            ? requester : sObjectMgr.GetPlayer(entry.guid);
+        if (!subject || !subject->IsInWorld() || !IsQuestFactsSubject(requester, subject))
+        {
+            outcomes.push_back({ entry.guid, PARTY_QUEST_DENIED });
+            continue;
+        }
+        // Only the requester's own refusals may raise vanilla UI errors; a
+        // companion's refusal is reported in the result packet, by name.
+        bool const isSelf = (subject == requester);
+        AiBotAI* ai = isSelf ? nullptr : BotAiOf(subject);
+        uint8 result = PARTY_QUEST_OK;
+
+        if (action == 3)                                   // ---- ABANDON ----
+        {
+            if (subject->GetQuestStatus(questId) == QUEST_STATUS_NONE)
+                result = PARTY_QUEST_NO_QUEST;
+            else
+            {
+                subject->RemoveQuestById(questId);
+                // RemoveQuestById can silently refuse when a quest start item
+                // cannot be un-equipped, so confirm rather than assume.
+                result = subject->GetQuestStatus(questId) == QUEST_STATUS_NONE
+                    ? PARTY_QUEST_OK : PARTY_QUEST_CANNOT_ABANDON;
+                if (result == PARTY_QUEST_OK && ai)
+                {
+                    if (ai->m_trackedQuestId == questId)
+                        ai->m_trackedQuestId = 0;
+                    ai->SendQuestUpdateEvent(questId, "abandoned");
+                }
+            }
+        }
+        else if (!IsPartyQuestInRange(requester, subject, pGiver))
+        {
+            result = PARTY_QUEST_TOO_FAR;
+        }
+        else if (action == 1)                              // ---- ACCEPT ----
+        {
+            QuestStatus status = subject->GetQuestStatus(questId);
+            if (status != QUEST_STATUS_NONE)
+            {
+                // VMaNGOS parks a turned-in quest at COMPLETE forever, so
+                // m_rewarded is the bit that separates "has it" from "did it".
+                QuestStatusMap& map = subject->GetQuestStatusMap();
+                QuestStatusMap::const_iterator itr = map.find(questId);
+                result = (itr != map.end() && itr->second.m_rewarded)
+                    ? PARTY_QUEST_ALREADY_REWARDED : PARTY_QUEST_ALREADY_HELD;
+            }
+            else if (!subject->CanTakeQuest(pQuest, isSelf))
+                result = PARTY_QUEST_REQUIREMENTS;
+            else if (!subject->CanAddQuest(pQuest, isSelf))
+                result = PARTY_QUEST_LOG_FULL;
+            else
+            {
+                // The real giver object is what fires OnQuestAccept and the
+                // quest start scripts; passing nullptr would suppress both.
+                subject->AddQuest(pQuest, pGiver);
+                if (subject->CanCompleteQuest(questId))
+                    subject->CompleteQuest(questId);
+                // The bridge's accept path omits this; the real handler does not.
+                if (pQuest->GetSrcSpell() > 0)
+                    subject->CastSpell(subject, pQuest->GetSrcSpell(), true);
+                if (isSelf && subject->PlayerTalkClass)
+                    subject->PlayerTalkClass->CloseGossip();
+                if (ai)
+                {
+                    ai->m_trackedQuestId = questId;
+                    ai->SendQuestUpdateEvent(questId, "accepted");
+                }
+            }
+        }
+        else                                               // ---- TURN IN ----
+        {
+            if (subject->GetQuestStatus(questId) == QUEST_STATUS_NONE)
+                result = PARTY_QUEST_NO_QUEST;
+            else
+            {
+                uint32 reward = entry.rewardChoice;
+                if (reward == 255)
+                {
+                    // "Auto" means the spec-aware pick the fleet already uses.
+                    // Our own character has no such chooser and the client always
+                    // has a picker for it, so auto-for-self is a refusal, not a 0.
+                    if (!ai)
+                        result = PARTY_QUEST_NEEDS_CHOICE;
+                    else
+                        reward = ai->ChooseQuestReward(pQuest);
+                }
+                if (result == PARTY_QUEST_OK)
+                {
+                    // The array bound is the floor, not the rule. Vanilla own
+                    // handler stops at QUEST_REWARD_CHOICES_COUNT too, which lets
+                    // an index inside the array but past THIS quest choices reach
+                    // RewardQuest, where RewChoiceItemId[reward] == 0 means the
+                    // quest is rewarded and the chosen item silently never lands.
+                    uint32 const choiceCount = pQuest->GetRewChoiceItemsCount();
+                    if (reward >= QUEST_REWARD_CHOICES_COUNT ||
+                        (choiceCount > 0 && reward >= choiceCount))
+                        result = PARTY_QUEST_BAD_REWARD;
+                    else if (!subject->CanRewardQuest(pQuest, reward, isSelf))
+                        result = PARTY_QUEST_CANNOT_REWARD;
+                    else
+                    {
+                        // RewardQuest is the one consumer that needs the
+                        // narrower type; everything else takes Object*.
+                        subject->RewardQuest(pQuest, reward,
+                            pGiver ? pGiver->ToWorldObject() : nullptr, true);
+                        if (ai)
+                        {
+                            ai->m_trackedQuestId = 0;
+                            ai->TryAutoEquipBags();
+                            ai->TryAutoEquip();
+                            ai->SendQuestUpdateEvent(questId, "rewarded");
+                        }
+                        else if (Quest const* next = subject->GetNextQuest(npcGuid, pQuest))
+                            subject->PlayerTalkClass->SendQuestGiverQuestDetails(
+                                next, npcGuid, true);
+                    }
+                }
+            }
+        }
+
+        if (result == PARTY_QUEST_OK || result == PARTY_QUEST_ALREADY_HELD)
+            touched.push_back(subject);
+        outcomes.push_back({ entry.guid, result });
+    }
+
+    SendPartyQuestResult(session, action, questId, outcomes);
+
+    // Push fresh quest logs for everyone whose log actually moved, rather than
+    // making the client re-pull (which is rate-limited to one per second).
+    for (Player* subject : touched)
+        SendMemberQuests(session, subject);
+}
+
+// ── Party item move (Phase C v1, owner 2026-08-25) ───────────────────────────
+// The CRPG shared backpack: a real SUI player moves one bag item between two
+// party endpoints — its own character or a party AiBot — with no trade window.
+// The mechanics are the proven trade-completion sequence (CanStoreItem →
+// MoveItemFromInventory → MoveItemToInventory, both helpers own the DB side).
+
+static void SendMemberItemMoveResult(WorldSession* to, uint8 result,
+    ObjectGuid fromGuid, ObjectGuid toGuid)
+{
+    if (!to->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_MEMBER_ITEM_MOVE_RESULT, 17);
+    data << uint8(result);
+    data << uint64(fromGuid.GetRawValue());
+    data << uint64(toGuid.GetRawValue());
+    to->SendPacket(&data);
+}
+
+/// An endpoint of a party item move: the requester's own character, or a
+/// party AiBot member. The party line itself — never faction authority.
+static Player* ResolveItemMoveEndpoint(Player* requester, ObjectGuid guid)
+{
+    if (guid == requester->GetObjectGuid())
+        return requester;
+    Player* member = sObjectMgr.GetPlayer(guid);
+    return member && member->IsInWorld() && IsMemberFactsSubject(requester, member)
+        ? member : nullptr;
+}
+
+void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
+    ObjectGuid toGuid, uint8 bag, uint8 slot)
+{
+    // Only MSUIClient speaks this opcode — same latch as HandleRequest.
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot())
+        return;
+
+    Player* from = ResolveItemMoveEndpoint(requester, fromGuid);
+    Player* to = ResolveItemMoveEndpoint(requester, toGuid);
+    if (!from || !to || from == to)
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_DENIED, fromGuid, toGuid);
+        return;
+    }
+    // Same map only (no distance gate — party logistics is deliberately
+    // BG3-style); a live trade window on either endpoint would fight the
+    // mutation mid-commit.
+    if (from->GetMapId() != to->GetMapId() ||
+        from->GetTradeData() || to->GetTradeData())
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_UNAVAILABLE, fromGuid, toGuid);
+        return;
+    }
+    Item* item = from->GetItemByPos(bag, slot);
+    if (!item)
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_NO_ITEM, fromGuid, toGuid);
+        return;
+    }
+    // Binding deliberately does NOT gate the move — this is the party's shared
+    // backpack, not the auction house. A conjured item would evaporate on its
+    // new owner's next login, so it is the one refusal.
+    if (ItemPrototype const* proto = item->GetProto())
+        if (proto->Flags & ITEM_FLAG_CONJURED)
+        {
+            SendMemberItemMoveResult(session, ITEM_MOVE_REFUSED_ITEM, fromGuid, toGuid);
+            return;
+        }
+
+    ItemPosCountVec dest;
+    if (to->CanStoreItem(NULL_BAG, NULL_SLOT, dest, item, false) != EQUIP_ERR_OK)
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_TARGET_FULL, fromGuid, toGuid);
+        return;
+    }
+
+    from->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
+    to->MoveItemToInventory(dest, item, true, true);
+
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s moved item %u x%u from %s to %s",
+        requester->GetName(), item->GetEntry(), item->GetCount(),
+        from->GetName(), to->GetName());
+
+    SendMemberItemMoveResult(session, ITEM_MOVE_OK, fromGuid, toGuid);
+    // Fresh facts for BOTH ends to every real SUI member of the group — the
+    // client columns update from these pushes, never from optimism. Own-char
+    // endpoints update through the ordinary owner wire instead.
+    Group* group = requester->GetGroup();
+    if (!group)
+        return;
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->getSource();
+        WorldSession* memberSession = member ? member->GetSession() : nullptr;
+        if (!memberSession || memberSession->GetBot() || !memberSession->IsSuiCapable())
+            continue;
+        if (IsMemberFactsSubject(member, from))
+            SendMemberFacts(memberSession, from);
+        if (IsMemberFactsSubject(member, to))
+            SendMemberFacts(memberSession, to);
+    }
 }
 
 void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
@@ -975,6 +1938,65 @@ void WorldSession::HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packe
 void WorldSession::HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet)
 {
     SuiPossess::HandleZoneIntel(this, packet.flags);
+}
+
+void WorldSession::HandleSuiMemberFactsOpcode(WorldPackets::SuiControl::MemberFacts const& packet)
+{
+    // Wire discipline: a body whose length does not match its count is refused
+    // outright rather than best-effort parsed.
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandleMemberFacts(this, packet.subjects);
+}
+
+void WorldSession::HandleSuiMemberItemMoveOpcode(
+    WorldPackets::SuiControl::MemberItemMove const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandleMemberItemMove(this, packet.from, packet.to,
+        packet.bag, packet.slot);
+}
+
+void WorldSession::HandleSuiQuestFactsOpcode(
+    WorldPackets::SuiControl::QuestFacts const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandleQuestFacts(this, packet.subjects);
+}
+
+void WorldSession::HandleSuiPartyLeadOpcode(
+    WorldPackets::SuiControl::PartyLead const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandlePartyLead(this, packet.action, packet.subject);
+}
+
+void WorldSession::HandleSuiGiverStatusOpcode(
+    WorldPackets::SuiControl::GiverStatus const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandleGiverStatus(this, packet.givers);
+}
+
+void WorldSession::HandleSuiPartyQuestOpcode(
+    WorldPackets::SuiControl::PartyQuest const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    if (packet.action < 1 || packet.action > 3)
+        return;
+    // The wire type stays on this side of the namespace boundary; SuiPossess.h
+    // sees only Common.h and ObjectGuid.h.
+    std::vector<SuiPossess::PartyQuestSubject> subjects;
+    subjects.reserve(packet.subjects.size());
+    for (auto const& subject : packet.subjects)
+        subjects.push_back({ subject.guid, subject.rewardChoice });
+    SuiPossess::HandlePartyQuest(this, packet.action, packet.questId,
+        packet.npcGuid, subjects);
 }
 
 // ── GM commands (stock-client testable: .sui possess <name> / .sui release) ──

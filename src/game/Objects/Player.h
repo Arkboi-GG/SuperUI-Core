@@ -1084,11 +1084,15 @@ class Player final: public Unit
 
         uint32 m_ingametime;
         QuestStatusMap mQuestStatus;
+        std::vector<uint32> m_questsHeld;       // PLAN_20 P2 -- see IsHeldQuestStatus
         void AdjustQuestReqItemCount(Quest const* pQuest, QuestStatusData& questStatusData);
         bool CanGiveQuestSourceItemIfNeed(Quest const* pQuest, ItemPosCountVec* dest = nullptr) const;
         void GiveQuestSourceItemIfNeed(Quest const* pQuest);
 
         uint16 FindQuestSlot(uint32 questId) const;
+        void PopulateQuestSlot(uint16 slot, uint32 questId);
+        void QuestHeldAdd(uint32 questId);
+        void QuestHeldRemove(uint32 questId);
         uint32 GetQuestSlotQuestId(uint16 slot) const { return GetUInt32Value(PLAYER_QUEST_LOG_1_1 + slot * MAX_QUEST_OFFSET + QUEST_ID_OFFSET); }
         void SetQuestSlot(uint16 slot, uint32 questId, uint32 timer = 0)
         {
@@ -1132,6 +1136,24 @@ class Player final: public Unit
         bool SatisfyQuestCondition(Quest const* qInfo, bool msg) const;
         bool SatisfyQuestLevel(Quest const* qInfo, bool msg) const;
         bool SatisfyQuestLog(bool msg) const;
+
+        // -- PLAN_20 P2: quests held past the update-field slots ---------------
+        // MAX_QUEST_LOG_SIZE is the field layout and stays 20 forever;
+        // the held cap is the config key Quests.MaxHeld. m_questsHeld is the
+        // authoritative list of held quest ids (slotted and slotless alike) and
+        // is what every objective-credit scan iterates -- the twenty slots are
+        // no longer a complete view of what the character is working on.
+        //
+        // Safety property: over-inclusion is harmless (every consumer re-checks
+        // the status it cares about), under-inclusion is the only real failure,
+        // and there are exactly two insertion points -- AddQuest and
+        // _LoadQuestStatus.
+        static bool IsHeldQuestStatus(uint32 questId, QuestStatusData const& data);
+        std::vector<uint32> const& GetHeldQuests() const { return m_questsHeld; }
+        uint32 GetHeldQuestCount() const { return uint32(m_questsHeld.size()); }
+        void RemoveQuestById(uint32 questId);
+        void ValidateHeldQuests();
+        void PromoteOverflowQuestToSlot(uint16 slot, uint32 excludeQuestId = 0);
         bool SatisfyQuestPreviousQuest(Quest const* qInfo, bool msg) const;
         bool SatisfyQuestBreadcrumbQuest(Quest const* qInfo, bool msg) const;
         bool SatisfyQuestDependentBreadcrumbQuests(Quest const* qInfo, bool msg) const;

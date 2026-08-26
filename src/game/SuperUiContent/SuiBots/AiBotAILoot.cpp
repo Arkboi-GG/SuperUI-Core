@@ -559,9 +559,32 @@ static uint8 EquipSlotForInvType(uint8 invType)
 
 float AiBotAI::ScoreItem(ItemPrototype const* proto, uint8 slot) const
 {
-    (void)slot;   // slot is the caller's hint; scoring is slot-independent here
     if (!proto)
         return 0.0f;
+
+    // Active Warrior/Paladin tanks require a one-handed weapon and shield.
+    // Apply the same rejection to candidates and currently equipped items so
+    // an incompatible 2H/off-hand scores low enough for the next valid item to
+    // replace it.  Feral tanks deliberately retain their normal scoring.
+    bool const shieldTank = GetCombatActiveRole() == ROLE_TANK &&
+        (me->GetClass() == CLASS_WARRIOR || me->GetClass() == CLASS_PALADIN);
+    if (shieldTank)
+    {
+        if (slot == EQUIPMENT_SLOT_MAINHAND &&
+            (!proto->IsWeapon() || proto->InventoryType == INVTYPE_2HWEAPON))
+            return -100000.0f;
+        if (slot == EQUIPMENT_SLOT_OFFHAND && proto->InventoryType != INVTYPE_SHIELD)
+            return -100000.0f;
+    }
+    // Non-tank Arms remains deliberately two-handed-axe specialized.
+    else if (me->GetClass() == CLASS_WARRIOR && GetCombatSpecTab() == 0)
+    {
+        if (slot == EQUIPMENT_SLOT_MAINHAND &&
+           (!proto->IsWeapon() || proto->SubClass != ITEM_SUBCLASS_WEAPON_AXE2))
+            return -100000.0f;
+        if (slot == EQUIPMENT_SLOT_OFFHAND)
+            return -100000.0f;
+    }
 
     AiBotStatWeights const w = GetClassWeights(me->GetClass());
     float score = 0.0f;

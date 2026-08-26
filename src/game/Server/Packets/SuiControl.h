@@ -95,6 +95,192 @@ namespace WorldPackets
             }
         };
 
+        class MemberFacts final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;                    // reserved
+            std::vector<ObjectGuid> subjects;   // empty = every party/raid AiBot member
+            bool exactSize = false;             // wire discipline: reject sloppy lengths
+
+            explicit MemberFacts() : ClientPacket(CMSG_SUI_MEMBER_FACTS) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() < 2)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> flags >> count;
+                if (recv_data.size() != 2u + 8u * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                exactSize = true;
+                subjects.resize(count);
+                for (uint8 i = 0; i < count; ++i)
+                    recv_data >> subjects[i];
+            }
+        };
+
+        class QuestFacts final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;                    // reserved
+            // empty = the whole group AND the requester's own character; the
+            // latter is how a client learns about quests it holds past the
+            // twenty update-field slots.
+            std::vector<ObjectGuid> subjects;
+            bool exactSize = false;             // wire discipline: reject sloppy lengths
+
+            explicit QuestFacts() : ClientPacket(CMSG_SUI_QUEST_FACTS) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() < 2)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> flags >> count;
+                if (recv_data.size() != 2u + 8u * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                exactSize = true;
+                subjects.resize(count);
+                for (uint8 i = 0; i < count; ++i)
+                    recv_data >> subjects[i];
+            }
+        };
+
+        /// PLAN_20 P3: accept / turn in / abandon a quest for an EXPLICIT set of
+        /// party members. There is deliberately no whole-party shorthand -- who
+        /// acts must always be visible to the player who ordered it.
+        class PartyQuest final : public ClientPacket
+        {
+        public:
+            struct Subject
+            {
+                ObjectGuid guid;
+                uint8 rewardChoice = 0;   // 255 = let the server choose
+            };
+
+            uint8 action = 0;             // 1 accept, 2 turn-in, 3 abandon
+            uint32 questId = 0;
+            ObjectGuid npcGuid;           // questgiver; empty for abandon
+            std::vector<Subject> subjects;
+            bool exactSize = false;       // wire discipline: reject sloppy lengths
+
+            explicit PartyQuest() : ClientPacket(CMSG_SUI_PARTY_QUEST) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() < 14)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> action >> questId >> npcGuid >> count;
+                if (recv_data.size() != 14u + 9u * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                exactSize = true;
+                subjects.resize(count);
+                for (uint8 i = 0; i < count; ++i)
+                    recv_data >> subjects[i].guid >> subjects[i].rewardChoice;
+            }
+        };
+
+        /// PLAN_20 P4a: take group leadership. The fleet's own grouping makes a
+        /// bot the leader (BridgeHandleFormGroup calls Group::Create with the bot
+        /// as leader), and vanilla's HandleGroupSetLeaderOpcode requires you to
+        /// ALREADY lead in order to promote anyone -- and refuses a self-target
+        /// outright. Without this the commander cannot rearrange their own party.
+        class PartyLead final : public ClientPacket
+        {
+        public:
+            uint8 action = 0;                   // 1 = claim
+            ObjectGuid subject;
+            bool exactSize = false;             // wire discipline: reject sloppy lengths
+
+            explicit PartyLead() : ClientPacket(CMSG_SUI_PARTY_LEAD) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() != 9)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                recv_data >> action >> subject;
+                exactSize = true;
+            }
+        };
+
+        /// PLAN_20 P5: what would each party member see over these questgivers'
+        /// heads? The giver list is exactly what the client is drawing markers
+        /// for; there is deliberately no whole-zone shorthand, because the
+        /// server's work must stay proportional to what it was asked about.
+        class GiverStatus final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;                    // reserved
+            std::vector<ObjectGuid> givers;
+            bool exactSize = false;             // wire discipline: reject sloppy lengths
+
+            static uint8 const MaxGivers = 64;
+
+            explicit GiverStatus() : ClientPacket(CMSG_SUI_GIVER_STATUS) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() < 2)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> flags >> count;
+                if (!count || count > MaxGivers || recv_data.size() != 2u + 8u * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                exactSize = true;
+                givers.resize(count);
+                for (uint8 i = 0; i < count; ++i)
+                    recv_data >> givers[i];
+            }
+        };
+
+        class MemberItemMove final : public ClientPacket
+        {
+        public:
+            static constexpr size_t WIRE_SIZE = 19;
+
+            uint8 flags = 0;            // reserved
+            ObjectGuid from;
+            ObjectGuid to;
+            uint8 bag = 0;              // 255 = character-held, 19-22 = equipped bag
+            uint8 slot = 0;
+            bool exactSize = false;     // wire discipline: reject sloppy lengths
+
+            explicit MemberItemMove() : ClientPacket(CMSG_SUI_MEMBER_ITEM_MOVE) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                exactSize = recv_data.size() == WIRE_SIZE;
+                if (!exactSize)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                recv_data >> flags >> from >> to >> bag >> slot;
+            }
+        };
+
         class ForceRoster final : public ClientPacket
         {
         public:

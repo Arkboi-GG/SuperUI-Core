@@ -44,9 +44,33 @@ Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,
 | `CMSG_SUI_PORTAL_READY`    | 846 (0x034E) | C -> S |
 | `SMSG_SUI_PORTAL_STATE`    | 847 (0x034F) | S -> C |
 
+### Party-member-facts opcode block
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_MEMBER_FACTS`    | 850 (0x0352) | C -> S |
+| `SMSG_SUI_MEMBER_SPELLS`   | 851 (0x0353) | S -> C |
+| `CMSG_SUI_MEMBER_ITEM_MOVE` | 852 (0x0354) | C -> S |
+| `SMSG_SUI_MEMBER_ITEM_MOVE_RESULT` | 853 (0x0355) | S -> C |
+
+### Party-quest-facts opcode block (PLAN_20 P1)
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_QUEST_FACTS`     | 854 (0x0356) | C -> S |
+| `SMSG_SUI_QUEST_LOG`       | 855 (0x0357) | S -> C |
+| `CMSG_SUI_PARTY_QUEST`     | 856 (0x0358) | C -> S |
+| `SMSG_SUI_PARTY_QUEST_RESULT` | 857 (0x0359) | S -> C |
+
+858-859 stay RESERVED for the PLAN_20 P4 vendor pair, so a half-deployed server
+can never renumber them out from under a client. `NUM_MSG_TYPES` is 858.
+
 Values 835-843 are the camera, zone-intel, and RTS extensions.
 The portal values are intentionally fixed above that range so those branches
-can merge without renumbering wire traffic. `NUM_MSG_TYPES` is 848.
+can merge without renumbering wire traffic. 848/849 are provisionally spoken
+for by the dynamic-combat rotation pair (MSUIClient
+`docs/plans/DYNAMIC_COMBAT_RULES_AND_ENCOUNTER_INTELLIGENCE.md`), so the
+member-facts pair starts at 850.
 
 ## CMSG_SUI_CONTROL_REQUEST
 Ask to possess a bot. MMO boot keeps the original party/raid-only rule. An RTS
@@ -133,7 +157,19 @@ bot-coordinate `MSG_MOVE_*` are discarded, not misattributed.
 The fixed ACK prefix remains 25 bytes. Current cores append an optional
 eight-byte capability trailer: `u32 0x31495553` (`SUI1` on the little-endian
 wire), then a `u32` capability mask. Bit 0 advertises REAL_PORTALS version 1;
-bit 1 advertises the server-authored cast-prewarm catalog described below.
+bit 1 advertises the server-authored cast-prewarm catalog described below;
+bit 2 advertises FACTION_CONTROL_GROUPS version 1 (census + non-party
+possession + RTS orders); bit 3 advertises PARTY_MEMBER_FACTS version 1
+(party/raid AiBot bags + known spells without possession — the client must
+not send `CMSG_SUI_MEMBER_FACTS` until bit 3 is observed); bit 4 advertises
+PARTY_ITEM_MOVE version 1 (instant bag-item moves between party members —
+the client must not send `CMSG_SUI_MEMBER_ITEM_MOVE` until bit 4 is
+observed); bit 5 advertises PARTY_QUEST_FACTS version 1 (party/raid quest logs
+without possession, and the requester's own quests held past the twenty
+update-field slots — the client must not send `CMSG_SUI_QUEST_FACTS` until bit
+5 is observed); bit 6 advertises PARTY_QUEST_ACTS version 1 (accept / turn in /
+abandon on behalf of party members, and the id-addressed abandon -- the client
+must not send `CMSG_SUI_PARTY_QUEST` until bit 6 is observed).
 Older clients may ignore the suffix and any catalog bytes after it. A current
 client probes safely with a zero-guid `CMSG_SUI_CONTROL_REQUEST`: an older core
 returns its ordinary denial without a trailer, while a portal-capable core
@@ -168,7 +204,202 @@ store and **drops proxies whose sourceGuid ≠ its current controlled guid**
 
 ## SMSG_SUI_SNAPSHOT (M4)
 Read-only bags/talents for the possessed bot, pushed once after a grant.
-Layout finalized in M4.
+Layout finalized in M4. Under PARTY_MEMBER_FACTS (capability bit 3) the same
+byte-identical packet is also pushed for every party/raid AiBot member — no
+possession required — on every roster edge and in answer to
+`CMSG_SUI_MEMBER_FACTS` (see below).
+
+## CMSG_SUI_MEMBER_FACTS / SMSG_SUI_MEMBER_SPELLS (party member facts)
+
+Owner rule: **party = full facts, faction = orders.** Party/raid AiBot
+members' bags and known spells are available to the party's real SUI clients
+without possession; non-party faction bots stay command-only (faction-control
+authority is deliberately NOT sufficient). Gated behind capability bit 3.
+
+`CMSG_SUI_MEMBER_FACTS` (exact length required: 2 + 8×count):
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | reserved, 0 |
+| count | u8 | 0 = every AiBot in the requester's group |
+| subjects | u64 × count | raw guids |
+
+Authorization per subject: requester is a real player session; the subject is
+an AiBot (`AiBotAI` attached, bot session) in the SAME group/raid as the
+requester. Each authorized subject is answered with its `SMSG_SUI_SNAPSHOT`
+plus one `SMSG_SUI_MEMBER_SPELLS`. Pulls are rate-limited per session (1/s),
+independent of movement. The server also pushes both packets unsolicited for
+every party AiBot on every roster edge (`SuiPossess::BroadcastRoster`).
+
+`SMSG_SUI_MEMBER_SPELLS`:
+
+| Field | Type | Notes |
+|---|---|---|
+| guid | u64 | the member |
+| count | u16 | |
+| spellIds | u32 × count | active spellbook, same filter as `SMSG_INITIAL_SPELLS` |
+
+Cooldowns and other live facts remain possession-only (the M3 proxy wire);
+inventory dirty-hooks are deferred — clients stamp snapshot age and re-pull
+when a panel opens.
+
+## CMSG_SUI_QUEST_FACTS / SMSG_SUI_QUEST_LOG (party quest facts, PLAN_20 P1)
+
+Owner decision 2026-08-25: **real per-character quest logs, merged in the
+client's view.** The member-facts law extends from bags and spells to quest
+logs. Gated behind capability bit 5.
+
+`CMSG_SUI_QUEST_FACTS` (exact length required: 2 + 8*count):
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | reserved, 0 |
+| count | u8 | 0 = the whole group AND the requester's own character |
+| subjects | u64 x count | raw guids |
+
+Authorization per subject: the requester's OWN character always qualifies —
+that is the only way a client can learn about quests it holds without an
+update-field slot — and everyone else must clear the same party-line predicate
+the bag/spell facts use (`IsMemberFactsSubject`: an AiBot in the same
+group/raid). Faction-control authority is deliberately NOT sufficient. Pulls
+are rate-limited per session (1/s) INDEPENDENTLY of the member-facts pull, so a
+quest panel and a bag panel cannot starve each other. The server also pushes
+unsolicited on every roster edge (`SuiPossess::BroadcastRoster`).
+
+`SMSG_SUI_QUEST_LOG` (13-byte header + 19-byte fixed-stride entries):
+
+| Field | Type | Notes |
+|---|---|---|
+| subject | u64 | whose log this is |
+| flags | u8 | reserved, 0 |
+| heldCap | u16 | server `Quests.MaxHeld` -- how many quests this character may hold; 0 = not stated |
+| count | u16 | entries following |
+| questId | u32 | per entry |
+| status | u8 | vanilla QUEST_STATUS_* (1 COMPLETE, 3 INCOMPLETE, 5 FAILED) |
+| entryFlags | u8 | 0x01 complete, 0x02 failed, 0x04 held without a log slot |
+| slot | u8 | update-field log slot, or 255 when held without one |
+| objectives | u8 x 4 | `m_creatureOrGOcount`, clamped to a byte |
+| items | u16 x 4 | `m_itemcount`, clamped to a u16 |
+
+Entries are gated exactly as the bridge `questBlob` is: **`m_rewarded` is
+skipped**, because VMaNGOS leaves a turned-in quest at `QUEST_STATUS_COMPLETE`
+forever and only that bit means "done". FAILED is included here (the blob drops
+it) so the client can show a failed quest honestly rather than as absent.
+
+The counters are the SERVER-side truth, never the packed update-field mirror.
+Two reasons, both load-bearing: a party member's quest-log fields are owner-only
+and were never streamed to this client, and vanilla tracks required-ITEM
+progress by counting the player's own bags — structurally unavailable for
+anyone else. The `slot`/overflow sentinel is on the wire from day one so no
+second packet shape is needed when PLAN_20 P2 lifts the 20-quest cap.
+
+**P2 (held-quest cap) is in.** `Quests.MaxHeld` (default 100, floor 20) caps
+how many quests a character may HOLD; `MAX_QUEST_LOG_SIZE` stays 20 as the
+update-field slot count. Quests past the slots carry `slot = 255` and the
+overflow entry flag, and are the reason a client addresses ITSELF in
+`CMSG_SUI_QUEST_FACTS` -- its own update fields cannot show them. `heldCap`
+lets the client print an honest "n/100" instead of the vanilla "n/20".
+
+## CMSG_SUI_PARTY_QUEST / SMSG_SUI_PARTY_QUEST_RESULT (party quest acts, PLAN_20 P3)
+
+Owner decision 2026-08-25: accept and turn in for the whole party in one
+gesture, with the **reward chosen per bot by the player** -- every member's
+picker visible at once. Gated behind capability bit 6.
+
+`CMSG_SUI_PARTY_QUEST` (exact length required: 14 + 9*count):
+
+| Field | Type | Notes |
+|---|---|---|
+| action | u8 | 1 accept, 2 turn-in, 3 abandon |
+| questId | u32 | |
+| npcGuid | u64 | questgiver; ignored for abandon |
+| count | u8 | **there is no whole-party shorthand** |
+| subjects | {u64 guid, u8 rewardChoice} x count | 255 = let the server choose |
+
+Unlike `CMSG_SUI_QUEST_FACTS`, an empty subject list is NOT a shorthand for the
+whole group and is refused. Reading a party member's log is harmless; acting on
+their behalf is not, and who is about to act must always be visible to the
+player who ordered it.
+
+Authorization is per subject and reuses the quest-facts party line (own
+character, or an AiBot in the same group). Range is the interesting part: the
+requester answers to the ordinary `INTERACTION_DISTANCE` because they are the
+one talking to the NPC, while companions must be within `QUEST_SHARE_DISTANCE`
+(14 yd) **of the requester** -- which is precisely vanilla's own rule for "this
+party member is close enough to be shared with". Measuring five companions
+against a 5-yard interaction radius on one NPC would make the feature unusable.
+
+Accept mirrors the real handler rather than the bot bridge: `CanTakeQuest` ->
+`CanAddQuest` -> `AddQuest(pQuest, giver)` (the real giver object, so quest
+accept scripts fire) -> `CompleteQuest` if already complete -> **the quest's
+source spell is cast**, which the bridge path omits. Turn-in resolves the
+reward per subject (explicit index, or the fleet's own spec-aware
+`ChooseQuestReward` when the client sent 255), bounds-checks it against
+`QUEST_REWARD_CHOICES_COUNT` because `RewardQuest` indexes unchecked, then
+`CanRewardQuest` -> `RewardQuest`. "Auto" for the requester's OWN character is
+refused (`NEEDS_CHOICE`): there is no chooser for a real player, and the client
+always has a picker for itself.
+
+`SMSG_SUI_PARTY_QUEST_RESULT` (6 + 9*count): u8 action, u32 quest, u8 count,
+then {u64 guid, u8 result} per subject. Results: 0 OK, 1 DENIED, 2 REQUIREMENTS,
+3 LOG_FULL, 4 NO_QUEST, 5 TOO_FAR, 6 BAD_REWARD, 7 CANNOT_REWARD,
+8 ALREADY_HELD, 9 ALREADY_REWARDED, 10 NEEDS_CHOICE, 11 CANNOT_ABANDON. The
+vocabulary is fine-grained on purpose: a party act must be able to say WHICH
+member was refused and WHY. Every subject whose log actually moved is followed
+by a fresh `SMSG_SUI_QUEST_LOG`, rather than making the client re-pull against
+its own one-per-second limit.
+
+**Action 3 addressed at your own character is the id-keyed abandon** that
+`CMSG_QUESTLOG_REMOVE_QUEST` cannot express, since that opcode names a slot.
+It is what reaches a quest held past the twenty update-field slots (P2).
+
+## Shared quests to AiBot companions (PLAN_20 P3)
+
+Ordinary vanilla `CMSG_PUSHQUESTTOPARTY`, not a SuperUI extension. A socket-less
+bot session already receives every SMSG -- `WorldSession::SendPacket` diverts
+into `GetBot()->ai->OnPacketReceived` -- but nothing in the bot AI answered a
+quest offer, so a shared quest died silently and left the sharer waiting.
+
+`AiBotAI::OnPacketReceived` now answers `SMSG_QUESTGIVER_QUEST_DETAILS` when the
+giver guid is a PLAYER (a creature giver means the bridge is driving this bot
+through a normal questgiver -- leave that alone) and that player is a real,
+non-bot member of the same group: accept via a queued
+`CMSG_QUESTGIVER_ACCEPT_QUEST`, or answer `MSG_QUEST_PUSH_RESULT` with
+DECLINE when it cannot take the quest. The reply is QUEUED, never a direct
+handler call: the send is synchronous inside `HandlePushQuestToParty`, which
+sets the share info AFTER sending, so accepting inline would kill the sharer's
+confirmation and strand the bot at BUSY for every later share.
+`SMSG_QUEST_CONFIRM_ACCEPT` gets the same treatment for escort quests.
+
+## CMSG_SUI_MEMBER_ITEM_MOVE / SMSG_SUI_MEMBER_ITEM_MOVE_RESULT (Phase C v1)
+
+The CRPG shared backpack (owner 2026-08-25): a real SUI player moves one bag
+item between two party endpoints — its own character or a party AiBot — with
+no trade window. Gated behind capability bit 4.
+
+`CMSG_SUI_MEMBER_ITEM_MOVE` (exact length 19):
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | reserved, 0 |
+| from | u64 | source endpoint guid |
+| to | u64 | destination endpoint guid |
+| bag | u8 | 255 = character-held (backpack 23-38, keyring 81+), 19-22 = equipped bag |
+| slot | u8 | slot within that bag |
+
+Endpoint authorization: each of from/to is the requester's own character OR an
+AiBot in the requester's group (the party line; faction authority never
+suffices), from != to, same map, neither endpoint mid-trade. Binding does NOT
+gate the move (party logistics, not the auction house); conjured items are
+refused. Mechanics are the trade-completion sequence: `CanStoreItem` →
+`MoveItemFromInventory` → `MoveItemToInventory` (auto-stored at the first free
+slot). No distance gate in v1 — deliberate, BG3-style.
+
+`SMSG_SUI_MEMBER_ITEM_MOVE_RESULT` (17 bytes): u8 result, u64 from, u64 to.
+Results: 0 OK · 1 DENIED · 2 NO_ITEM · 3 TARGET_FULL · 4 UNAVAILABLE ·
+5 REFUSED_ITEM. After an accepted move both endpoints' `SMSG_SUI_SNAPSHOT` (+
+member spells) re-push to every real SUI member of the group — clients update
+from those pushes, never from optimism.
 
 ## Bridge STATE addition
 `AiBotAI::BridgeSendState` gained `"possessed": 0|1`. The C# brain must hold
