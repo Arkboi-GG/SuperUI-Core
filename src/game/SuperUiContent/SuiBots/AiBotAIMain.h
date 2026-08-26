@@ -431,6 +431,20 @@ public:
         BridgeDisconnect();
     }
 
+    // The brain socket is otherwise closed only by ~AiBotAI -- but a PlayerBot's AI is
+    // NOT destroyed on logout: PlayerBotEntry::ai keeps owning it so the bot can be
+    // re-added (".bot delete" parks the entry at PB_STATE_OFFLINE for ".bot add_all").
+    // Without this override the fd, and the C# brain's view of a bot that is already
+    // gone, both outlive the logout. Player::~Player -> RemoveAI() virtual-dispatches
+    // here, so the socket closes on exactly the right edge, while PlayerBotAI::Remove()
+    // still only detaches and never deletes. BridgeDisconnect() clears m_bridgeConnected,
+    // so UpdateBridgeTick -> BridgeConnect() re-establishes the link on the next login.
+    void Remove() override
+    {
+        BridgeDisconnect();
+        PlayerBotAI::Remove();
+    }
+
     bool OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess) override;
 
     // Quick-spawn name override for the ".bot addai <class> [race] [name]" path.

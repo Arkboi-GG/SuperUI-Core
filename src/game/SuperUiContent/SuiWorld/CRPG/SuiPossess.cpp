@@ -121,6 +121,25 @@ static void DetachUnattendedAI(Player* owner)
     AiBotAI* ai = dynamic_cast<AiBotAI*>(owner->AI());
     if (!ai)
         return;
+    // Only the AI THIS file fabricated is ours to free. AttachToRealCharacter
+    // stamps m_ownedDummyEntry on it; a PlayerBot's AiBotAI instead belongs to
+    // PlayerBotEntry::ai (a unique_ptr installed on the Player by
+    // PlayerBotMgr::OnPlayerInWorld) -- which is exactly why PlayerBotAI::Remove()
+    // overrides PlayerAI::Remove() to detach WITHOUT deleting. Freeing a bot's AI
+    // here leaves entry->ai dangling but non-null, so the rest of LogoutPlayer
+    // calls straight through it (WorldSession::SendPacket ->
+    // GetBot()->ai->OnPacketReceived) and PlayerBotMgr frees it a second time on
+    // teardown: that is the ".kick <bot>" / ".bot delete <bot>" SIGSEGV.
+    // Same law the core already spells out in Player::SetControlledBy and
+    // Player::RemoveTemporaryAI ("Careful not to delete bot ai").
+    // A bot only ever reaches here via OnLogout (the despawn edge) and needs none
+    // of the manual-control cleanup below, so bail out whole.
+    if (!ai->IsUnattendedRealCharacter())
+        return;
+    if (WorldSession* session = owner->GetSession())
+        if (PlayerBotEntry* entry = session->GetBot())
+            if (entry->ai.get() == ai)
+                return;
     owner->SetAI(nullptr);
     delete ai;
     owner->StopMoving();
