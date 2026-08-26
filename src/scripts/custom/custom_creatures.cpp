@@ -559,6 +559,10 @@ bool GossipSelect_TeleportNPC(Player *player, Creature *_Creature, uint32 sender
 enum Enchants
 {
     ENCHANT_MENU_ROOT = 999,
+    BUFF_MENU_ROOT = 998,
+    BUFF_FULL = 900,
+    BUFF_GREATER_WISDOM = 901,
+    BUFF_GREATER_MIGHT = 902,
 
     WEP2H_SUPERIOR_IMPACT = 20,
     WEP2H_AGILITY,
@@ -650,6 +654,7 @@ void Enchant(Player* player, Item* item, uint32 enchantid)
 bool GossipHello_EnchantNPC(Player* player, Creature* creature)
 {
     player->ADD_GOSSIP_ITEM(5, "Enchant gear", GOSSIP_SENDER_MAIN, ENCHANT_MENU_ROOT);
+    player->ADD_GOSSIP_ITEM(5, "Buff me",      GOSSIP_SENDER_MAIN, BUFF_MENU_ROOT);
 
     player->SEND_GOSSIP_MENU(DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
     return true;
@@ -673,6 +678,56 @@ bool GossipSelect_EnchantNPC(Player* player, Creature* creature, uint32 sender, 
         player->ADD_GOSSIP_ITEM(5, "Weapon",     GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_MAINHAND);
 
         player->SEND_GOSSIP_MENU(DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        return true;
+    }
+
+    if (action == BUFF_MENU_ROOT)
+    {
+        player->ADD_GOSSIP_ITEM(5, "Full buff",                 GOSSIP_SENDER_MAIN, BUFF_FULL);
+        player->ADD_GOSSIP_ITEM(5, "Greater Blessing of Wisdom", GOSSIP_SENDER_MAIN, BUFF_GREATER_WISDOM);
+        player->ADD_GOSSIP_ITEM(5, "Greater Blessing of Might",  GOSSIP_SENDER_MAIN, BUFF_GREATER_MIGHT);
+
+        player->SEND_GOSSIP_MENU(DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        return true;
+    }
+
+    if (action == BUFF_FULL || action == BUFF_GREATER_WISDOM || action == BUFF_GREATER_MIGHT)
+    {
+        if (action == BUFF_FULL)
+        {
+            // Real vanilla class buffs (max rank for this build) + real world buffs.
+            // Paladin single-target Blessings share one aura slot, so Full Buff grants
+            // Kings; the two Greater Blessing options below are separate, deliberate picks.
+            static uint32 const fullBuffSpells[] = {
+                10938, // Power Word: Fortitude
+                27841, // Divine Spirit
+                10157, // Arcane Intellect
+                21850, // Gift of the Wild
+                25289, // Battle Shout
+                20906, // Trueshot Aura
+                25361, // Strength of Earth Totem
+                25359, // Grace of Air Totem
+                10497, // Mana Spring Totem
+                10614, // Windfury Totem
+                20217, // Blessing of Kings
+                22888, // Rallying Cry of the Dragonslayer
+                16609, // Warchief's Blessing
+                24425, // Spirit of Zandalar
+                15366, // Songflower Serenade
+                22817, // Fengus' Ferocity
+                22818, // Mol'dar's Moxie
+                22820, // Slip'kik's Savvy
+                23768, // Sayge's Dark Fortune of Damage
+            };
+            for (uint32 spellId : fullBuffSpells)
+                player->CastSpell(player, spellId, true);
+        }
+        else if (action == BUFF_GREATER_WISDOM)
+            player->CastSpell(player, 25918, true); // Greater Blessing of Wisdom (max rank)
+        else if (action == BUFF_GREATER_MIGHT)
+            player->CastSpell(player, 25916, true); // Greater Blessing of Might (max rank)
+
+        player->CLOSE_GOSSIP_MENU();
         return true;
     }
 
