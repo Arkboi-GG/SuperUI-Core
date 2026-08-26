@@ -6641,6 +6641,14 @@ SpellAuraHolder::SpellAuraHolder(SpellEntry const* spellproto, Unit* target, Uni
         m_duration = 300;
         m_maxDuration = 300;
     }
+    // GOA: force conventional buffs on players to exactly 2 hours (7200000 ms).
+    // Gated to >= 60000 ms so short combat procs/cooldowns (Evasion, Ice Block,
+    // trinket procs, etc.) are untouched -- this only reaches things that already
+    // read as a real "buff" (class buffs, world buffs, consumables, totems, ...).
+    else if (target->GetTypeId() == TYPEID_PLAYER && spellproto->IsPositiveSpell() && m_maxDuration >= 60000)
+    {
+        m_duration = m_maxDuration = 7200000;
+    }
 
     if (unitCaster)
     {
