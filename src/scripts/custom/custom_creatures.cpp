@@ -558,6 +558,8 @@ bool GossipSelect_TeleportNPC(Player *player, Creature *_Creature, uint32 sender
 
 enum Enchants
 {
+    ENCHANT_MENU_ROOT = 999,
+
     WEP2H_SUPERIOR_IMPACT = 20,
     WEP2H_AGILITY,
     WEP_CRUSADER,
@@ -596,6 +598,34 @@ enum Enchants
     BOOTS_AGI,
     BOOTS_SPEED,
     BOOTS_STAM,
+
+    // Head/Legs share the same real vanilla Arcanum catalog (Argent Dawn),
+    // duplicated per-slot so the apply switch below knows which item to target.
+    HEAD_ARCANUM_RUMINATION,
+    HEAD_ARCANUM_CONSTITUTION,
+    HEAD_ARCANUM_TENACITY,
+    HEAD_ARCANUM_RESILIENCE,
+    HEAD_ARCANUM_VORACITY,
+    HEAD_ARCANUM_RAPIDITY,
+    HEAD_ARCANUM_FOCUS,
+    HEAD_ARCANUM_PROTECTION,
+    LEGS_ARCANUM_RUMINATION,
+    LEGS_ARCANUM_CONSTITUTION,
+    LEGS_ARCANUM_TENACITY,
+    LEGS_ARCANUM_RESILIENCE,
+    LEGS_ARCANUM_VORACITY,
+    LEGS_ARCANUM_RAPIDITY,
+    LEGS_ARCANUM_FOCUS,
+    LEGS_ARCANUM_PROTECTION,
+
+    SHOULDER_CHROMATIC_RES,
+    SHOULDER_SIGNET_MIGHT,
+    SHOULDER_SIGNET_MOJO,
+    SHOULDER_SIGNET_SERENITY,
+    SHOULDER_MIGHT_SCOURGE,
+    SHOULDER_FORTITUDE_SCOURGE,
+    SHOULDER_RESILIENCE_SCOURGE,
+    SHOULDER_POWER_SCOURGE,
 };
 
 void Enchant(Player* player, Item* item, uint32 enchantid)
@@ -619,15 +649,9 @@ void Enchant(Player* player, Item* item, uint32 enchantid)
 
 bool GossipHello_EnchantNPC(Player* player, Creature* creature)
 {
-    player->ADD_GOSSIP_ITEM(5, "Chest",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_CHEST);
-    player->ADD_GOSSIP_ITEM(5, "Cloak",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_BACK);
-    player->ADD_GOSSIP_ITEM(5, "Bracers",    GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_WRISTS);
-    player->ADD_GOSSIP_ITEM(5, "Gloves",     GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_HANDS);
-    player->ADD_GOSSIP_ITEM(5, "Boots",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_FEET);
-    player->ADD_GOSSIP_ITEM(5, "Mainhand",   GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_MAINHAND);
-    player->ADD_GOSSIP_ITEM(5, "Offhand",    GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_OFFHAND);
+    player->ADD_GOSSIP_ITEM(5, "Enchant gear", GOSSIP_SENDER_MAIN, ENCHANT_MENU_ROOT);
 
-    player->SEND_GOSSIP_MENU(player->GetGossipTextId(creature), creature->GetGUID());
+    player->SEND_GOSSIP_MENU(DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
     return true;
 }
 
@@ -636,10 +660,56 @@ bool GossipSelect_EnchantNPC(Player* player, Creature* creature, uint32 sender, 
     if (sender != GOSSIP_SENDER_MAIN)
         return true;
 
+    if (action == ENCHANT_MENU_ROOT)
+    {
+        player->ADD_GOSSIP_ITEM(5, "Helmet",     GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_HEAD);
+        player->ADD_GOSSIP_ITEM(5, "Shoulders",  GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_SHOULDERS);
+        player->ADD_GOSSIP_ITEM(5, "Cloak",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_BACK);
+        player->ADD_GOSSIP_ITEM(5, "Chest",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_CHEST);
+        player->ADD_GOSSIP_ITEM(5, "Bracers",    GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_WRISTS);
+        player->ADD_GOSSIP_ITEM(5, "Gloves",     GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_HANDS);
+        player->ADD_GOSSIP_ITEM(5, "Pants",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_LEGS);
+        player->ADD_GOSSIP_ITEM(5, "Boots",      GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_FEET);
+        player->ADD_GOSSIP_ITEM(5, "Weapon",     GOSSIP_SENDER_MAIN, EQUIPMENT_SLOT_MAINHAND);
+
+        player->SEND_GOSSIP_MENU(DEFAULT_GOSSIP_MESSAGE, creature->GetGUID());
+        return true;
+    }
+
     if (action < 20)
     {
         switch (action)
         {
+        case EQUIPMENT_SLOT_HEAD:
+            player->ADD_GOSSIP_ITEM(5, "MP5 (Rumination)",       GOSSIP_SENDER_MAIN, HEAD_ARCANUM_RUMINATION);
+            player->ADD_GOSSIP_ITEM(5, "Stamina (Constitution)", GOSSIP_SENDER_MAIN, HEAD_ARCANUM_CONSTITUTION);
+            player->ADD_GOSSIP_ITEM(5, "Tenacity",               GOSSIP_SENDER_MAIN, HEAD_ARCANUM_TENACITY);
+            player->ADD_GOSSIP_ITEM(5, "Resilience",             GOSSIP_SENDER_MAIN, HEAD_ARCANUM_RESILIENCE);
+            player->ADD_GOSSIP_ITEM(5, "Voracity",               GOSSIP_SENDER_MAIN, HEAD_ARCANUM_VORACITY);
+            player->ADD_GOSSIP_ITEM(5, "Rapidity",               GOSSIP_SENDER_MAIN, HEAD_ARCANUM_RAPIDITY);
+            player->ADD_GOSSIP_ITEM(5, "Focus",                  GOSSIP_SENDER_MAIN, HEAD_ARCANUM_FOCUS);
+            player->ADD_GOSSIP_ITEM(5, "Protection",             GOSSIP_SENDER_MAIN, HEAD_ARCANUM_PROTECTION);
+            break;
+        case EQUIPMENT_SLOT_LEGS:
+            player->ADD_GOSSIP_ITEM(5, "MP5 (Rumination)",       GOSSIP_SENDER_MAIN, LEGS_ARCANUM_RUMINATION);
+            player->ADD_GOSSIP_ITEM(5, "Stamina (Constitution)", GOSSIP_SENDER_MAIN, LEGS_ARCANUM_CONSTITUTION);
+            player->ADD_GOSSIP_ITEM(5, "Tenacity",               GOSSIP_SENDER_MAIN, LEGS_ARCANUM_TENACITY);
+            player->ADD_GOSSIP_ITEM(5, "Resilience",             GOSSIP_SENDER_MAIN, LEGS_ARCANUM_RESILIENCE);
+            player->ADD_GOSSIP_ITEM(5, "Voracity",               GOSSIP_SENDER_MAIN, LEGS_ARCANUM_VORACITY);
+            player->ADD_GOSSIP_ITEM(5, "Rapidity",               GOSSIP_SENDER_MAIN, LEGS_ARCANUM_RAPIDITY);
+            player->ADD_GOSSIP_ITEM(5, "Focus",                  GOSSIP_SENDER_MAIN, LEGS_ARCANUM_FOCUS);
+            player->ADD_GOSSIP_ITEM(5, "Protection",             GOSSIP_SENDER_MAIN, LEGS_ARCANUM_PROTECTION);
+            break;
+        case EQUIPMENT_SLOT_SHOULDERS:
+            player->ADD_GOSSIP_ITEM(5, "Resistance (Chromatic Mantle)",       GOSSIP_SENDER_MAIN, SHOULDER_CHROMATIC_RES);
+            player->ADD_GOSSIP_ITEM(5, "Strength (Signet of Might)",         GOSSIP_SENDER_MAIN, SHOULDER_SIGNET_MIGHT);
+            player->ADD_GOSSIP_ITEM(5, "Healing (Signet of Mojo)",           GOSSIP_SENDER_MAIN, SHOULDER_SIGNET_MOJO);
+            player->ADD_GOSSIP_ITEM(5, "Spirit (Signet of Serenity)",        GOSSIP_SENDER_MAIN, SHOULDER_SIGNET_SERENITY);
+            player->ADD_GOSSIP_ITEM(5, "AP + Crit (Might of the Scourge)",   GOSSIP_SENDER_MAIN, SHOULDER_MIGHT_SCOURGE);
+            player->ADD_GOSSIP_ITEM(5, "Stamina (Fortitude of the Scourge)", GOSSIP_SENDER_MAIN, SHOULDER_FORTITUDE_SCOURGE);
+            player->ADD_GOSSIP_ITEM(5, "Resistance (Resilience of the Scourge)", GOSSIP_SENDER_MAIN, SHOULDER_RESILIENCE_SCOURGE);
+            player->ADD_GOSSIP_ITEM(5, "Spell Power (Power of the Scourge)", GOSSIP_SENDER_MAIN, SHOULDER_POWER_SCOURGE);
+            break;
         case EQUIPMENT_SLOT_CHEST:
             player->ADD_GOSSIP_ITEM(5, "Greater Stats",      GOSSIP_SENDER_MAIN, CHEST_STATS);
             player->ADD_GOSSIP_ITEM(5, "Greater Health",     GOSSIP_SENDER_MAIN, CHEST_HEALTH);
@@ -866,6 +936,107 @@ bool GossipSelect_EnchantNPC(Player* player, Creature* creature, uint32 sender, 
             case BOOTS_STAM:
                 item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_FEET);
                 id = 929;
+                break;
+
+            // Real vanilla Argent Dawn Arcanum enchants (Head/Legs share the same catalog).
+            case HEAD_ARCANUM_RUMINATION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 1483;
+                break;
+            case HEAD_ARCANUM_CONSTITUTION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 1503;
+                break;
+            case HEAD_ARCANUM_TENACITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 1504;
+                break;
+            case HEAD_ARCANUM_RESILIENCE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 1505;
+                break;
+            case HEAD_ARCANUM_VORACITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 1506;
+                break;
+            case HEAD_ARCANUM_RAPIDITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 2543;
+                break;
+            case HEAD_ARCANUM_FOCUS:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 2544;
+                break;
+            case HEAD_ARCANUM_PROTECTION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                id = 2545;
+                break;
+
+            case LEGS_ARCANUM_RUMINATION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 1483;
+                break;
+            case LEGS_ARCANUM_CONSTITUTION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 1503;
+                break;
+            case LEGS_ARCANUM_TENACITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 1504;
+                break;
+            case LEGS_ARCANUM_RESILIENCE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 1505;
+                break;
+            case LEGS_ARCANUM_VORACITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 1506;
+                break;
+            case LEGS_ARCANUM_RAPIDITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 2543;
+                break;
+            case LEGS_ARCANUM_FOCUS:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 2544;
+                break;
+            case LEGS_ARCANUM_PROTECTION:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_LEGS);
+                id = 2545;
+                break;
+
+            // Real vanilla shoulder enchants (Argent Dawn / Zandalar Tribe / Scourge Invasion).
+            case SHOULDER_CHROMATIC_RES:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2488;
+                break;
+            case SHOULDER_SIGNET_MIGHT:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2606;
+                break;
+            case SHOULDER_SIGNET_MOJO:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2605;
+                break;
+            case SHOULDER_SIGNET_SERENITY:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2604;
+                break;
+            case SHOULDER_MIGHT_SCOURGE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2717;
+                break;
+            case SHOULDER_FORTITUDE_SCOURGE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2716;
+                break;
+            case SHOULDER_RESILIENCE_SCOURGE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2715;
+                break;
+            case SHOULDER_POWER_SCOURGE:
+                item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS);
+                id = 2721;
                 break;
         }
         Enchant(player, item, id);
