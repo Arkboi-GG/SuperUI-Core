@@ -3386,11 +3386,11 @@ SpellCastResult Spell::prepare(Aura* triggeredByAura, uint32 chance)
         // GOA: Retribution rework -- the Zealotry buff (crit proc, see Unit.cpp
         // DealMeleeDamage) makes the next Exorcism (real spell 10314) instant and
         // free, then consumes itself.
-        if (m_spellInfo->Id == 10314 && m_casterUnit && m_casterUnit->HasAura(16246))
+        if (m_spellInfo->Id == 10314 && m_casterUnit && m_casterUnit->HasAura(40013))
         {
             m_powerCost = 0;
             m_casttime = 0;
-            m_casterUnit->RemoveAurasDueToSpellByCancel(16246);
+            m_casterUnit->RemoveAurasDueToSpellByCancel(40013);
         }
 
         m_duration = m_spellInfo->CalculateDuration(m_caster);

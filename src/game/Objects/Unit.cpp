@@ -1606,7 +1606,9 @@ void Unit::DealMeleeDamage(CalcDamageInfo const* damageInfo, bool durabilityLoss
 
         // GOA: Retribution rework -- "Zealotry". Gated purely on Retribution Aura
         // being active (no talent involved): a melee crit has a 30% chance to grant
-        // the Zealotry buff (repurposed Clearcasting spell 16246 -- consumed by
+        // the Zealotry buff (spell 40013, a properly-named clone of Clearcasting/16246
+        // made via MSUI's Spell Creator -- see sql/custom/retribution_rework.sql; the
+        // mechanics are identical to 16246, just with a real name/icon) -- consumed by
         // Exorcism in Spell.cpp to make that cast instant and free) and to reset
         // Holy Shock's cooldown outright. Against an execute-range target (<20% HP)
         // it also resets Hammer of Wrath's cooldown.
@@ -1626,7 +1628,7 @@ void Unit::DealMeleeDamage(CalcDamageInfo const* damageInfo, bool durabilityLoss
             if (hasRetributionAura && roll_chance_i(30))
             {
                 Player* pPlayer = static_cast<Player*>(this);
-                CastSpell(this, 16246, true); // Zealotry buff (Clearcasting, repurposed)
+                CastSpell(this, 40013, true); // Zealotry buff
 
                 auto clearCooldown = [pPlayer](uint32 spellId)
                 {
