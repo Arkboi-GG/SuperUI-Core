@@ -84,19 +84,60 @@ REPLACE INTO `spell_template` (`entry`, `build`, `school`, `category`, `castUI`,
 (40013,5302,6,0,0,1,0,327680,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,87376,100,1,0,10,10,8,0,0,0,0,0,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,-1,0,6,0,0,1,0,0,1,0,0,0,0,0,0,0,0,-101,0,0,0,-1,-1,0,0,0,1,0,0,0,0,0,0,0,0,108,0,0,0,0,0,0,0,0,0,0,0,2416967683,0,0,14,0,0,0,0,0,0,0,0,10013,0,64,0,0,'Zealotry',2031678,'Rank 1',2031676,'',2031676,'Your next elemental damage spell has its mana cost reduced by $s1%.',2031678,0,0,0,0,0,11,0,0,1,1,-1,1,1,1,0,0,0,0,'');
 
 -- Teach both strikes (the cloned, properly-named entries above) through the Paladin
--- trainer templates (28, 29 -- same ones serving every real baseline Paladin spell).
+-- trainer templates (28, 29 -- confirmed via creature_template.trainer_id the ONLY
+-- two template IDs used by any trainer_class=2 NPC in the game, e.g. Lord Grayson
+-- Shadowbreaker/entry 928 -> 29 -- so these two cover every real Paladin trainer,
+-- every race/city, no others to fix).
 -- Also removes the zzOLD-named originals from the trainer if an earlier run of this
 -- file (before the clone step existed) taught them directly.
 DELETE FROM `npc_trainer_template` WHERE `entry` IN (28, 29) AND `spell` IN
     (679, 678, 1866, 680, 2495, 5569, 10332, 10333, 2497, 2498, 2499, 2500, 2501);
+
+-- Found live at Lord Grayson Shadowbreaker (2026-08-26): inserting 40000-40012
+-- directly into npc_trainer_template (an earlier version of this block) made them
+-- silently invisible at every Paladin trainer, no error client-side. Root cause is
+-- server-side, at load, not a reqlevel/reqskill/class issue: ObjectMgr::LoadTrainers
+-- (ObjectMgr.cpp) requires every spell referenced by npc_trainer_template.spell to
+-- have effect1 == SPELL_EFFECT_LEARN_SPELL (36) -- anything else is rejected at boot
+-- with "has non-learning spell N, ignore" (confirmed in Server.log) and never even
+-- reaches the in-memory trainer spell list, regardless of req* columns. Every real
+-- baseline Paladin spell already follows this: npc_trainer_template.spell holds a
+-- small "trainer wrapper" spell (e.g. Judgement's wrapper 10321 has
+-- effect1=36/effectTriggerSpell1=20271, the real Judgement) -- SendTrainerList
+-- (NPCHandler.cpp) reads EffectTriggerSpell[0] off *that* wrapper, not off
+-- npc_trainer_template.spell directly, to run the class/race fit check. 40000-40012
+-- are real damage spells (effect1=58), not wrappers, so they need one each -- built
+-- via the exact same shape MangosSuperUI's own CreateTrainerWrapperAsync uses
+-- (SpellCreatorService.cs), in its dedicated wrapper ID range (50000-65000).
+REPLACE INTO `spell_template` (`entry`, `build`, `school`, `attributes`, `targets`, `procChance`,
+    `equippedItemClass`, `equippedItemSubClassMask`, `effect1`, `effectTriggerSpell1`,
+    `spellVisual1`, `spellIconId`, `castingTimeIndex`, `name`, `nameFlags`, `nameSubtext`, `nameSubtextFlags`,
+    `description`, `descriptionFlags`, `auraDescription`, `auraDescriptionFlags`,
+    `rangeIndex`, `dmgMultiplier1`, `dmgMultiplier2`, `dmgMultiplier3`,
+    `effectBonusCoefficient1`, `effectBonusCoefficient2`, `effectBonusCoefficient3`, `stanceBarOrder`, `spellLevel`, `baseLevel`) VALUES
+(50000, 5875, 0, 262400, 256, 101, -1, -1, 36, 40000, 107, 52, 1, 'Holy Strike', 983070, 'Rank 1', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50001, 5875, 0, 262400, 256, 101, -1, -1, 36, 40001, 107, 52, 1, 'Holy Strike', 983070, 'Rank 2', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50002, 5875, 0, 262400, 256, 101, -1, -1, 36, 40002, 107, 52, 1, 'Holy Strike', 983070, 'Rank 3', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50003, 5875, 0, 262400, 256, 101, -1, -1, 36, 40003, 107, 52, 1, 'Holy Strike', 983070, 'Rank 4', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50004, 5875, 0, 262400, 256, 101, -1, -1, 36, 40004, 107, 52, 1, 'Holy Strike', 983070, 'Rank 5', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50005, 5875, 0, 262400, 256, 101, -1, -1, 36, 40005, 107, 52, 1, 'Holy Strike', 983070, 'Rank 6', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50006, 5875, 0, 262400, 256, 101, -1, -1, 36, 40006, 107, 52, 1, 'Holy Strike', 983070, 'Rank 7', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50007, 5875, 0, 262400, 256, 101, -1, -1, 36, 40007, 107, 52, 1, 'Holy Strike', 983070, 'Rank 8', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50008, 5875, 0, 262400, 256, 101, -1, -1, 36, 40008, 107, 52, 1, 'Divine Strike', 983070, 'Rank 1', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50009, 5875, 0, 262400, 256, 101, -1, -1, 36, 40009, 107, 52, 1, 'Divine Strike', 983070, 'Rank 2', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50010, 5875, 0, 262400, 256, 101, -1, -1, 36, 40010, 107, 52, 1, 'Divine Strike', 983070, 'Rank 3', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50011, 5875, 0, 262400, 256, 101, -1, -1, 36, 40011, 107, 52, 1, 'Divine Strike', 983070, 'Rank 4', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0),
+(50012, 5875, 0, 262400, 256, 101, -1, -1, 36, 40012, 107, 52, 1, 'Divine Strike', 983070, 'Rank 5', 983070, '', 983052, '', 983052, 6, 1, 1, 1, 0, -1, -1, -1, 0, 0);
+
 DELETE FROM `npc_trainer_template` WHERE `entry` IN (28, 29) AND `spell` BETWEEN 40000 AND 40012;
+DELETE FROM `npc_trainer_template` WHERE `entry` IN (28, 29) AND `spell` BETWEEN 50000 AND 50012;
 INSERT INTO `npc_trainer_template` (`entry`, `spell`, `spellcost`, `reqskill`, `reqskillvalue`, `reqlevel`) VALUES
-(28, 40000, 0, 0, 0, 1),  (28, 40001, 0, 0, 0, 8),  (28, 40002, 0, 0, 0, 16), (28, 40003, 0, 0, 0, 24),
-(28, 40004, 0, 0, 0, 32), (28, 40005, 0, 0, 0, 40), (28, 40006, 0, 0, 0, 48), (28, 40007, 0, 0, 0, 56),
-(28, 40008, 0, 0, 0, 8),  (28, 40009, 0, 0, 0, 22), (28, 40010, 0, 0, 0, 36), (28, 40011, 0, 0, 0, 50), (28, 40012, 0, 0, 0, 60),
-(29, 40000, 0, 0, 0, 1),  (29, 40001, 0, 0, 0, 8),  (29, 40002, 0, 0, 0, 16), (29, 40003, 0, 0, 0, 24),
-(29, 40004, 0, 0, 0, 32), (29, 40005, 0, 0, 0, 40), (29, 40006, 0, 0, 0, 48), (29, 40007, 0, 0, 0, 56),
-(29, 40008, 0, 0, 0, 8),  (29, 40009, 0, 0, 0, 22), (29, 40010, 0, 0, 0, 36), (29, 40011, 0, 0, 0, 50), (29, 40012, 0, 0, 0, 60);
+(28, 50000, 0, 0, 0, 1),  (28, 50001, 0, 0, 0, 8),  (28, 50002, 0, 0, 0, 16), (28, 50003, 0, 0, 0, 24),
+(28, 50004, 0, 0, 0, 32), (28, 50005, 0, 0, 0, 40), (28, 50006, 0, 0, 0, 48), (28, 50007, 0, 0, 0, 56),
+(28, 50008, 0, 0, 0, 8),  (28, 50009, 0, 0, 0, 22), (28, 50010, 0, 0, 0, 36), (28, 50011, 0, 0, 0, 50), (28, 50012, 0, 0, 0, 60),
+(29, 50000, 0, 0, 0, 1),  (29, 50001, 0, 0, 0, 8),  (29, 50002, 0, 0, 0, 16), (29, 50003, 0, 0, 0, 24),
+(29, 50004, 0, 0, 0, 32), (29, 50005, 0, 0, 0, 40), (29, 50006, 0, 0, 0, 48), (29, 50007, 0, 0, 0, 56),
+(29, 50008, 0, 0, 0, 8),  (29, 50009, 0, 0, 0, 22), (29, 50010, 0, 0, 0, 36), (29, 50011, 0, 0, 0, 50), (29, 50012, 0, 0, 0, 60);
 
 -- Zealotry (40013) presentation fix (found from live testing, 2026-08-26): the
 -- Spell Creator clone above inherited Clearcasting's real gameplay shape
