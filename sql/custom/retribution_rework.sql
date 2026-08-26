@@ -97,3 +97,22 @@ INSERT INTO `npc_trainer_template` (`entry`, `spell`, `spellcost`, `reqskill`, `
 (29, 40000, 0, 0, 0, 1),  (29, 40001, 0, 0, 0, 8),  (29, 40002, 0, 0, 0, 16), (29, 40003, 0, 0, 0, 24),
 (29, 40004, 0, 0, 0, 32), (29, 40005, 0, 0, 0, 40), (29, 40006, 0, 0, 0, 48), (29, 40007, 0, 0, 0, 56),
 (29, 40008, 0, 0, 0, 8),  (29, 40009, 0, 0, 0, 22), (29, 40010, 0, 0, 0, 36), (29, 40011, 0, 0, 0, 50), (29, 40012, 0, 0, 0, 60);
+
+-- Spellbook categorization: being trainer-taught is NOT enough to land in the
+-- Paladin tab -- that's driven separately by `skill_line_ability`. The Spell
+-- Creator's own "auto-copy from source" step (PatchController.cs) only copies an
+-- SLA row if the SOURCE spell already had one, and these zzOLD-derived sources
+-- never did (they predate/were excluded from this categorization system). Without
+-- this block the clones would sit in the generic/uncategorized tab. skill_id 184 +
+-- class_mask 2 is the real, verified pattern (checked against the live Blessing of
+-- Might family, which uses exactly this) -- not chained via superseded_by_spell,
+-- matching how real multi-rank Paladin spells are actually wired.
+DELETE FROM `skill_line_ability` WHERE `spell_id` BETWEEN 40000 AND 40012 AND `build` = 5875;
+INSERT INTO `skill_line_ability` (`id`, `build`, `skill_id`, `spell_id`, `race_mask`, `class_mask`, `req_skill_value`, `superseded_by_spell`, `learn_on_get_skill`, `max_value`, `min_value`, `req_train_points`)
+SELECT (SELECT COALESCE(MAX(id), 0) FROM skill_line_ability) + n, 5875, 184, spell, 0, 2, 1, 0, 0, 0, 0, 0
+FROM (
+    SELECT 1 AS n, 40000 AS spell UNION ALL SELECT 2, 40001 UNION ALL SELECT 3, 40002 UNION ALL SELECT 4, 40003
+    UNION ALL SELECT 5, 40004 UNION ALL SELECT 6, 40005 UNION ALL SELECT 7, 40006 UNION ALL SELECT 8, 40007
+    UNION ALL SELECT 9, 40008 UNION ALL SELECT 10, 40009 UNION ALL SELECT 11, 40010 UNION ALL SELECT 12, 40011
+    UNION ALL SELECT 13, 40012
+) ranks;
