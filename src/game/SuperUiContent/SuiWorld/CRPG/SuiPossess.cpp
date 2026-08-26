@@ -8,6 +8,7 @@
  */
 
 #include "SuiPossess.h"
+#include "ScriptMgr.h"
 #include <algorithm>
 #include <unordered_map>
 #include <cmath>
