@@ -1603,6 +1603,46 @@ void Unit::DealMeleeDamage(CalcDamageInfo const* damageInfo, bool durabilityLoss
     {
         if (!(pVictim->IsCreature() && static_cast<Creature*>(pVictim)->HasStaticFlag(CREATURE_STATIC_FLAG_DO_NOT_PLAY_WOUND_ANIM)))
             pVictim->HandleEmoteCommand(EMOTE_ONESHOT_WOUNDCRITICAL);
+
+        // GOA: Retribution rework -- "Zealotry". Gated purely on Retribution Aura
+        // being active (no talent involved): a melee crit has a 30% chance to grant
+        // the Zealotry buff (repurposed Clearcasting spell 16246 -- consumed by
+        // Exorcism in Spell.cpp to make that cast instant and free) and to reset
+        // Holy Shock's cooldown outright. Against an execute-range target (<20% HP)
+        // it also resets Hammer of Wrath's cooldown.
+        if (GetTypeId() == TYPEID_PLAYER)
+        {
+            static uint32 const retributionAuraIds[] = { 7294, 10298, 10299, 10300, 10301 };
+            bool hasRetributionAura = false;
+            for (uint32 auraId : retributionAuraIds)
+            {
+                if (HasAura(auraId))
+                {
+                    hasRetributionAura = true;
+                    break;
+                }
+            }
+
+            if (hasRetributionAura && roll_chance_i(30))
+            {
+                Player* pPlayer = static_cast<Player*>(this);
+                CastSpell(this, 16246, true); // Zealotry buff (Clearcasting, repurposed)
+
+                auto clearCooldown = [pPlayer](uint32 spellId)
+                {
+                    if (SpellEntry const* entry = sSpellMgr.GetSpellEntry(spellId))
+                        pPlayer->RemoveSpellCooldown(*entry, true);
+                };
+                clearCooldown(20960); // Holy Shock (outer)
+                clearCooldown(20930); // Holy Shock (real)
+
+                if (pVictim->GetHealthPercent() < 20.0f)
+                {
+                    clearCooldown(24278); // Hammer of Wrath (outer)
+                    clearCooldown(24239); // Hammer of Wrath (real)
+                }
+            }
+        }
     }
 
     if (damageInfo->TargetState == VICTIMSTATE_PARRY)

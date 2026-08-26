@@ -6641,6 +6641,14 @@ SpellAuraHolder::SpellAuraHolder(SpellEntry const* spellproto, Unit* target, Uni
         m_duration = 300;
         m_maxDuration = 300;
     }
+    // GOA: Retribution rework -- Seals now last 2 minutes (120000 ms) instead of the
+    // stock 30s, since Judgement no longer consumes them (see SpellEffects.cpp). This
+    // must be checked before the generic 2-hour buff rule below, or a Seal would just
+    // get swept into that instead.
+    else if (target->GetTypeId() == TYPEID_PLAYER && spellproto->IsSealSpell())
+    {
+        m_duration = m_maxDuration = 120000;
+    }
     // GOA: force conventional buffs on players to exactly 2 hours (7200000 ms).
     // Gated to >= 60000 ms so short combat procs/cooldowns (Evasion, Ice Block,
     // trinket procs, etc.) are untouched -- this only reaches things that already

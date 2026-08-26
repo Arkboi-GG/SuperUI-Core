@@ -4488,6 +4488,13 @@ void Spell::EffectScriptEffect(SpellEffectIndex effIdx)
                     return;
                 uint32 spellId2 = 0;
 
+                // GOA: Retribution rework -- Seal of Command's real ranks, so a
+                // Judgement cast while Command is active also fires Command's own
+                // proc-damage spell (20424) as a bonus. Seal duration/persistence
+                // itself is handled in SpellAuras.cpp.
+                static uint32 const sealOfCommandRanks[] = { 20915, 20918, 20919, 20920 };
+                static uint32 const SEAL_OF_COMMAND_PROC_SPELL = 20424;
+
                 // all seals have aura dummy
                 Unit::AuraList const& m_dummyAuras = m_casterUnit->GetAurasByType(SPELL_AURA_DUMMY);
                 for (const auto aura : m_dummyAuras)
@@ -4504,8 +4511,17 @@ void Spell::EffectScriptEffect(SpellEffectIndex effIdx)
                     if (spellId2 <= 1)
                         continue;
 
-                    // found, remove seal
-                    m_casterUnit->RemoveAurasDueToSpellByCancel(aura->GetId());
+                    // GOA: Judgement no longer consumes the Seal -- Seals are now a
+                    // long-duration (2 min) maintenance buff, judged freely instead
+                    // of being burned on every Judgement cast.
+                    for (uint32 commandId : sealOfCommandRanks)
+                    {
+                        if (spellInfo->Id == commandId)
+                        {
+                            m_caster->CastSpell(unitTarget, SEAL_OF_COMMAND_PROC_SPELL, true);
+                            break;
+                        }
+                    }
                     break;
                 }
 
