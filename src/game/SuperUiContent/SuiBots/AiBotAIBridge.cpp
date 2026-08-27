@@ -4,7 +4,7 @@
  * Split from the monolithic AiBotAI.cpp. THIS TU holds the bridge domain:
  *   - the non-blocking TCP transport (connect / disconnect / send / flush / recv)
  *   - HELLO / STATE / EVENT senders
- *   - the file-local minimal JSON extractors (JsonExtractFloat/Int/String)
+ *   - the file-local minimal JSON extractors (JsonExtractFloat/Int/UInt64/String)
  *   - BridgeProcessLine dispatch + every BridgeHandle* command handler
  *   - the C++→C# event senders (SendKillEvent / SendQuestUpdateEvent / SendLevelUpEvent /
  *     SendChatRecvEvent)
@@ -20,6 +20,7 @@
 #include "AiBotTalents.h"
 #include "SuiHero.h"
 #include "SuiPossess.h"      // [SUI] free-view command waiver on the possessed drop
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros + batch flush (CIRCUIT_BOARD.md)
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -65,11 +66,15 @@ typedef SSIZE_T ssize_t;
 void AiBotAI::BridgeConnect()
 {
     if (m_bridgeConnected)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: connect skipped, already connected");
         return;
- 
+    }
+
     m_bridgeSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (m_bridgeSocket == BRIDGE_INVALID_SOCKET)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: socket create failed");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: socket() failed", me->GetName());
         return;
     }
@@ -82,6 +87,7 @@ void AiBotAI::BridgeConnect()
  
     if (connect(m_bridgeSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: connect failed, retry after ms", m_bridgeReconnectDelay);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: connect failed (will retry in %ums)",
             me->GetName(), m_bridgeReconnectDelay);
         BRIDGE_CLOSE_SOCKET(m_bridgeSocket);
@@ -116,6 +122,7 @@ void AiBotAI::BridgeDisconnect()
 {
     if (m_bridgeSocket != BRIDGE_INVALID_SOCKET)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: socket closed, disconnected");
         BRIDGE_CLOSE_SOCKET(m_bridgeSocket);
         m_bridgeSocket = BRIDGE_INVALID_SOCKET;
     }
@@ -128,8 +135,8 @@ void AiBotAI::BridgeDisconnect()
 void AiBotAI::BridgeSend(const char* json)
 {
     if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
-        return;
- 
+        return; // cb:fold socket plumbing
+
     size_t len = strlen(json);
  
     // Safety valve: if C# stops reading, the kernel send buffer fills and our
@@ -137,15 +144,16 @@ void AiBotAI::BridgeSend(const char* json)
     // boundary so we never resume mid-message) rather than grow unbounded.
     if (m_bridgeSendBuf.size() + len + 1 > BRIDGE_SEND_BUF_MAX)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: send queue overflow, dropping oldest", m_bridgeSendBuf.size());
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: send queue over %u bytes — dropping oldest (C# slow or down?)",
             me->GetName(), (uint32)BRIDGE_SEND_BUF_MAX);
         m_bridgeSendBuf.erase(0, m_bridgeSendBuf.size() / 2);
         size_t nl = m_bridgeSendBuf.find('\n');
         if (nl != std::string::npos)
-            m_bridgeSendBuf.erase(0, nl + 1);   // realign to the next whole line
+            m_bridgeSendBuf.erase(0, nl + 1);   // cb:fold buffer realign detail (next whole line)
         else
-            m_bridgeSendBuf.clear();
+            m_bridgeSendBuf.clear(); // cb:fold buffer realign detail
     }
  
     // Queue the whole line. JSON-lines protocol → one '\n' terminator.
@@ -159,8 +167,8 @@ void AiBotAI::BridgeSend(const char* json)
 void AiBotAI::BridgeFlush()
 {
     if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
-        return;
- 
+        return; // cb:fold socket plumbing
+
     while (!m_bridgeSendBuf.empty())
     {
         ssize_t sent = send(m_bridgeSocket,
@@ -168,13 +176,13 @@ void AiBotAI::BridgeFlush()
                             m_bridgeSendBuf.size(), 0);
  
         if (sent > 0)
-        {
+        {   // cb:fold socket plumbing
             m_bridgeSendBuf.erase(0, (size_t)sent);
             continue; // keep draining until empty or the socket pushes back
         }
  
         if (sent == 0)
-        {
+        {   // cb:fold socket plumbing, disconnect probe carries the outcome
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-BRIDGE] %s: send returned 0 (peer closed), disconnecting", me->GetName());
             BridgeDisconnect();
@@ -185,12 +193,12 @@ void AiBotAI::BridgeFlush()
 #ifdef _WIN32
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK)
-            return; // kernel buffer full — keep remainder, retry next tick (NOT an error)
+            return; // cb:fold socket plumbing (kernel buffer full, retry next tick)
 #else
         if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return; // kernel buffer full — keep remainder, retry next tick (NOT an error)
+            return; // cb:fold socket plumbing (kernel buffer full, retry next tick)
         if (errno == EINTR)
-            continue; // interrupted before any bytes sent — retry immediately
+            continue; // cb:fold socket plumbing (EINTR, retry immediately)
 #endif
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: send error, disconnecting", me->GetName());
@@ -202,7 +210,7 @@ void AiBotAI::BridgeFlush()
 void AiBotAI::BridgeSendHello()
 {
     if (!m_bridgeConnected || m_bridgeHelloSent)
-        return;
+        return; // cb:fold connection lifecycle gate, fires every tick in steady state
 
     char const* specProfile = botEntry
         ? AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab)
@@ -210,14 +218,14 @@ void AiBotAI::BridgeSendHello()
     char json[768];
     snprintf(json, sizeof(json),
         "{\"type\":\"HELLO\",\"payload\":{"
-        "\"guid\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
+        "\"guid\":%u,\"bridgeProtocol\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
         "\"level\":%u,\"specTab\":%u,\"specProfile\":\"%s\",\"activeRole\":%u,"
         "\"talentProfileState\":\"%s\",\"rotationSource\":\"%s\","
         "\"rotationProfile\":\"%s\",\"rotationInstructionCount\":%u,"
         "\"rotationCastableCount\":%u,\"combatConfigRevision\":%u,"
         "\"mapId\":%u,\"zoneId\":%u,"
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-        me->GetGUIDLow(), me->GetName(), me->GetRace(), me->GetClass(),
+        me->GetGUIDLow(), uint32(BRIDGE_PROTOCOL_VERSION), me->GetName(), me->GetRace(), me->GetClass(),
         me->GetLevel(), botEntry ? uint32(botEntry->specTab) : 255u,
         specProfile, uint32(m_role), GetTalentProfileStateName(),
         GetEffectiveRotationSource(), GetEffectiveRotationProfile(),
@@ -230,12 +238,14 @@ void AiBotAI::BridgeSendHello()
     // Restore tracked quest from server quest log (restart recovery)
     if (m_trackedQuestId == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: no tracked quest, restoring from server log");
         const auto& questMap = me->GetQuestStatusMap();
         for (const auto& pair : questMap)
         {
             if (pair.second.m_status == QUEST_STATUS_INCOMPLETE ||
                 pair.second.m_status == QUEST_STATUS_COMPLETE)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-bridge: tracked quest restored", pair.first);
                 m_trackedQuestId = pair.first;
                 break;  // take the first active quest
             }
@@ -244,36 +254,40 @@ void AiBotAI::BridgeSendHello()
 
     m_bridgeHelloSent = true;
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: HELLO sent (guid=%u)", me->GetName(), me->GetGUIDLow());
+
+    // [CIRCUIT] fresh connection: re-ship the probe-site manifest so the C#
+    // side can decode this session's batches even after either side restarted.
+    CbCircuit::ResetManifest(me->GetGUIDLow());
 }
 
 char const* AiBotAI::GetTalentProfileStateName() const
 {
     if (!botEntry)
-        return "unavailable";
+        return "unavailable"; // cb:fold state field mapping, carried by HELLO/STATE payload
     switch (botEntry->talentProfileState)
     {
-        case PB_TALENT_PROFILE_USABLE: return "usable";
-        case PB_TALENT_PROFILE_CONFLICT: return "conflict";
-        case PB_TALENT_PROFILE_INVALID: return "invalid";
-        case PB_TALENT_PROFILE_DISABLED: return "disabled";
-        case PB_TALENT_PROFILE_ERROR: return "error";
-        default: return "unchecked";
+        case PB_TALENT_PROFILE_USABLE: return "usable"; // cb:fold state field mapping
+        case PB_TALENT_PROFILE_CONFLICT: return "conflict"; // cb:fold state field mapping
+        case PB_TALENT_PROFILE_INVALID: return "invalid"; // cb:fold state field mapping
+        case PB_TALENT_PROFILE_DISABLED: return "disabled"; // cb:fold state field mapping
+        case PB_TALENT_PROFILE_ERROR: return "error"; // cb:fold state field mapping
+        default: return "unchecked"; // cb:fold state field mapping
     }
 }
 
 char const* AiBotAI::GetEffectiveRotationSource() const
 {
     if (!m_rotation.empty())
-        return "custom";
+        return "custom"; // cb:fold state field mapping
     return HasUsableSpecCombat() ? "builtin_spec" : "legacy_class";
 }
 
 char const* AiBotAI::GetEffectiveRotationProfile() const
 {
     if (!m_rotation.empty())
-        return m_rotationProfile.c_str();
+        return m_rotationProfile.c_str(); // cb:fold state field mapping
     if (HasUsableSpecCombat() && botEntry)
-        return AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab);
+        return AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab); // cb:fold state field mapping
     return "legacy_class";
 }
 
@@ -307,39 +321,42 @@ char const* AiBotAI::GetEffectiveRotationProfile() const
 void AiBotAI::BridgeSendState()
 {
     if (!m_bridgeConnected)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: state skipped, not connected");
         return;
+    }
 
     const char* taskStr = "IDLE";
     if (me->IsDead())
-        taskStr = "DEAD";
-    else if (me->IsInCombat())
-        taskStr = "COMBAT";
-    else if (m_currentTask.type == TASK_GRIND)
-        taskStr = "GRINDING";
-    else if (m_currentTask.type == TASK_TAXI)
-        taskStr = "FLYING";
-    else if (m_currentTask.type == TASK_MOVE_TO)
-        taskStr = "MOVING";
-    else if (me->IsMoving())
-        taskStr = "MOVING";
+        taskStr = "DEAD"; // cb:fold state field mapping
+    else if (me->IsInCombat()) // cb:fold state field mapping, carried by STATE taskState
+        taskStr = "COMBAT"; // cb:fold state field mapping
+    else if (m_currentTask.type == TASK_GRIND) // cb:fold state field mapping
+        taskStr = "GRINDING"; // cb:fold state field mapping
+    else if (m_currentTask.type == TASK_TAXI) // cb:fold state field mapping
+        taskStr = "FLYING"; // cb:fold state field mapping
+    else if (m_currentTask.type == TASK_MOVE_TO) // cb:fold state field mapping
+        taskStr = "MOVING"; // cb:fold state field mapping
+    else if (me->IsMoving()) // cb:fold state field mapping
+        taskStr = "MOVING"; // cb:fold state field mapping
 
     uint32 freeSlots = 0;
     for (int fi = INVENTORY_SLOT_ITEM_START; fi < INVENTORY_SLOT_ITEM_END; ++fi)
         if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
-            ++freeSlots;
+            ++freeSlots; // cb:fold slot tally detail
     for (int fi = INVENTORY_SLOT_BAG_START; fi < INVENTORY_SLOT_BAG_END; ++fi)
-        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
-            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
-                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj)
+        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi)) // cb:fold decl-if condition artifact
+            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER) // cb:fold slot tally detail
+                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj) // cb:fold slot tally detail
                     if (!me->GetItemByPos(fi, fj))
-                        ++freeSlots;
+                        ++freeSlots; // cb:fold slot tally detail
     uint32 totalSlots = (INVENTORY_SLOT_ITEM_END - INVENTORY_SLOT_ITEM_START);
     for (int i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
     {
-        if (Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i))
-            if (pBag->GetProto()->Class == ITEM_CLASS_CONTAINER &&
+        if (Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i)) // cb:fold decl-if condition artifact
+            if (pBag->GetProto()->Class == ITEM_CLASS_CONTAINER && // cb:fold slot tally detail
                 pBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
-                totalSlots += pBag->GetBagSize();
+                totalSlots += pBag->GetBagSize(); // cb:fold slot tally detail
     }
 
     // --- Min equipped durability % (feeds the C# repair trigger) ---
@@ -351,14 +368,14 @@ void AiBotAI::BridgeSendState()
     {
         Item* item = me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)i);
         if (!item)
-            continue;
+            continue; // cb:fold durability tally detail, carried by STATE durability
         uint32 maxDur = item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY);
         if (maxDur == 0)
-            continue;   // rings/trinkets/etc. have no durability
+            continue;   // cb:fold durability tally detail (rings/trinkets/etc. have none)
         uint32 dur = item->GetUInt32Value(ITEM_FIELD_DURABILITY);
         uint32 pct = (dur * 100) / maxDur;
         if (pct < minDurabilityPct)
-            minDurabilityPct = pct;
+            minDurabilityPct = pct; // cb:fold durability tally detail
     }
 
     // --- [PLAYERPARTY] escort echo (2026-07-07) + boss range (2026-07-08) ---
@@ -373,13 +390,15 @@ void AiBotAI::BridgeSendState()
     // guard should watch: the bot returns to ITS human, not necessarily the leader.
     uint32 pparty = 0u;
     int ppdist = -1;
-    if (Player* pBoss = FindEscortBoss())
+    if (Player* pBoss = FindEscortBoss()) // cb:fold decl-if condition artifact, body probed
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: escort boss in group, pparty set");
         pparty = 1u;
         ppdist = (pBoss->GetMapId() == me->GetMapId()) ? (int)me->GetDistance(pBoss) : 99999;
     }
     else if (me->GetSession() && !me->GetSession()->GetBot())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: real char in free view, pparty hold");
         // [SUI] Enrolled REAL character with no boss to key on: its human is in
         // the free camera. Owner decree (2026-08-10): the personal party is
         // non-autonomous unless made explicit later — echo pparty=1 so the C#
@@ -390,7 +409,7 @@ void AiBotAI::BridgeSendState()
     // --- Active quest status from server (authoritative) ---
     uint32 questStatus = 0;  // 0 = no tracked quest
     if (m_trackedQuestId > 0)
-        questStatus = (uint32)me->GetQuestStatus(m_trackedQuestId);
+        questStatus = (uint32)me->GetQuestStatus(m_trackedQuestId); // cb:fold state field detail, carried by STATE questStatus
 
     // --- §4 held-task echo: the kind C++ is ACTUALLY running + within-objective activity ---
     // Independent of taskStr above (display/status). The committed task KIND stays GRIND/MOVE_TO
@@ -399,10 +418,10 @@ void AiBotAI::BridgeSendState()
     const char* taskKindStr;
     switch (m_currentTask.type)
     {
-        case TASK_GRIND:   taskKindStr = "GRIND";   break;
-        case TASK_MOVE_TO: taskKindStr = "MOVE_TO"; break;
-        case TASK_TAXI:    taskKindStr = "MOVE_TO"; break;   // in transit = a kind of travel
-        default:           taskKindStr = "IDLE";    break;
+        case TASK_GRIND:   taskKindStr = "GRIND";   break; // cb:fold state field mapping, carried by STATE taskKind
+        case TASK_MOVE_TO: taskKindStr = "MOVE_TO"; break; // cb:fold state field mapping
+        case TASK_TAXI:    taskKindStr = "MOVE_TO"; break; // cb:fold state field mapping (in transit = a kind of travel)
+        default:           taskKindStr = "IDLE";    break; // cb:fold state field mapping
     }
 
     // Within-objective activity — the headway signal C# reacts to (not a wall clock). Order is a
@@ -410,13 +429,13 @@ void AiBotAI::BridgeSendState()
     // is travel; a stationary grind is "between targets" (searching). Anything else = idle.
     const char* activityStr = "idle";
     if (me->IsInCombat())
-        activityStr = "engaged";
-    else if (me->HasAura(AB_SPELL_FOOD) || me->HasAura(AB_SPELL_DRINK))
-        activityStr = "recovering";
-    else if (me->IsMoving())
-        activityStr = "traveling";
-    else if (m_currentTask.type == TASK_GRIND)
-        activityStr = "searching";   // committed to a grind, between targets — NOT a clock-based stall
+        activityStr = "engaged"; // cb:fold state field mapping
+    else if (me->HasAura(AB_SPELL_FOOD) || me->HasAura(AB_SPELL_DRINK)) // cb:fold state field mapping, carried by STATE taskActivity
+        activityStr = "recovering"; // cb:fold state field mapping
+    else if (me->IsMoving()) // cb:fold state field mapping
+        activityStr = "traveling"; // cb:fold state field mapping
+    else if (m_currentTask.type == TASK_GRIND) // cb:fold state field mapping
+        activityStr = "searching";   // cb:fold state field mapping (grind between targets, NOT a clock stall)
     // else: idle
 
     // --- Full quest-log snapshot (RETIRES the QUERY_QUEST_STATUS pull) ---
@@ -436,13 +455,13 @@ void AiBotAI::BridgeSendState()
             const auto& qData = pair.second;
 
             if (qData.m_rewarded)
-                continue;   // turned in — not an active log entry
+                continue;   // cb:fold quest blob detail (turned in, not an active log entry)
             if (qData.m_status != QUEST_STATUS_INCOMPLETE &&
                 qData.m_status != QUEST_STATUS_COMPLETE)
-                continue;   // skip QUEST_STATUS_NONE / UNAVAILABLE
+                continue;   // cb:fold quest blob detail (skip QUEST_STATUS_NONE / UNAVAILABLE)
 
             if (!questBlob.empty())
-                questBlob += "|";
+                questBlob += "|"; // cb:fold quest blob detail
 
             char qEntry[128];
             snprintf(qEntry, sizeof(qEntry), "%u:%u:%u,%u,%u,%u:%u,%u,%u,%u",
@@ -502,27 +521,59 @@ void AiBotAI::BridgeSendState()
 
 void AiBotAI::BridgeSendEvent(const char* eventType, const char* data)
 {
-    if (!m_bridgeConnected)
-        return;
+    // A two-argument outcome is synchronous when called from a command handler and
+    // unsolicited otherwise; m_bridgeDispatchCbt is nonzero only for that dispatch stack.
+    BridgeSendEvent(eventType, data, m_bridgeDispatchCbt);
+}
 
-    char json[512];
+void AiBotAI::BridgeSendEvent(const char* eventType, const char* data, uint64 commandCbt)
+{
+    if (!m_bridgeConnected)
+    {
+        CB_HITN(me->GetGUIDLow(), "cpp-bridge: event dropped, not connected", eventType);
+        return;
+    }
+
+    // Async owners pass their persisted cbt explicitly, including an exact zero for legacy work.
+    // That prevents a cancellation callback from borrowing the cbt of its interrupting command.
+    char json[768];
     snprintf(json, sizeof(json),
-        "{\"type\":\"EVENT\",\"payload\":{"
+        "{\"type\":\"EVENT\",\"cbt\":" UI64FMTD ",\"payload\":{"
         "\"guid\":%u,\"event\":\"%s\",\"data\":\"%s\"}}",
-        me->GetGUIDLow(), eventType, data);
+        commandCbt, me->GetGUIDLow(), eventType, data);
 
     BridgeSend(json);
+}
+
+bool AiBotAI::CancelPendingNpcInteraction(const char* source)
+{
+    if (m_pendingInteractNpcGuid.IsEmpty())
+        return false; // cb:fold no pending manual approach to cancel
+
+    // A newer motion owner must retire the older INTERACT_NPC before it clears or replaces the
+    // point generator. Otherwise its suppressed cancellation callback leaves this owner alive and
+    // the OOC resume block can mistake the newer command's spline for the old NPC approach.
+    CB_HIT(me->GetGUIDLow(), "cpp-task: pending NPC interaction preempted by newer motion owner");
+    uint64 const interactCbt = m_pendingInteractNpcCbt;
+    m_pendingInteractNpcGuid.Clear();
+    m_pendingInteractNpcCbt = 0;
+    char eventData[128];
+    snprintf(eventData, sizeof(eventData),
+        "reason=preempted|source=%s", source);
+    BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+    return true;
 }
 
 void AiBotAI::BridgeRecv()
 {
     if (!m_bridgeConnected || m_bridgeSocket == BRIDGE_INVALID_SOCKET)
-        return;
+        return; // cb:fold socket plumbing
 
     // Read available data into buffer (non-blocking)
     int space = BRIDGE_RECV_BUF_SIZE - m_bridgeRecvLen - 1;
     if (space <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: recv buffer overflow, cleared");
         // Buffer full with no newline — discard
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: recv buffer overflow, clearing", me->GetName());
         m_bridgeRecvLen = 0;
@@ -531,7 +582,7 @@ void AiBotAI::BridgeRecv()
 
     ssize_t n = recv(m_bridgeSocket, m_bridgeRecvBuf + m_bridgeRecvLen, space, 0);
     if (n > 0)
-    {
+    {   // cb:fold socket plumbing, dispatch probe carries each processed line
         m_bridgeRecvLen += n;
         m_bridgeRecvBuf[m_bridgeRecvLen] = '\0';
 
@@ -542,24 +593,25 @@ void AiBotAI::BridgeRecv()
         {
             *newline = '\0';
             if (newline > start) // skip empty lines
-                BridgeProcessLine(start);
+                BridgeProcessLine(start); // cb:fold empty line skip, dispatch probe carries each line
             start = newline + 1;
         }
 
         // Shift remaining partial data to front
         int remaining = m_bridgeRecvLen - (int)(start - m_bridgeRecvBuf);
         if (remaining > 0 && start != m_bridgeRecvBuf)
-            memmove(m_bridgeRecvBuf, start, remaining);
+            memmove(m_bridgeRecvBuf, start, remaining); // cb:fold socket plumbing
         m_bridgeRecvLen = remaining;
     }
     else if (n == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: server closed connection");
         // Clean disconnect
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: server closed connection", me->GetName());
         BridgeDisconnect();
     }
     else
-    {
+    {   // cb:fold socket plumbing (EAGAIN empty poll path)
         // n < 0: check if it's just EAGAIN/EWOULDBLOCK (no data yet)
 #ifdef _WIN32
         int err = WSAGetLastError();
@@ -568,6 +620,7 @@ void AiBotAI::BridgeRecv()
         if (errno != EAGAIN && errno != EWOULDBLOCK)
 #endif
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: recv error, disconnecting");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: recv error, disconnecting", me->GetName());
             BridgeDisconnect();
         }
@@ -582,7 +635,7 @@ static bool JsonExtractFloat(const char* json, const char* key, float& out)
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char* p = strstr(json, pattern);
-    if (!p) return false;
+    if (!p) return false; // cb:fold json parse detail
     p += strlen(pattern);
     while (*p == ' ') p++;
     out = (float)atof(p);
@@ -594,11 +647,22 @@ static bool JsonExtractInt(const char* json, const char* key, int& out)
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char* p = strstr(json, pattern);
-    if (!p) return false;
+    if (!p) return false; // cb:fold json parse detail
     p += strlen(pattern);
     while (*p == ' ') p++;
     out = atoi(p);
     return true;
+}
+
+static bool JsonExtractUInt64(const char* json, const char* key, uint64& out)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false; // cb:fold json parse detail
+    p += strlen(pattern);
+    while (*p == ' ') p++;
+    return sscanf(p, UI64FMTD, &out) == 1; // cb:fold json parse detail
 }
 
 static bool JsonExtractString(const char* json, const char* key, char* out, int maxLen)
@@ -606,10 +670,10 @@ static bool JsonExtractString(const char* json, const char* key, char* out, int 
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
     const char* p = strstr(json, pattern);
-    if (!p) return false;
+    if (!p) return false; // cb:fold json parse detail
     p += strlen(pattern);
     const char* end = strchr(p, '"');
-    if (!end) return false;
+    if (!end) return false; // cb:fold json parse detail
     int len = std::min((int)(end - p), maxLen - 1);
     memcpy(out, p, len);
     out[len] = '\0';
@@ -624,11 +688,11 @@ static bool JsonExtractStringStrict(const char* json, const char* key, char* out
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
     const char* p = strstr(json, pattern);
-    if (!p) return false;
+    if (!p) return false; // cb:fold json parse detail
     p += strlen(pattern);
     const char* end = strchr(p, '"');
     if (!end || end - p >= maxLen)
-        return false;
+        return false; // cb:fold json parse detail (strict length refusal)
     int len = int(end - p);
     memcpy(out, p, len);
     out[len] = '\0';
@@ -640,16 +704,16 @@ static bool JsonExtractBool(const char* json, const char* key, bool& out)
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char* p = strstr(json, pattern);
-    if (!p) return false;
+    if (!p) return false; // cb:fold json parse detail
     p += strlen(pattern);
     while (*p == ' ') ++p;
     if (strncmp(p, "true", 4) == 0 || *p == '1')
-    {
+    {   // cb:fold json parse detail
         out = true;
         return true;
     }
     if (strncmp(p, "false", 5) == 0 || *p == '0')
-    {
+    {   // cb:fold json parse detail
         out = false;
         return true;
     }
@@ -659,10 +723,10 @@ static bool JsonExtractBool(const char* json, const char* key, bool& out)
 static bool IsSafeBridgeToken(const char* value, bool allowEmpty = false)
 {
     if (!value || (!allowEmpty && !*value))
-        return false;
+        return false; // cb:fold token check detail, refusal carried by callers invalid_request ack
     for (const unsigned char* p = reinterpret_cast<const unsigned char*>(value); *p; ++p)
         if (!std::isalnum(*p) && *p != '_' && *p != '-' && *p != '.' && *p != ':')
-            return false;
+            return false; // cb:fold token check detail
     return true;
 }
 
@@ -672,9 +736,20 @@ void AiBotAI::BridgeProcessLine(const char* line)
     char msgType[32] = {0};
     if (!JsonExtractString(line, "type", msgType, sizeof(msgType)))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: line rejected, no type field");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: no 'type' in message", me->GetName());
         return;
     }
+
+    // Protocol v4 promotes cbt from trace-only metadata to behavioral ownership. Preserve a
+    // prior value in case a locally-injected command ever nests dispatch on this same stack.
+    uint64 cbt = 0;
+    JsonExtractUInt64(line, "cbt", cbt);
+    uint64 const previousDispatchCbt = m_bridgeDispatchCbt;
+    m_bridgeDispatchCbt = cbt;
+    if (cbt > 0)
+        CB_HITV(me->GetGUIDLow(), "cpp-chain: command adopted", static_cast<double>(cbt));
+    CB_HITN(me->GetGUIDLow(), "cpp-bridge: dispatch", msgType);
 
     // [SUI] While a real player drives this bot every mutating command would
     // execute under the human's feet (MOVE_TO would yank the mover). Drop with
@@ -689,7 +764,9 @@ void AiBotAI::BridgeProcessLine(const char* line)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (possessed)",
             me->GetName(), msgType);
+        CB_HITN(me->GetGUIDLow(), "cpp-bridge: dropped (possessed)", msgType);
         BridgeSendEvent("POSSESSED_DROP", msgType);
+        m_bridgeDispatchCbt = previousDispatchCbt;
         return;
     }
 
@@ -707,62 +784,70 @@ void AiBotAI::BridgeProcessLine(const char* line)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "[AIBOT-BRIDGE] %s: dropped %s (conscripted)",
             me->GetName(), msgType);
+        CB_HITN(me->GetGUIDLow(), "cpp-bridge: dropped (conscripted)", msgType);
         BridgeSendEvent("CONSCRIPTED_DROP", msgType);
+        m_bridgeDispatchCbt = previousDispatchCbt;
         return;
     }
 
     if (strcmp(msgType, "MOVE_TO") == 0)
-        BridgeHandleMoveTo(line);
-    else if (strcmp(msgType, "TELEPORT_TO") == 0)
-        BridgeHandleTeleport(line);
-    else if (strcmp(msgType, "SAY_TEXT") == 0)
-        BridgeHandleSayText(line);
-    else if (strcmp(msgType, "QUEST_INTERACT") == 0)
-        BridgeHandleQuestInteract(line);
-    else if (strcmp(msgType, "ABANDON_QUEST") == 0)
-        BridgeHandleAbandonQuest(line);
-    else if (strcmp(msgType, "LEARN_SPELL") == 0)
-        BridgeHandleLearnSpell(line);
-    else if (strcmp(msgType, "ATTACK_TARGET") == 0)
-        BridgeHandleAttackTarget(line);
-    else if (strcmp(msgType, "INTERACT_NPC") == 0)
-        BridgeHandleInteractNpc(line);
-    else if (strcmp(msgType, "SET_TASK") == 0)
-        BridgeHandleSetTask(line);
-    else if (strcmp(msgType, "COMBAT_DIRECTIVE") == 0)
-        BridgeHandleCombatDirective(line);
-     else if (strcmp(msgType, "TAKE_FLIGHT") == 0)
-        BridgeHandleTakeFlight(line);
-    else if (strcmp(msgType, "SELL_ITEMS") == 0)
-        BridgeHandleSellItems(line);
-    else if (strcmp(msgType, "REPAIR_AT_NPC") == 0)
-       BridgeHandleRepairItems(line);
-    else if (strcmp(msgType, "RESURRECT") == 0)
-        BridgeHandleResurrect(line);
-    else if (strcmp(msgType, "TRAIN_AT_NPC") == 0)
-        BridgeHandleTrain(line);
-    else if (strcmp(msgType, "USE_GAMEOBJECT") == 0)
-        BridgeHandleUseGameObject(line);
-    else if (strcmp(msgType, "QUEST_CAST") == 0)
-        BridgeHandleQuestCast(line);
-    else if (strcmp(msgType, "FORM_GROUP") == 0)
-       BridgeHandleFormGroup(line);
-    else if (strcmp(msgType, "DISBAND_GROUP") == 0)
-       BridgeHandleDisbandGroup(line);
-    else if (strcmp(msgType, "SET_ESCORT") == 0)
-        BridgeHandleSetEscort(line);
-    else if (strcmp(msgType, "LOAD_ROTATION") == 0)
-        BridgeHandleLoadRotation(line);
-    else if (strcmp(msgType, "APPLY_COMBAT_LOADOUT") == 0)
-        BridgeHandleApplyCombatLoadout(line);
-    else if (strcmp(msgType, "LOAD_RAID_PLAN") == 0)
-        BridgeHandleLoadRaidPlan(line);
-    else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0)
-        BridgeHandleQueryQuestStatus(line);
-    else if (strcmp(msgType, "PING") == 0)
-        { /* do nothing, keepalive */ }
+        BridgeHandleMoveTo(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "TELEPORT_TO") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleTeleport(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "SAY_TEXT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleSayText(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "QUEST_INTERACT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleQuestInteract(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "ABANDON_QUEST") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleAbandonQuest(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "LEARN_SPELL") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleLearnSpell(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "ATTACK_TARGET") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleAttackTarget(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "INTERACT_NPC") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleInteractNpc(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "SET_TASK") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleSetTask(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "COMBAT_DIRECTIVE") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleCombatDirective(line); // cb:fold dispatch, carried by dispatch probe
+     else if (strcmp(msgType, "TAKE_FLIGHT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleTakeFlight(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "SELL_ITEMS") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleSellItems(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "REPAIR_AT_NPC") == 0) // cb:fold dispatch, carried by dispatch probe
+       BridgeHandleRepairItems(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "RESURRECT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleResurrect(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "TRAIN_AT_NPC") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleTrain(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "USE_GAMEOBJECT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleUseGameObject(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "QUEST_CAST") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleQuestCast(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "FORM_GROUP") == 0) // cb:fold dispatch, carried by dispatch probe
+       BridgeHandleFormGroup(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "DISBAND_GROUP") == 0) // cb:fold dispatch, carried by dispatch probe
+       BridgeHandleDisbandGroup(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "SET_ESCORT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleSetEscort(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "LOAD_ROTATION") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleLoadRotation(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "APPLY_COMBAT_LOADOUT") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleApplyCombatLoadout(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "LOAD_RAID_PLAN") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleLoadRaidPlan(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleQueryQuestStatus(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "CIRCUIT_TRACE") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleCircuitTrace(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "PING") == 0) // cb:fold dispatch, carried by dispatch probe
+        { /* do nothing, keepalive */ } // cb:fold keepalive no-op, dispatch probe carries it
     else
+    {
+        CB_HITN(me->GetGUIDLow(), "cpp-bridge: unknown command", msgType);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: unknown command '%s'", me->GetName(), msgType);
+    }
+    m_bridgeDispatchCbt = previousDispatchCbt;
 }
 
 // ============================================================
@@ -790,10 +875,13 @@ void AiBotAI::BridgeProcessLine(const char* line)
 void AiBotAI::BridgeHandleTeleport(const char* json)
 {
     if (!me || !me->IsInWorld())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-move: teleport ignored, not in world");
         return;
+    }
 
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     int mapId = (int)me->GetMapId();   // default = current map (a missing mapId is same-map)
     float x = 0.0f, y = 0.0f, z = 0.0f;
@@ -809,6 +897,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
 
     if (!haveX || !haveY || !haveZ)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: teleport bad payload, missing xyz, TELEPORT_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-TELEPORT] %s: TELEPORT_TO bad payload (missing x/y/z)", me->GetName());
         BridgeSendEvent("TELEPORT_FAIL", "reason=bad_payload");
@@ -819,6 +908,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
     // A teleport-assist must never fire on a ghost.
     if (me->IsDead() || me->GetDeathState() == DEAD)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: teleport refused, bot is dead, TELEPORT_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TELEPORT] %s: TELEPORT_TO refused — bot is dead", me->GetName());
         BridgeSendEvent("TELEPORT_FAIL", "reason=dead");
@@ -829,6 +919,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
     // far-port (loading screen) and is out of scope for the assist.
     if ((uint32)mapId != me->GetMapId())
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: teleport refused, cross map, TELEPORT_FAIL", mapId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TELEPORT] %s: TELEPORT_TO cross-map refused (current=%u target=%d)",
             me->GetName(), me->GetMapId(), mapId);
@@ -840,6 +931,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
     float dist = me->GetDistance2d(x, y);
     if (maxDist > 0.0f && dist > maxDist)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: teleport refused, hop beyond max dist, TELEPORT_FAIL", dist);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TELEPORT] %s: TELEPORT_TO refused — %.1fyd > max_dist %.1f (to %.1f,%.1f,%.1f)",
             me->GetName(), dist, maxDist, x, y, z);
@@ -862,6 +954,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
     // Clean reset: stop the failed approach, drop the stored path + task, then relocate.
     // The MOVE_TO that no_path'd is finished; nothing in-flight needs to survive (the
     // interaction that follows — TRAIN/SELL/REPAIR — doesn't read m_currentTask).
+    CancelPendingNpcInteraction("teleport_to");
     StopMoving();
     ClearStoredPath();
     m_currentTask.Clear();
@@ -926,7 +1019,7 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     int mapId = 0;
 
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     JsonExtractInt(payload, "mapId", mapId);
     JsonExtractFloat(payload, "x", x);
@@ -954,10 +1047,12 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
 
     if ((uint32)mapId != me->GetMapId())
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: rejected, cross-map", mapId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: cross-map move not supported (current=%u, target=%d)",
             me->GetName(), me->GetMapId(), mapId);
         return;
     }
+    CB_HITV(me->GetGUIDLow(), "cpp-move: MOVE_TO accepted", entry);
 
     // ── Arrival jitter (never path to the EXACT dest coord) ──
     // Pathing precisely TO certain coords (NPC spawn points, loader coords) lands the bot on a
@@ -972,6 +1067,7 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     // converts to grind-in-place at the mouth — it is never an exact-arrival target, so no jitter.
     if (entry == 0 && !me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: plain travel, sampling arrival jitter ring");
         float jx = x, jy = y, jz = z;
         bool found = false;
         for (int t = 0; t < AIBOT_ARRIVE_JITTER_TRIES; ++t)
@@ -987,6 +1083,7 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
             probe.calculate(cx, cy, cz);
             if (!(probe.getPathType() & PATHFIND_NOPATH))
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-move: pathable jitter point found", t);
                 jx = cx; jy = cy; jz = cz;
                 found = true;
                 break;
@@ -995,6 +1092,7 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
 
         if (found)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-move: jitter applied to dest coord");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-BRIDGE] %s: MOVE_TO jittered (%.1f,%.1f) -> (%.1f,%.1f) %.1fyd off (dodging exact-coord poly)",
                 me->GetName(), x, y, jx, jy, me->GetDistance2d(jx, jy) > 0 ? hypotf(jx - x, jy - y) : 0.0f);
@@ -1002,6 +1100,7 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-move: no pathable jitter point, using exact coord");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-BRIDGE] %s: MOVE_TO jitter found no pathable ring point in %d tries — using exact (%.1f,%.1f)",
                 me->GetName(), AIBOT_ARRIVE_JITTER_TRIES, x, y);
@@ -1011,9 +1110,24 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: MOVE_TO map=%d (%.1f, %.1f, %.1f)%s",
         me->GetName(), mapId, x, y, z, entry ? " [objective]" : "");
 
+    // Preempt command A before assigning command B's task/cbt. MotionMaster::Clear finalizes
+    // point movement synchronously and calls MovementInform; both arrival guards make that
+    // cancellation callback a no-op. Combat keeps its existing defer-without-stopping behavior:
+    // the task-dest guard remains raised until the first out-of-combat tick performs the Clear.
+    m_suppressTaskDestInform = true;
+    CancelPendingNpcInteraction("move_to");
+    if (!me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: preempting prior task before cbt replacement");
+        StopMoving();
+    }
+    ClearStoredPath();
+    m_currentTask.Clear();
+
     // Stash the objective hint on the task BEFORE MoveToDestination. MoveToDestination
     // only writes type/x/y/z, so these persist through every continuation leg until the
     // approach scan or an arrival hands off to GRIND (re-centering on the bot).
+    m_currentTask.commandCbt    = m_bridgeDispatchCbt;
     m_currentTask.creatureEntry = (uint32)entry;
     m_currentTask.radius        = grindRadius;
     m_currentTask.killGoal      = killCount;
@@ -1061,6 +1175,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
 
     if (dataBuf[0] == '\0')
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: empty data, slate cleared, ROTATION_ACK");
         ++m_combatConfigRevision;
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-ROTATION] %s: slate CLEARED — built-in spec policy (or legacy fallback) resumes",
@@ -1081,6 +1196,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
         int prio = 0, target = 1, hpMin = 0, hpMax = 100, present = 0;
         if (sscanf(seg, "%u:%d:%d:%d:%d:%u:%d", &spellId, &prio, &target, &hpMin, &hpMax, &auraId, &present) != 7)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: malformed rotation instruction, skipped");
             ++skipped;
             continue;
         }
@@ -1090,6 +1206,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
             hpMin < 0 || hpMax > 100 || hpMin > hpMax ||
             (auraId && !sSpellMgr.GetSpellEntry(auraId)))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: invalid or unlearned spell, skipped", spellId);
             ++skipped;
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-ROTATION] %s: rejected invalid/unlearned spell %u in profile '%s'",
@@ -1111,7 +1228,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
 
     m_rotationCastableCount = loaded;
     if (loaded)
-        m_rotationProfile = profileBuf;
+        m_rotationProfile = profileBuf; // cb:fold ack detail, ROTATION_ACK carries profile
     ++m_combatConfigRevision;
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -1131,7 +1248,7 @@ void AiBotAI::BridgeHandleLoadRotation(const char* json)
 void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     char requestId[48] = {0};
     char rotationMode[24] = {0};
@@ -1169,7 +1286,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
             GetEffectiveRotationProfile(), m_rotationCastableCount, skipped,
             resetTalents ? 1u : 0u);
         if (requestId[0])
-        {
+        {   // cb:fold ack replay cache bookkeeping
             m_lastCombatLoadoutRequest = requestId;
             m_lastCombatLoadoutAck = ack;
         }
@@ -1178,6 +1295,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
     if (!requestOk)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: invalid request payload, error ack");
         // Never reflect an untrusted token into the event's JSON data string.
         requestId[0] = '\0';
         sendAck("error", "invalid_request", 0);
@@ -1186,33 +1304,39 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
     if (m_lastCombatLoadoutRequest == requestId && !m_lastCombatLoadoutAck.empty())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: duplicate request, replaying cached ack");
         BridgeSendEvent("COMBAT_LOADOUT_ACK", m_lastCombatLoadoutAck.c_str());
         return;
     }
 
     if (expectedRevision < 0 || uint32(expectedRevision) != m_combatConfigRevision)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: stale revision, error ack", expectedRevision);
         sendAck("error", "stale_revision", 0);
         return;
     }
     if (!me || !botEntry || m_ownedDummyEntry || !m_initialized)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-combatcfg: bot not managed, error ack");
         sendAck("error", "not_managed", 0);
         return;
     }
     if (specTab < 0 || specTab > 2)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: invalid spec tab, error ack", specTab);
         sendAck("error", "invalid_profile", 0);
         return;
     }
     CombatBotRoles requestedRole = CombatBotRoles(activeRole);
     if (!AiBotTalents::IsProfileRoleAllowed(me->GetClass(), uint8(specTab), requestedRole))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: role not allowed for profile, error ack", activeRole);
         sendAck("error", "invalid_role", 0);
         return;
     }
     if (!resetTalents && botEntry->specTab != uint8(specTab))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: spec change without reset, error ack");
         sendAck("error", "reset_required", 0);
         return;
     }
@@ -1223,6 +1347,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
         strcmp(rotationMode, "custom") == 0;
     if (!useSpecRotation && !useCustomRotation)
     {
+        CB_HITN(me->GetGUIDLow(), "cpp-combatcfg: invalid rotation mode, error ack", rotationMode);
         sendAck("error", "invalid_rotation_mode", 0);
         return;
     }
@@ -1231,8 +1356,10 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
     uint32 stagedInstructionCount = 0;
     if (useCustomRotation)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: staging custom rotation");
         if (!IsSafeBridgeToken(rotationProfile) || !rotationData[0])
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bad rotation profile or data, error ack");
             sendAck("error", "invalid_rotation", 0);
             return;
         }
@@ -1242,6 +1369,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
         {
             if (++stagedInstructionCount > 64)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: rotation too large, error ack", stagedInstructionCount);
                 sendAck("error", "rotation_too_large", 0);
                 return;
             }
@@ -1256,6 +1384,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
                 !sSpellMgr.GetSpellEntry(spellId) ||
                 (auraId && !sSpellMgr.GetSpellEntry(auraId)))
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: invalid rotation instruction, error ack", spellId);
                 sendAck("error", "invalid_rotation", 0);
                 return;
             }
@@ -1265,6 +1394,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
             // re-resolved after the new talent prefix has been purchased.
             if (!resetTalents && !me->HasSpell(spellId))
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: rotation spell unlearned, error ack", spellId);
                 sendAck("error", "rotation_spell_unlearned", 0);
                 return;
             }
@@ -1281,6 +1411,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
         }
         if (stagedRotation.empty())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: rotation parsed empty, error ack");
             sendAck("error", "invalid_rotation", 0);
             return;
         }
@@ -1288,36 +1419,43 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
     if (m_possessed)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot possessed, error ack");
         sendAck("error", "bot_possessed", 0);
         return;
     }
     if (!me->IsAlive())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot dead, error ack");
         sendAck("error", "bot_dead", 0);
         return;
     }
     if (me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot in combat, error ack");
         sendAck("error", "bot_in_combat", 0);
         return;
     }
     if (me->IsNonMeleeSpellCasted(false, false, true))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot casting, error ack");
         sendAck("error", "bot_casting", 0);
         return;
     }
     if (me->IsBeingTeleported())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot teleporting, error ack");
         sendAck("error", "bot_teleporting", 0);
         return;
     }
     if (!me->GetTaxi().empty() || me->HasUnitState(UNIT_STATE_TAXI_FLIGHT))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot on taxi, error ack");
         sendAck("error", "bot_on_taxi", 0);
         return;
     }
     if (me->InBattleGround())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: bot in battleground, error ack");
         sendAck("error", "bot_in_battleground", 0);
         return;
     }
@@ -1325,6 +1463,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
     AiBotTalents::TalentSnapshot beforeTalents;
     if (!AiBotTalents::CaptureSnapshot(me, botEntry, beforeTalents))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: talent snapshot failed, error ack");
         sendAck("error", "snapshot_failed", 0);
         return;
     }
@@ -1358,8 +1497,10 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
     if (applied.status != AiBotTalents::TALENT_APPLY_OK)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: talent apply failed, error ack", applied.status);
         if (applied.status != AiBotTalents::TALENT_APPLY_ROLLBACK_FAILED)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: restoring previous rotation state");
             m_rotation = beforeRotation;
             m_rotationProfile = beforeRotationProfile;
             m_rotationInstructionCount = beforeInstructionCount;
@@ -1367,7 +1508,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
         }
         m_role = beforeRole;
         if (applied.resetPerformed)
-            refreshLifecycle();
+            refreshLifecycle(); // cb:fold lifecycle refresh, apply status probed above
         me->SaveToDB();
         sendAck("error", AiBotTalents::GetApplyStatusCode(applied.status), applied.learnedPoints);
         BridgeSendState();
@@ -1376,16 +1517,18 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
     m_role = applied.role;
     if (applied.resetPerformed)
-        refreshLifecycle();
+        refreshLifecycle(); // cb:fold lifecycle refresh after reset
 
     if (useCustomRotation)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: adopting staged rotation after apply");
         bool allKnown = true;
         for (RotationInstruction& inst : stagedRotation)
         {
             inst.pSpell = me->HasSpell(inst.spellId) ? sSpellMgr.GetSpellEntry(inst.spellId) : nullptr;
             if (!inst.pSpell)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: staged spell unknown after apply", inst.spellId);
                 allKnown = false;
                 break;
             }
@@ -1393,11 +1536,13 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
 
         if (!allKnown)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: unlearned spell after apply, rolling back");
             bool const rolledBack = AiBotTalents::RestoreSnapshot(me, botEntry, beforeTalents);
             m_role = beforeRole;
             refreshLifecycle();
             if (rolledBack)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: snapshot rollback ok, rotation restored");
                 m_rotation = beforeRotation;
                 m_rotationProfile = beforeRotationProfile;
                 m_rotationInstructionCount = beforeInstructionCount;
@@ -1405,6 +1550,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: rollback failed, rotation cleared");
                 m_rotation.clear();
                 m_rotationProfile.clear();
                 m_rotationInstructionCount = 0;
@@ -1454,10 +1600,21 @@ void AiBotAI::BridgeHandleSetEscort(const char* json)
         lowered.push_back((char)tolower((unsigned char)*p));
 
     m_escortOverrideName = lowered;
+    if (CancelPendingNpcInteraction("set_escort") && !me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: escort order tears down preempted NPC approach");
+        StopMoving();
+    }
     if (m_escortOverrideName.empty())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: escort override cleared, auto split resumes");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-PARTY] %s: escort override CLEARED (auto split)", me->GetName());
+    }
     else
+    {
+        CB_HITN(me->GetGUIDLow(), "cpp-group: escort override set", nameBuf);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-PARTY] %s: escort override -> '%s'", me->GetName(), nameBuf);
+    }
 }
 
 void AiBotAI::BridgeHandleSayText(const char* json)
@@ -1468,7 +1625,7 @@ void AiBotAI::BridgeHandleSayText(const char* json)
     int chatType = 0;
 
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     JsonExtractString(payload, "text", text, sizeof(text));
     JsonExtractInt(payload, "chatType", chatType);
@@ -1479,15 +1636,20 @@ void AiBotAI::BridgeHandleSayText(const char* json)
         me->GetName(), chatType, target, channel, text);
 
     if (strlen(text) == 0)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: SAY_TEXT empty text, ignored");
         return;
+    }
 
     if (chatType == 7 && strlen(target) > 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: whisper path");
         // WHISPER — build and send whisper packet directly to target player
         // Player class doesn't have Whisper(); we use ChatHandler::BuildChatPacket
         Player* pTarget = sObjectMgr.GetPlayer(target);
         if (pTarget && pTarget->GetSession())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: whisper sent to target");
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_WHISPER, text, LANG_UNIVERSAL,
                 CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName(),
@@ -1500,10 +1662,11 @@ void AiBotAI::BridgeHandleSayText(const char* json)
                 CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName(),
                 pTarget->GetObjectGuid());
             if (me->GetSession())
-                me->GetSession()->SendPacket(&data2);
+                me->GetSession()->SendPacket(&data2); // cb:fold self-echo packet detail
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: whisper target not found, fallback say");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: WHISPER target '%s' not found, falling back to SAY",
                 me->GetName(), target);
             me->Say(text, LANG_UNIVERSAL);
@@ -1511,16 +1674,20 @@ void AiBotAI::BridgeHandleSayText(const char* json)
     }
     else if (chatType == 14 && strlen(channel) > 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: channel chat path");
         // CHANNEL — send to named channel via Channel::Say
-        if (ChannelMgr* cMgr = channelMgr(me->GetTeam()))
+        if (ChannelMgr* cMgr = channelMgr(me->GetTeam())) // cb:fold decl-if condition artifact, body probed
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: channel mgr resolved");
             // GetJoinChannel returns existing or creates — channel should already exist
-            if (Channel* chn = cMgr->GetJoinChannel(std::string(channel)))
+            if (Channel* chn = cMgr->GetJoinChannel(std::string(channel))) // cb:fold decl-if condition artifact, body probed
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-bridge: channel say sent");
                 chn->Say(me->GetObjectGuid(), text, LANG_UNIVERSAL, true);
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-bridge: channel not found, fallback say");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: channel '%s' not found, falling back to SAY",
                     me->GetName(), channel);
                 me->Say(text, LANG_UNIVERSAL);
@@ -1529,17 +1696,20 @@ void AiBotAI::BridgeHandleSayText(const char* json)
     }
     else if (chatType == 6)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: yell");
         me->Yell(text, LANG_UNIVERSAL);
     }
     else if (chatType == 1)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: party chat path");
         // PARTY — wire int 1 == CHAT_MSG_PARTY (0x01, VERIFIED SharedDefines.h).
         // Mirrors the whisper branch's packet-building idiom. Broadcast VERIFIED Group.h:
         //   void BroadcastPacket(WorldPacket* packet, bool ignorePlayersInBGRaid, int group=-1, ObjectGuid ignore = ObjectGuid());
         // Self receives its own line (like a real client); the C0 self-echo filter in
         // OnPacketReceived keeps it from re-entering the coordinator as a stimulus.
-        if (Group* pGroup = me->GetGroup())
+        if (Group* pGroup = me->GetGroup()) // cb:fold decl-if condition artifact, body probed
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: party chat broadcast");
             WorldPacket data;
             ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, text, LANG_UNIVERSAL,
                 CHAT_TAG_NONE, me->GetObjectGuid(), me->GetName());
@@ -1547,6 +1717,7 @@ void AiBotAI::BridgeHandleSayText(const char* json)
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: party requested but ungrouped, fallback say");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: PARTY requested but ungrouped, falling back to SAY",
                 me->GetName());
             me->Say(text, LANG_UNIVERSAL);
@@ -1554,6 +1725,7 @@ void AiBotAI::BridgeHandleSayText(const char* json)
     }
     else
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: plain say");
         me->Say(text, LANG_UNIVERSAL);
     }
 }
@@ -1565,7 +1737,7 @@ void AiBotAI::BridgeHandleSayText(const char* json)
 void AiBotAI::BridgeHandleQuestInteract(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     int questId = 0, npcEntry = 0;
     char action[16] = {0};
@@ -1575,6 +1747,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
 
     if (questId <= 0 || npcEntry <= 0 || action[0] == '\0')
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: QUEST_INTERACT bad payload", questId);
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-BRIDGE] %s: QUEST_INTERACT bad payload: action='%s' quest=%d npc=%d",
             me->GetName(), action, questId, npcEntry);
@@ -1590,10 +1763,10 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
         for (auto* pCreature : creatureList)
         {
             if (pCreature && pCreature->IsAlive())
-            {
+            {   // cb:fold nearest candidate scan
                 float d = me->GetDistance(pCreature);
                 if (d < bestDist)
-                {
+                {   // cb:fold nearest candidate scan
                     bestDist = d;
                     pNpc = pCreature;
                 }
@@ -1603,6 +1776,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
 
     if (!pNpc)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: giver not found within 15yd, QUEST_INTERACT_FAIL", npcEntry);
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-BRIDGE] %s: QUEST_INTERACT npc entry %d not found within 15yd",
             me->GetName(), npcEntry);
@@ -1616,6 +1790,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
     Quest const* pQuest = sObjectMgr.GetQuestTemplate((uint32)questId);
     if (!pQuest)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: quest template missing, QUEST_INTERACT_FAIL", questId);
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-BRIDGE] %s: QUEST_INTERACT quest %d not found in quest_template",
             me->GetName(), questId);
@@ -1631,6 +1806,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
     // ══════════════════════════════════════════════
     if (strcmp(action, "accept") == 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: accept requested", questId);
 
        // ── Idempotent accept (already-in-log) — REVISED 2026-06-30 ──────────────
         // GetQuestStatus() alone can't tell "still actively held" from "rewarded an
@@ -1643,12 +1819,14 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
         QuestStatus existingStatus = me->GetQuestStatus((uint32)questId);
         if (existingStatus != QUEST_STATUS_NONE)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: quest already known to log, checking rewarded", existingStatus);
             const auto& qMap = me->GetQuestStatusMap();
             auto it = qMap.find((uint32)questId);
             bool alreadyRewarded = (it != qMap.end()) && it->second.m_rewarded;
 
             if (alreadyRewarded)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-quest: already rewarded, accept refused, QUEST_INTERACT_FAIL", questId);
                 sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                     "[AIBOT-BRIDGE] %s: accept quest %d refused — already rewarded (turned in)",
                     me->GetName(), questId);
@@ -1673,6 +1851,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
 
         if (!me->CanTakeQuest(pQuest, false))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: CanTakeQuest failed, QUEST_INTERACT_FAIL", questId);
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-BRIDGE] %s: QUEST_INTERACT accept quest %d — CanTakeQuest failed",
                 me->GetName(), questId);
@@ -1706,6 +1885,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
 
         if (!me->CanAddQuest(pQuest, true))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: quest log full, QUEST_INTERACT_FAIL", questId);
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-BRIDGE] %s: QUEST_INTERACT accept quest %d — CanAddQuest failed (log full?)",
                 me->GetName(), questId);
@@ -1724,6 +1904,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
         if (pQuest->GetReqCreatureOrGOcount() == 0 && pQuest->GetReqItemsCount() == 0
             && me->GetQuestStatus((uint32)questId) != QUEST_STATUS_COMPLETE)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: no objectives, marked complete for turn-in", questId);
             me->CompleteQuest((uint32)questId);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-BRIDGE] %s: quest %d has no objectives — marked COMPLETE for turn-in",
@@ -1745,9 +1926,11 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
     // ══════════════════════════════════════════════
     else if (strcmp(action, "complete") == 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: complete requested", questId);
         QuestStatus status = me->GetQuestStatus((uint32)questId);
         if (status == QUEST_STATUS_NONE)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: not in log, QUEST_INTERACT_FAIL", questId);
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-BRIDGE] %s: QUEST_INTERACT complete quest %d — not in quest log",
                 me->GetName(), questId);
@@ -1764,6 +1947,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
 
         if (!me->CanRewardQuest(pQuest, rewardChoice, false))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-quest: CanRewardQuest failed, QUEST_INTERACT_FAIL", questId);
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-BRIDGE] %s: QUEST_INTERACT complete quest %d — CanRewardQuest failed (status=%u choice=%u)",
                 me->GetName(), questId, (uint32)status, rewardChoice);
@@ -1793,6 +1977,7 @@ void AiBotAI::BridgeHandleQuestInteract(const char* json)
     }
     else
     {
+        CB_HITN(me->GetGUIDLow(), "cpp-quest: unknown action", action);
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-BRIDGE] %s: QUEST_INTERACT unknown action '%s'",
             me->GetName(), action);
@@ -1803,11 +1988,12 @@ void AiBotAI::BridgeHandleAbandonQuest(const char* json)
 {
     int questId = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "quest_id", questId);
 
     if (questId <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-quest: ABANDON_QUEST missing quest_id");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ABANDON_QUEST missing quest_id", me->GetName());
         return;
     }
@@ -1815,6 +2001,7 @@ void AiBotAI::BridgeHandleAbandonQuest(const char* json)
     QuestStatus status = me->GetQuestStatus(questId);
     if (status == QUEST_STATUS_NONE)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: abandon target not in log", questId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ABANDON_QUEST quest %d not in log", me->GetName(), questId);
         return;
     }
@@ -1823,8 +2010,8 @@ void AiBotAI::BridgeHandleAbandonQuest(const char* json)
     // leave the update-field slot occupied, the timed-quest registration live
     // and the quest items in the bags.
     me->RemoveQuestById(questId);
-    if (m_trackedQuestId == (uint32)questId)  
-        m_trackedQuestId = 0;
+    if (m_trackedQuestId == (uint32)questId)
+        m_trackedQuestId = 0; // cb:fold tracked quest bookkeeping
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: abandoned quest %d", me->GetName(), questId);
     SendQuestUpdateEvent(questId, "abandoned");
@@ -1834,17 +2021,19 @@ void AiBotAI::BridgeHandleLearnSpell(const char* json)
 {
     int spellId = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "spell_id", spellId);
 
     if (spellId <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-train: LEARN_SPELL missing spell_id");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: LEARN_SPELL missing spell_id", me->GetName());
         return;
     }
 
     if (me->HasSpell(spellId))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-train: spell already known, ignored", spellId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: LEARN_SPELL already knows %d", me->GetName(), spellId);
         return;
     }
@@ -1857,11 +2046,12 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 {
     int npcEntry = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "npc_entry", npcEntry);
 
     if (npcEntry <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-train: missing npc_entry, TRAIN_FAIL");
         BridgeSendEvent("TRAIN_FAIL", "reason=missing_npc_entry");
         return;
     }
@@ -1895,10 +2085,10 @@ void AiBotAI::BridgeHandleTrain(const char* json)
     for (auto* c : creatureList)
     {
         if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_TRAINER))
-        {
+        {   // cb:fold nearest candidate scan
             float d = me->GetDistance(c);
             if (d < bestDist)
-            {
+            {   // cb:fold nearest candidate scan
                 bestDist = d;
                 pTrainer = c;
             }
@@ -1908,6 +2098,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
     // ── Fallback: wider search if narrow failed ──
     if (!pTrainer)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-train: 15yd search failed, widening to 50yd");
         std::list<Creature*> wideList;
         me->GetCreatureListWithEntryInGrid(wideList, (uint32)npcEntry, 50.0f);
 
@@ -1927,6 +2118,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
             if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_TRAINER))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-train: trainer found in wide search");
                 pTrainer = c;
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-TRAIN] %s: found trainer in wide search at dist=%.1f — using it",
@@ -1938,6 +2130,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
     if (!pTrainer)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-train: trainer not found within 50yd, TRAIN_FAIL", npcEntry);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TRAIN] %s: trainer entry %d not found within 50yd",
             me->GetName(), npcEntry);
@@ -1947,6 +2140,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
     if (!pTrainer->IsTrainerOf(me, false))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-train: not a trainer for this class, TRAIN_FAIL", npcEntry);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TRAIN] %s: NPC %d ('%s') is not a trainer for this class",
             me->GetName(), npcEntry, pTrainer->GetName());
@@ -1959,6 +2153,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
     if (!cSpells && !tSpells)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-train: trainer has no spell lists, TRAIN_FAIL");
         BridgeSendEvent("TRAIN_FAIL", "reason=no_spells");
         return;
     }
@@ -1973,28 +2168,31 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
         auto processSpellList = [&](TrainerSpellData const* spells)
         {
-            if (!spells) return;
+            if (!spells) return; // cb:fold empty spell list guard, TRAIN_ACK carries counts
             for (auto const& itr : spells->spellList)
             {
                 TrainerSpell const* tSpell = &itr.second;
                 if (me->GetTrainerSpellState(tSpell) != TRAINER_SPELL_GREEN)
-                    continue;
+                    continue; // cb:fold per-spell eligibility scan, TRAIN_ACK carries counts
 
                 SpellEntry const* spellEntry = sSpellMgr.GetSpellEntry(tSpell->spell);
-                if (!spellEntry) continue;
+                if (!spellEntry) continue; // cb:fold per-spell eligibility scan
 
                 uint32 triggerSpell = spellEntry->EffectTriggerSpell[0];
-                if (!triggerSpell) continue;
+                if (!triggerSpell) continue; // cb:fold per-spell eligibility scan
 
                 if (sSpellMgr.IsPrimaryProfessionFirstRankSpell(triggerSpell))
-                    continue;
+                    continue; // cb:fold per-spell eligibility scan
 
                 if (!me->IsSpellFitByClassAndRace(triggerSpell))
-                    continue;
+                    continue; // cb:fold per-spell eligibility scan
 
                 uint32 spellCost = tSpell->spellCost;
                 if (me->GetMoney() < spellCost)
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-train: cannot afford spell, skipped", spellCost);
                     continue;
+                }
 
                 me->ModifyMoney(-(int32)spellCost);
                 me->LearnSpell(triggerSpell, false);
@@ -2016,6 +2214,7 @@ void AiBotAI::BridgeHandleTrain(const char* json)
 
     if (totalLearned > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-train: spells learned, refreshing spell data", totalLearned);
         ResetSpellData();
         PopulateSpellData();
     }
@@ -2067,15 +2266,15 @@ void AiBotAI::BridgeHandleQueryQuestStatus(const char* json)
 
         // Skip rewarded (turned-in) quests — we only want active log entries
         if (qData.m_rewarded)
-            continue;
+            continue; // cb:fold quest blob detail, carried by QUEST_STATUS_ALL payload
 
         // Skip QUEST_STATUS_NONE (0) and QUEST_STATUS_UNAVAILABLE (2)
         if (qData.m_status != QUEST_STATUS_INCOMPLETE &&
             qData.m_status != QUEST_STATUS_COMPLETE)
-            continue;
+            continue; // cb:fold quest blob detail
 
         if (!payload.empty())
-            payload += "|";
+            payload += "|"; // cb:fold quest blob detail
 
         char entry[128];
         snprintf(entry, sizeof(entry), "%u:%u:%u,%u,%u,%u:%u,%u,%u,%u",
@@ -2102,11 +2301,12 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
 {
     int guidLow = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "guid", guidLow);
 
     if (guidLow <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: ATTACK_TARGET missing guid");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET missing guid", me->GetName());
         return;
     }
@@ -2125,18 +2325,29 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
 
     if (!pCreature)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not found on map", guidLow);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature guid %d (entry %d) not found on map", me->GetName(), guidLow, entry);
         return;
     }
 
     if (!IsValidHostileTarget(pCreature))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not valid hostile", guidLow);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET guid %d not valid hostile target", me->GetName(), guidLow);
         return;
     }
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: attacking %s (guid %d)",
         me->GetName(), pCreature->GetName(), guidLow);
+    if (CancelPendingNpcInteraction("attack_target"))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: attack order tears down preempted NPC approach");
+        // AttackStart is a no-op for the already-selected victim. Retire that
+        // attack first so an NPC point spline cannot survive underneath a
+        // same-target explicit attack order.
+        me->AttackStop(false);
+        StopMoving();
+    }
     AttackStart(pCreature);
 }
 
@@ -2144,11 +2355,12 @@ void AiBotAI::BridgeHandleInteractNpc(const char* json)
 {
     int guidLow = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "guid", guidLow);
 
     if (guidLow <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: INTERACT_NPC missing guid");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC missing guid", me->GetName());
         return;
     }
@@ -2158,20 +2370,47 @@ void AiBotAI::BridgeHandleInteractNpc(const char* json)
 
     if (!pCreature)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: interact npc not found", guidLow);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC creature guid %d not found", me->GetName(), guidLow);
         return;
+    }
+
+    // A newer manual interaction supersedes an older approach. StopMoving's SUI latch suppresses
+    // that point generator's synchronous cancellation callback; clear its owner before continuing.
+    if (!m_pendingInteractNpcGuid.IsEmpty())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: replacing pending NPC interaction approach");
+        CancelPendingNpcInteraction("interact_npc");
+        StopMoving();
     }
 
     float dist = me->GetDistance(pCreature);
     if (dist > 10.0f)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: npc too far, moving closer first", dist);
         // Too far — move closer first, then interact on arrival
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC moving to %s (dist=%.1f)",
             me->GetName(), pCreature->GetName(), dist);
+        // This is a temporary manual approach, not an autonomous-task arrival. Guard the old task
+        // finalizer, keep the task state available for later resume, and use a distinct point id.
+        m_suppressTaskDestInform = true;
         StopMoving();
+        m_pendingInteractNpcGuid = pCreature->GetObjectGuid();
+        m_pendingInteractNpcCbt = m_bridgeDispatchCbt;
         float nx, ny, nz;
         pCreature->GetContactPoint(me, nx, ny, nz);
-        MovePointRun(AIBOT_POINT_TASK_DEST, nx, ny, nz);
+        if (!MovePointRun(AIBOT_POINT_INTERACT_NPC, nx, ny, nz, false))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: INTERACT_NPC approach NOPATH, terminal fail");
+            uint64 const interactCbt = m_pendingInteractNpcCbt;
+            m_pendingInteractNpcGuid.Clear();
+            m_pendingInteractNpcCbt = 0;
+            char eventData[192];
+            snprintf(eventData, sizeof(eventData),
+                "reason=no_path|source=interact_npc|dest_x=%.1f|dest_y=%.1f|dest_z=%.1f",
+                nx, ny, nz);
+            BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+        }
         return;
     }
 
@@ -2185,15 +2424,25 @@ void AiBotAI::BridgeHandleInteractNpc(const char* json)
 void AiBotAI::BridgeHandleSetTask(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     char taskType[32] = {0};
     JsonExtractString(payload, "task", taskType, sizeof(taskType));
 
     if (strcmp(taskType, "GRIND") == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: SET_TASK GRIND adopted");
+        m_suppressTaskDestInform = true;
+        CancelPendingNpcInteraction("set_task_grind");
+        if (!me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: preempting prior task for OOC GRIND replacement");
+            StopMoving();
+        }
+        ClearStoredPath();
         m_currentTask.Clear();
         m_currentTask.type = TASK_GRIND;
+        m_currentTask.commandCbt = m_bridgeDispatchCbt;
         JsonExtractFloat(payload, "x", m_currentTask.x);
         JsonExtractFloat(payload, "y", m_currentTask.y);
         JsonExtractFloat(payload, "z", m_currentTask.z);
@@ -2207,7 +2456,7 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
         m_currentTask.killCount = 0;
 
         if (m_currentTask.radius < 10.0f)
-            m_currentTask.radius = 40.0f;  // sane default
+            m_currentTask.radius = 40.0f;  // cb:fold default radius clamp (sane default)
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK GRIND entry=%u goal=%d at (%.1f,%.1f,%.1f) r=%.0f",
@@ -2218,21 +2467,42 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
 
         // Immediately move to grind area if not already there
         float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
-        if (dist > m_currentTask.radius)
+        if (!me->IsInCombat() && dist > m_currentTask.radius)
         {
-            StopMoving();
-            MovePointRun(AIBOT_POINT_GRIND_PATROL,
-                m_currentTask.x, m_currentTask.y, m_currentTask.z);
+            CB_HITV(me->GetGUIDLow(), "cpp-task: outside grind radius, moving to area", dist);
+            if (!MovePointRun(AIBOT_POINT_GRIND_PATROL,
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z, false))
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: initial grind approach NOPATH, terminal fail");
+                uint64 const taskCbt = m_currentTask.commandCbt;
+                char eventData[256];
+                snprintf(eventData, sizeof(eventData),
+                    "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|source=set_task_approach|start_isolated=%u",
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z,
+                    IsStartIsolated() ? 1u : 0u);
+                m_currentTask.Clear();
+                BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
+            }
         }
     }
     else if (strcmp(taskType, "IDLE") == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: SET_TASK IDLE, task cleared");
+        m_suppressTaskDestInform = true;
+        CancelPendingNpcInteraction("set_task_idle");
+        if (!me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: preempting prior task for OOC IDLE replacement");
+            StopMoving();
+        }
+        ClearStoredPath();
         m_currentTask.Clear();
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK IDLE (clearing task)", me->GetName());
     }
     else if (strcmp(taskType, "PORT_HOME") == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: PORT_HOME requested");
         // [ESCAPE] (FINDING_010) Living-bot stranded escape. The C# wedge-streak escalation asks
         // for a port to the racial start when a bot has proven it can neither kill nor quest where
         // it stands (Everlook L18 / Badlands L21 census — the park→local-relocate ladder shuffles
@@ -2245,10 +2515,14 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
                         JsonExtractFloat(payload, "home_z", hz) && JsonExtractInt(payload, "home_map", hmap);
         if (haveHome && hmap >= 0 && me->IsAlive() && !me->IsInCombat())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: stranded escape accepted, hearth attempt");
             float fx = me->GetPositionX(), fy = me->GetPositionY(), fz = me->GetPositionZ();
             uint32 fmap = me->GetMapId();
-            m_currentTask.Clear();
+            m_suppressTaskDestInform = true;
+            CancelPendingNpcInteraction("port_home");
             StopMoving();
+            ClearStoredPath();
+            m_currentTask.Clear();
 
             // [HEARTH] Instead of the old instant TeleportTo, cast a real Hearthstone (8690) so the
             // escape shows the authentic ~10s cast bar + animation and is interrupted by damage /
@@ -2264,6 +2538,7 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
             me->CastSpell(me, AIBOT_HEARTH_SPELL_ID, false);
             if (me->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: hearth cast begun");
                 m_hearthX = hx; m_hearthY = hy; m_hearthZ = hz; m_hearthMap = hmap;
                 m_hearthElapsedMs = 0;
                 m_hearthActive = true;
@@ -2273,6 +2548,7 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: hearth unavailable, instant port fallback");
                 // Hearth could not start (silenced / spell unavailable) — restore the homebind and
                 // fall back to the proven instant port so the escape still happens (never a regress
                 // to "stuck forever").
@@ -2282,11 +2558,13 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
                 m_hearthActive = false;
                 if ((int)me->GetMapId() == hmap)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: fallback same map teleport");
                     TeleportToWalkable(hx, hy, hz, me->GetOrientation(), "port-home");
                     hx = me->GetPositionX(); hy = me->GetPositionY(); hz = me->GetPositionZ();
                 }
                 else
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: fallback cross map teleport");
                     m_pendingWalkableLanding = true;
                     m_pendingWalkableMap = (uint32)hmap;
                     m_pendingWalkableX = hx;
@@ -2302,12 +2580,16 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
             }
         }
         else
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: PORT_HOME refused, missing home or dead or in combat");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT] %s PORT_HOME refused (home=%d map=%d alive=%d combat=%d)",
                 me->GetName(), haveHome ? 1 : 0, hmap, me->IsAlive() ? 1 : 0, me->IsInCombat() ? 1 : 0);
+        }
     }
     else
     {
+        CB_HITN(me->GetGUIDLow(), "cpp-task: unknown task type", taskType);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK unknown task type '%s'", me->GetName(), taskType);
     }
@@ -2334,7 +2616,7 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
 void AiBotAI::BridgeHandleCombatDirective(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     char mode[16] = {0};
     JsonExtractString(payload, "mode", mode, sizeof(mode));
@@ -2344,6 +2626,7 @@ void AiBotAI::BridgeHandleCombatDirective(const char* json)
 
     if (strcmp(mode, "assist") == 0 && anchorGuid > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-combatcfg: assist directive adopted, anchor", anchorGuid);
         m_combatDirective.mode          = COMBAT_MODE_ASSIST;
         m_combatDirective.anchorGuidLow = (uint32)anchorGuid;
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -2353,6 +2636,7 @@ void AiBotAI::BridgeHandleCombatDirective(const char* json)
     }
     else
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-combatcfg: combat directive cleared");
         m_combatDirective.Clear();
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TEAMPLAY] %s: COMBAT_DIRECTIVE cleared (mode='%s')",
@@ -2365,13 +2649,14 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     int sourceNode = 0, destNode = 0;
  
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
  
     JsonExtractInt(payload, "sourceNode", sourceNode);
     JsonExtractInt(payload, "destNode", destNode);
  
     if (sourceNode <= 0 || destNode <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-flight: missing source or dest node, FLIGHT_FAILED");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT missing sourceNode or destNode", me->GetName());
         BridgeSendEvent("FLIGHT_FAILED", "missing sourceNode or destNode");
@@ -2380,7 +2665,8 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
  
     if (me->IsDead())
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,    
+        CB_HIT(me->GetGUIDLow(), "cpp-flight: rejected, bot is dead, FLIGHT_FAILED");
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT rejected — bot is dead", me->GetName());
         BridgeSendEvent("FLIGHT_FAILED", "bot is dead");
         return;
@@ -2388,6 +2674,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
  
     if (me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-flight: rejected, in combat, FLIGHT_FAILED");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT rejected — bot is in combat", me->GetName());
         BridgeSendEvent("FLIGHT_FAILED", "bot is in combat");
@@ -2398,6 +2685,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     TaxiNodesEntry const* srcNode = sObjectMgr.GetTaxiNodeEntry((uint32)sourceNode);
     if (!srcNode)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: invalid source node, FLIGHT_FAILED", sourceNode);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT invalid sourceNode %d", me->GetName(), sourceNode);
         BridgeSendEvent("FLIGHT_FAILED", "invalid sourceNode");
@@ -2408,6 +2696,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     TaxiNodesEntry const* dstNode = sObjectMgr.GetTaxiNodeEntry((uint32)destNode);
     if (!dstNode)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: invalid dest node, FLIGHT_FAILED", destNode);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT invalid destNode %d", me->GetName(), destNode);
         BridgeSendEvent("FLIGHT_FAILED", "invalid destNode");
@@ -2419,6 +2708,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     sObjectMgr.GetTaxiPath((uint32)sourceNode, (uint32)destNode, pathId, pathCost);
     if (!pathId)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: no taxi path between nodes, FLIGHT_FAILED", destNode);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT no path from %d to %d", me->GetName(), sourceNode, destNode);
         BridgeSendEvent("FLIGHT_FAILED", "no path between nodes");
@@ -2432,17 +2722,18 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     // Check if bot can afford the flight
     if (me->GetMoney() < pathCost)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: not enough money, FLIGHT_FAILED", pathCost);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT not enough money (have %u, need %u copper)",
             me->GetName(), me->GetMoney(), pathCost);
  
         char failJson[256];
         snprintf(failJson, sizeof(failJson),
-            "{\"type\":\"EVENT\",\"payload\":{"
+            "{\"type\":\"EVENT\",\"cbt\":" UI64FMTD ",\"payload\":{"
             "\"guid\":%u,\"event\":\"FLIGHT_FAILED\","
             "\"reason\":\"not_enough_money\","
             "\"have\":%u,\"need\":%u,\"cost\":%u}}",
-            me->GetGUIDLow(), me->GetMoney(), pathCost, pathCost);
+            m_bridgeDispatchCbt, me->GetGUIDLow(), me->GetMoney(), pathCost, pathCost);
         BridgeSend(failJson);
         return;
     }
@@ -2450,6 +2741,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     // Must be on same map as source node
     if (srcNode->map_id != me->GetMapId())
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: source node on different map, FLIGHT_FAILED", srcNode->map_id);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT source node %d is on map %u, bot is on map %u",
             me->GetName(), sourceNode, srcNode->map_id, me->GetMapId());
@@ -2458,14 +2750,21 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     }
  
     // Stop any current movement/combat
+    m_suppressTaskDestInform = true;
+    CancelPendingNpcInteraction("take_flight");
     StopMoving();
+    ClearStoredPath();
     if (me->IsMounted())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-flight: dismounting before taxi");
         me->RemoveSpellsCausingAura(SPELL_AURA_MOUNTED);
+    }
  
  
     // Set task state so UpdateAI doesn't interfere during flight
     m_currentTask.Clear();
     m_currentTask.type = TASK_TAXI;
+    m_currentTask.commandCbt = m_bridgeDispatchCbt;
     m_currentTask.taxiSourceNode = (uint32)sourceNode;
     m_currentTask.taxiDestNode = (uint32)destNode;
  
@@ -2479,6 +2778,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
  
     if (success)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-flight: taxi path activated, FLIGHT_STARTED", destNode);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT activated path %u → %u (cost %u copper)",
             me->GetName(), sourceNode, destNode, pathCost);
@@ -2486,6 +2786,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     }
     else
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-flight: ActivateTaxiPathTo failed, FLIGHT_FAILED");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: TAKE_FLIGHT ActivateTaxiPathTo failed (%d → %d)",
             me->GetName(), sourceNode, destNode);
@@ -2516,7 +2817,10 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
 void AiBotAI::BridgeHandleSellItems(const char* json)
 {
     if (!me || !me->IsAlive() || !me->IsInWorld())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-vendor: sell ignored, dead or not in world");
         return;
+    }
 
     // [SUI] Never autosell a REAL account's character. AiBotAI is only ever
     // attached to socket-less bot sessions, and possessed bots reject bridge
@@ -2524,6 +2828,7 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     // whose session has a live client keeps its inventory untouchable.
     if (me->GetSession() && !me->GetSession()->GetBot())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-vendor: refused, real account character, SELL_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-SELL] %s: refused — real account character", me->GetName());
         BridgeSendEvent("SELL_FAIL", "reason=real_account_protected");
@@ -2535,12 +2840,13 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     JsonExtractInt(json, "keep_quality", keepQuality);
     if (npcEntry <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-vendor: SELL_ITEMS missing npc_entry, SELL_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-SELL] %s: SELL_ITEMS missing npc_entry", me->GetName());
         BridgeSendEvent("SELL_FAIL", "reason=missing_npc_entry");
         return;
     }
-    if (keepQuality <= 0) keepQuality = 2;
+    if (keepQuality <= 0) keepQuality = 2; // cb:fold default quality clamp
 
     // --- Find vendor NPC ---
     std::list<Creature*> creatureList;
@@ -2551,10 +2857,10 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     for (Creature* c : creatureList)
     {
         if (c && c->IsAlive() && (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_VENDOR))
-        {
+        {   // cb:fold nearest candidate scan
             float d = me->GetDistance(c);
             if (d < bestDist)
-            {
+            {   // cb:fold nearest candidate scan
                 bestDist = d;
                 pVendor = c;
             }
@@ -2562,6 +2868,7 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     }
     if (!pVendor)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-vendor: vendor not found within 15yd, SELL_FAIL", npcEntry);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-SELL] %s: no vendor with entry %d within 15yd", me->GetName(), npcEntry);
         BridgeSendEvent("SELL_FAIL", "reason=vendor_not_found");
@@ -2578,16 +2885,16 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     for (const auto& pair : questMap)
     {
         if (pair.second.m_status != QUEST_STATUS_INCOMPLETE && pair.second.m_status != QUEST_STATUS_COMPLETE)
-            continue;
+            continue; // cb:fold quest item set build detail
         Quest const* pQuest = sObjectMgr.GetQuestTemplate(pair.first);
-        if (!pQuest) continue;
+        if (!pQuest) continue; // cb:fold quest item set build detail
         for (int j = 0; j < QUEST_OBJECTIVES_COUNT; ++j)
         {
             if (pQuest->ReqItemId[j] > 0)
-                questItemIds.insert(pQuest->ReqItemId[j]);
+                questItemIds.insert(pQuest->ReqItemId[j]); // cb:fold quest item set build detail
         }
         if (pQuest->GetSrcItemId() > 0)
-            questItemIds.insert(pQuest->GetSrcItemId());
+            questItemIds.insert(pQuest->GetSrcItemId()); // cb:fold quest item set build detail
     }
 
     // Find the largest equipped bag size (for bag-selling: only sell bags
@@ -2596,12 +2903,12 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
     {
         Item* pBagItem = me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
-        if (!pBagItem) continue;
+        if (!pBagItem) continue; // cb:fold bag size scan detail
         ItemPrototype const* bp = pBagItem->GetProto();
         if (bp && bp->Class == ITEM_CLASS_CONTAINER && bp->SubClass == ITEM_SUBCLASS_CONTAINER)
-        {
+        {   // cb:fold bag size scan detail
             if (bp->ContainerSlots > largestEquippedBagSize)
-                largestEquippedBagSize = bp->ContainerSlots;
+                largestEquippedBagSize = bp->ContainerSlots; // cb:fold bag size scan detail
         }
     }
     // Also check if there are any empty bag equip slots (if so, ANY bag is an upgrade)
@@ -2609,7 +2916,7 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     for (int b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
     {
         if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b))
-        {
+        {   // cb:fold bag slot scan detail
             hasEmptyBagSlot = true;
             break;
         }
@@ -2623,15 +2930,16 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     {
         uint32 need = QuestRequiredCountFor(qItemId);
         if (need == 0)
-            continue;
+            continue; // cb:fold surplus scan detail
         uint32 have = me->GetItemCount(qItemId, false);
         if (have <= need)
-            continue;
+            continue; // cb:fold surplus scan detail
         uint32 surplus = have - need;
         ItemPrototype const* sp = sObjectMgr.GetItemPrototype(qItemId);
         uint32 money = (sp ? sp->SellPrice : 0) * surplus;
         if (money)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: quest surplus vendored", qItemId);
             me->ModifyMoney((int32)money);
             totalCopper += money;
         }
@@ -2646,71 +2954,120 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     auto trySellItem = [&](uint8 bag, uint8 slot)
     {
         Item* pItem = me->GetItemByPos(bag, slot);
-        if (!pItem) return;
+        if (!pItem) return; // cb:fold empty slot scan
 
         ItemPrototype const* proto = pItem->GetProto();
-        if (!proto) return;
+        if (!proto) return; // cb:fold missing proto guard
 
         // Keep: no sell price (hearthstone, etc.)
-        if (proto->SellPrice == 0) return;
+        if (proto->SellPrice == 0)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, no sell price", proto->ItemId);
+            return;
+        }
         // Keep: quest-class items
-        if (proto->Class == ITEM_CLASS_QUEST) return;
-        if (proto->StartQuest > 0) return;
-        if (proto->Bonding == BIND_QUEST_ITEM || proto->Bonding == BIND_QUEST_ITEM1) return;
-        if (questItemIds.count(proto->ItemId) > 0) return;
+        if (proto->Class == ITEM_CLASS_QUEST)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, quest class item", proto->ItemId);
+            return;
+        }
+        if (proto->StartQuest > 0)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, item starts a quest", proto->ItemId);
+            return;
+        }
+        if (proto->Bonding == BIND_QUEST_ITEM || proto->Bonding == BIND_QUEST_ITEM1)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, quest bound item", proto->ItemId);
+            return;
+        }
+        if (questItemIds.count(proto->ItemId) > 0)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, active quest objective item", proto->ItemId);
+            return;
+        }
 
         // --- BAGS: sell unequipped bags that aren't upgrades ---
         if (proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_QUIVER)
         {
-            if (hasEmptyBagSlot) return;
-            if (proto->ContainerSlots > largestEquippedBagSize) return;
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: loose bag policy check", proto->ItemId);
+            if (hasEmptyBagSlot)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep bag, empty equip slot exists", proto->ItemId);
+                return;
+            }
+            if (proto->ContainerSlots > largestEquippedBagSize)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep bag, bigger than any equipped", proto->ItemId);
+                return;
+            }
             // else: duplicate/downgrade bag → sell
         }
         // --- CONSUMABLES: food dumps, weak potions sell, current-rank potions kept (v4) ---
         else if (proto->Class == ITEM_CLASS_CONSUMABLE)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: consumable policy check", proto->ItemId);
             // Food & drink (subclass FOOD): the bot has unlimited food (autonomous DrinkAndEat),
             // so looted food is never needed → sell all, any level. (§verify subclass FOOD == 5.)
             if (proto->SubClass == 5)   // 5 = Food & Drink (1.12 consumable subclass DBC id; this fork defines no ITEM_SUBCLASS_FOOD name)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: food or drink, selling all", proto->ItemId);
                 // fall through to sell
             }
             else
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: potion staleness check", proto->ItemId);
                 // Potions / elixirs / scrolls / bandages — not consumed by the bot YET. Keep the
                 // level-appropriate ones staged for when potion-use lands; sell only ranks the bot
                 // has outgrown. This is the "don't sell EVERYTHING" guard — the current tier stays.
                 if (me->GetLevel() <= proto->RequiredLevel + AIBOT_CONSUMABLE_STALE_LEVELS)
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep potion, level appropriate", proto->ItemId);
                     return;   // level-appropriate → keep
+                }
                 // else: superseded rank → sell (fall through)
             }
         }
         // --- GEAR (weapons/armor): UPGRADE-AWARE, quality-blind (v3) ---
         else if (proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: gear policy check", proto->ItemId);
             // Keep 1: epics+ — rare, high value, never vendor-trash a purple.
-            if (proto->Quality >= (uint32)ITEM_QUALITY_EPIC) return;
+            if (proto->Quality >= (uint32)ITEM_QUALITY_EPIC)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, epic or better", proto->ItemId);
+                return;
+            }
 
             uint16 dest = 0;
             InventoryResult can = me->CanEquipItem(NULL_SLOT, dest, pItem, true);
             if (can == EQUIP_ERR_OK)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: usable now, upgrade score check", proto->ItemId);
                 // Usable now — sell UNLESS it out-scores what's worn (safety net for a real upgrade
                 // that slipped past TryAutoEquip when bags were full).
                 uint8 tgt = (uint8)(dest & 0xFF);
                 Item* worn = me->GetItemByPos(INVENTORY_SLOT_BAG_0, tgt);
                 float newS = ScoreItem(proto, tgt);
                 float oldS = worn ? ScoreItem(worn->GetProto(), tgt) : 0.0f;
-                if (newS > oldS) return;   // Keep 2: genuine upgrade
+                if (newS > oldS)
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, genuine upgrade over worn", proto->ItemId);
+                    return;   // Keep 2: genuine upgrade
+                }
                 // else: usable non-upgrade → sell
             }
             else
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: not equippable, grow-into check", proto->ItemId);
                 // Keep 3: grow-into upgrade — right class/proficiency, under-level, usable within
                 // AIBOT_SELL_KEEP_UPGRADE_LEVELS. (RequiredLevel — verify the field name on this core.)
                 if (proto->RequiredLevel > me->GetLevel() &&
                     proto->RequiredLevel <= me->GetLevel() + AIBOT_SELL_KEEP_UPGRADE_LEVELS)
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, grow-into upgrade", proto->ItemId);
                     return;
+                }
                 // else: never-usable (wrong class/prof/race) or too far off → sell
             }
         }
@@ -2723,7 +3080,12 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
         // sooner, if slots beat the lost AH value).
         else
         {
-            if (proto->Quality >= (uint32)keepQuality) return;
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: misc quality threshold check", proto->ItemId);
+            if (proto->Quality >= (uint32)keepQuality)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-vendor: keep, misc above quality threshold", proto->ItemId);
+                return;
+            }
         }
 
         uint32 money = proto->SellPrice * pItem->GetCount();
@@ -2751,7 +3113,7 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     {
         Bag* pBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, (uint8)b);
         if (!pBag || pBag->GetProto()->Class != ITEM_CLASS_CONTAINER)
-            continue;
+            continue; // cb:fold bag iterate detail
         for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
             trySellItem((uint8)b, (uint8)j);
     }
@@ -2759,25 +3121,27 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
     uint32 freeSlots = 0;
     for (int fi = INVENTORY_SLOT_ITEM_START; fi < INVENTORY_SLOT_ITEM_END; ++fi)
         if (!me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
-            ++freeSlots;
+            ++freeSlots; // cb:fold slot tally detail
     for (int fi = INVENTORY_SLOT_BAG_START; fi < INVENTORY_SLOT_BAG_END; ++fi)
-        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi))
-            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER)
-                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj)
+        if (Bag* pFBag = (Bag*)me->GetItemByPos(INVENTORY_SLOT_BAG_0, fi)) // cb:fold decl-if condition artifact
+            if (pFBag->GetProto()->Class == ITEM_CLASS_CONTAINER && pFBag->GetProto()->SubClass == ITEM_SUBCLASS_CONTAINER) // cb:fold slot tally detail
+                for (uint32 fj = 0; fj < pFBag->GetBagSize(); ++fj) // cb:fold slot tally detail
                     if (!me->GetItemByPos(fi, fj))
-                        ++freeSlots;
+                        ++freeSlots; // cb:fold slot tally detail
 
     // Build SELL_ACK — include "nothing_to_sell" flag when bags are full but
     // nothing was vendorable, so C# can set a cooldown and break the loop.
     char eventData[196];
     if (soldCount == 0 && freeSlots == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-vendor: nothing to sell and bags full, SELL_ACK flagged");
         snprintf(eventData, sizeof(eventData),
             "sold=0|copper_earned=0|free_slots=0|copper_total=%u|nothing_to_sell=1",
             me->GetMoney());
     }
     else
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-vendor: sell complete, SELL_ACK", soldCount);
         snprintf(eventData, sizeof(eventData),
             "sold=%u|copper_earned=%u|free_slots=%u|copper_total=%u",
             soldCount, totalCopper, freeSlots, me->GetMoney());
@@ -2809,15 +3173,19 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
 void AiBotAI::BridgeHandleRepairItems(const char* json)
 {
     if (!me || !me->IsAlive() || !me->IsInWorld())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-vendor: repair ignored, dead or not in world");
         return;
- 
+    }
+
     int npcEntry = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "npc_entry", npcEntry);
  
     if (npcEntry <= 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-vendor: REPAIR_AT_NPC missing npc_entry, REPAIR_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-REPAIR] %s: REPAIR_AT_NPC missing npc_entry", me->GetName());
         BridgeSendEvent("REPAIR_FAIL", "reason=missing_npc_entry");
@@ -2834,10 +3202,10 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
     {
         if (c && c->IsAlive() &&
             (c->GetUInt32Value(UNIT_NPC_FLAGS) & UNIT_NPC_FLAG_REPAIR))
-        {
+        {   // cb:fold nearest candidate scan
             float d = me->GetDistance(c);
             if (d < bestDist)
-            {
+            {   // cb:fold nearest candidate scan
                 bestDist = d;
                 pRepairNpc = c;
             }
@@ -2846,6 +3214,7 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
  
     if (!pRepairNpc)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-vendor: repair npc not found within 15yd, REPAIR_FAIL", npcEntry);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-REPAIR] %s: no repair NPC with entry %d within 15yd",
             me->GetName(), npcEntry);
@@ -2861,7 +3230,7 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
         if (item && item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY) > 0 &&
             item->GetUInt32Value(ITEM_FIELD_DURABILITY) <
             item->GetUInt32Value(ITEM_FIELD_MAXDURABILITY))
-        {
+        {   // cb:fold durability scan detail
             hasDamage = true;
             break;
         }
@@ -2869,6 +3238,7 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
  
     if (!hasDamage)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-vendor: no damaged gear, REPAIR_ACK zero cost");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-REPAIR] %s: no damaged gear — nothing to repair", me->GetName());
         char eventData[128];
@@ -2890,7 +3260,7 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
     uint32 totalCost = me->DurabilityRepairAll(false, 1.0f);
  
     if (false && totalCost == 0 && hasDamage)   // [FREE-REPAIR] dead branch: repair never charges now
-    {
+    {   // cb:fold dead branch, free repair never charges
         // Gear is damaged but nothing was repaired — can't afford
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-REPAIR] %s: gear is damaged but can't afford repair (gold=%u)",
@@ -2913,7 +3283,7 @@ void AiBotAI::BridgeHandleRepairItems(const char* json)
 void AiBotAI::BridgeHandleUseGameObject(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     int goEntryInt = 0;
     JsonExtractInt(payload, "go_entry", goEntryInt);
@@ -2921,6 +3291,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
 
     if (!goEntry)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-go: bad payload, missing go_entry, USE_GO_FAIL");
         BridgeSendEvent("USE_GO_FAIL", "reason=bad_payload");
         return;
     }
@@ -2933,11 +3304,11 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     float closestDist = 999.0f;
     for (auto* go : goList)
     {
-        if (!go->isSpawned()) continue;
-        if (go->getLootState() != GO_READY) continue;
+        if (!go->isSpawned()) continue; // cb:fold nearest candidate scan
+        if (go->getLootState() != GO_READY) continue; // cb:fold nearest candidate scan
         float dist = me->GetDistance(go);
         if (dist < closestDist)
-        {
+        {   // cb:fold nearest candidate scan
             closestDist = dist;
             obj = go;
         }
@@ -2945,6 +3316,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
 
     if (!obj)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-go: gameobject not found ready, USE_GO_FAIL", goEntry);
         char buf[128];
         snprintf(buf, sizeof(buf), "reason=not_found|go_entry=%u", goEntry);
         BridgeSendEvent("USE_GO_FAIL", buf);
@@ -2953,6 +3325,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
 
     if (closestDist > 10.0f)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-go: gameobject too far, USE_GO_FAIL", closestDist);
         char buf[128];
         snprintf(buf, sizeof(buf), "reason=too_far|go_entry=%u|dist=%d", goEntry, (int)closestDist);
         BridgeSendEvent("USE_GO_FAIL", buf);
@@ -2971,6 +3344,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     uint32 lootId = obj->GetGOInfo()->GetLootId();
     if (!lootId)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-go: no loot table, interact only, USE_GO_ACK", goEntry);
         // No loot — still a valid use (some GOs give quest credit on interact)
         obj->SetLootState(GO_JUST_DEACTIVATED);
         char buf[128];
@@ -2992,6 +3366,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     uint32 gold = loot.gold;
     if (gold > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-go: loot gold taken", gold);
         me->ModifyMoney((int32)gold);
         me->LootMoney((int32)gold, &loot);
         loot.gold = 0;
@@ -3007,9 +3382,9 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     {
         LootItem& item = loot.items[i];
         if (item.is_looted)
-        {
+        {   // cb:fold loot summary format detail, carried by LOOT event
             itemsLooted++;
-            if (!itemStr.empty()) itemStr += ",";
+            if (!itemStr.empty()) itemStr += ","; // cb:fold loot summary format detail
             itemStr += std::to_string(item.itemid) + ":" + std::to_string(item.count);
         }
     }
@@ -3025,7 +3400,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
     // Emit LOOT event — same format as DoAutoLoot so C# quest item tracking works unchanged
     std::string lootData = "gold=" + std::to_string(gold);
     if (!itemStr.empty())
-        lootData += "|items=" + itemStr;
+        lootData += "|items=" + itemStr; // cb:fold loot summary format detail
     BridgeSendEvent("LOOT", lootData.c_str());
 
     // Emit USE_GO_ACK so C# QuestingDomain knows the interaction succeeded
@@ -3058,7 +3433,7 @@ void AiBotAI::BridgeHandleUseGameObject(const char* json)
 void AiBotAI::BridgeHandleQuestCast(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
 
     int spellIdInt = 0, entryInt = 0, guidInt = 0, countInt = 1;
     float radius = 15.0f;
@@ -3071,30 +3446,33 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
     uint32 spellId = (uint32)spellIdInt;
     if (!spellId)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-quest: QUEST_CAST missing spell_id, QUEST_CAST_FAIL");
         BridgeSendEvent("QUEST_CAST_FAIL", "reason=bad_payload");
         return;
     }
     if (radius <= 0.0f || radius > 60.0f)
-        radius = 15.0f;
+        radius = 15.0f; // cb:fold radius clamp detail
 
     // --- Resolve the target: by guid if the planner gave one, else nearest ALIVE of `entry`. ---
     Creature* pTarget = nullptr;
     if (guidInt > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: cast target resolved by guid", guidInt);
         pTarget = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(guidInt)));
     }
     else if (entryInt > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: cast target by nearest entry", entryInt);
         std::list<Creature*> creatureList;
         me->GetCreatureListWithEntryInGrid(creatureList, (uint32)entryInt, radius);
         float closest = 999.0f;
         for (auto* c : creatureList)
         {
             if (!c || !c->IsAlive())
-                continue;
+                continue; // cb:fold nearest candidate scan
             float d = me->GetDistance(c);
             if (d < closest)
-            {
+            {   // cb:fold nearest candidate scan
                 closest = d;
                 pTarget = c;
             }
@@ -3103,6 +3481,7 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
 
     if (!pTarget)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: cast target not found, QUEST_CAST_FAIL", entryInt);
         char buf[160];
         snprintf(buf, sizeof(buf), "reason=target_not_found|entry=%d|spell=%u", entryInt, spellId);
         BridgeSendEvent("QUEST_CAST_FAIL", buf);
@@ -3113,6 +3492,7 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
     float dist = me->GetDistance(pTarget);
     if (dist > 30.0f || !me->IsWithinLOSInMap(pTarget))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: target too far or no LOS, QUEST_CAST_FAIL", dist);
         char buf[160];
         snprintf(buf, sizeof(buf), "reason=too_far|entry=%d|spell=%u|dist=%d", entryInt, spellId, (int)dist);
         BridgeSendEvent("QUEST_CAST_FAIL", buf);
@@ -3127,13 +3507,15 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
     // honestly through the same failure event instead.
     if (!spellId || !sSpellMgr.GetSpellEntry(spellId))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-quest: unknown spell id, QUEST_CAST_FAIL", spellId);
         char buf[160];
         snprintf(buf, sizeof(buf), "reason=bad_spell|entry=%d|spell=%u", entryInt, spellId);
         BridgeSendEvent("QUEST_CAST_FAIL", buf);
         return;
     }
 
-    me->StopMoving();
+    CancelPendingNpcInteraction("quest_cast");
+    StopMoving();
     me->SetFacingToObject(pTarget);
 
     bool triggered = !me->HasSpell(spellId);
@@ -3163,12 +3545,13 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
 void AiBotAI::BridgeHandleFormGroup(const char* json)
 {
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
  
     // Parse member_guids array: "member_guids":[5,8,12]
     const char* arrStart = strstr(payload, "\"member_guids\"");
     if (!arrStart)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: missing member_guids, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: FORM_GROUP missing member_guids", me->GetName());
         BridgeSendEvent("FORM_GROUP_FAIL", "missing member_guids");
@@ -3178,14 +3561,16 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     arrStart = strchr(arrStart, '[');
     if (!arrStart)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: malformed member_guids open, FORM_GROUP_FAIL");
         BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
         return;
     }
     arrStart++; // skip '['
- 
+
     const char* arrEnd = strchr(arrStart, ']');
     if (!arrEnd)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: malformed member_guids close, FORM_GROUP_FAIL");
         BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
         return;
     }
@@ -3196,15 +3581,16 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     while (p < arrEnd)
     {
         while (p < arrEnd && (*p == ' ' || *p == ',')) p++;
-        if (p >= arrEnd) break;
+        if (p >= arrEnd) break; // cb:fold guid list parse detail
         uint32 guid = (uint32)atoi(p);
         if (guid > 0)
-            memberGuids.push_back(guid);
+            memberGuids.push_back(guid); // cb:fold guid list parse detail
         while (p < arrEnd && *p != ',') p++;
     }
  
     if (memberGuids.empty())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: no valid member guids, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: FORM_GROUP no valid member GUIDs", me->GetName());
         BridgeSendEvent("FORM_GROUP_FAIL", "no valid guids");
@@ -3217,6 +3603,7 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     // pparty STATE echo, so this refusal is the belt to that suspender.
     if (FindPartyBoss())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: refused, in real player party, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: FORM_GROUP refused — this bot is in a REAL player's party",
             me->GetName());
@@ -3225,8 +3612,9 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     }
 
     // If already in a group, leave it first
-    if (Group* oldGroup = me->GetGroup())
+    if (Group* oldGroup = me->GetGroup()) // cb:fold decl-if condition artifact, body probed
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: leaving previous group first");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: already in a group, leaving first", me->GetName());
         oldGroup->RemoveMember(me->GetObjectGuid(), 0);
@@ -3236,6 +3624,7 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     Group* group = new Group;
     if (!group->Create(me->GetObjectGuid(), me->GetName()))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: Group Create failed, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: Group::Create failed", me->GetName());
         delete group;
@@ -3253,6 +3642,7 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         Player* pMember = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, memberGuid));
         if (!pMember)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: member not found online, skipped", memberGuid);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-GROUP] %s: FORM_GROUP member GUID %u not found online",
                 me->GetName(), memberGuid);
@@ -3263,18 +3653,19 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         // of the human's party to form a bot group is exactly the yank the leader guard
         // above refuses for ourselves (2026-07-07).
         bool memberInPlayerParty = false;
-        if (Group* memberOldGroup = pMember->GetGroup())
-        {
+        if (Group* memberOldGroup = pMember->GetGroup()) // cb:fold decl-if condition artifact
+        {   // cb:fold member party scan, decision probed below
             for (GroupReference* mItr = memberOldGroup->GetFirstMember(); mItr != nullptr; mItr = mItr->next())
-                if (Player* pOther = mItr->getSource())
-                    if (pOther->GetSession() && !pOther->GetSession()->GetBot())
-                    {
+                if (Player* pOther = mItr->getSource()) // cb:fold decl-if condition artifact
+                    if (pOther->GetSession() && !pOther->GetSession()->GetBot()) // cb:fold member party scan
+                    {   // cb:fold member party scan
                         memberInPlayerParty = true;
                         break;
                     }
         }
         if (memberInPlayerParty)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: member escorting real player, skipped", memberGuid);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-GROUP] %s: FORM_GROUP skipping %s (GUID %u) — escorting a REAL player",
                 me->GetName(), pMember->GetName(), memberGuid);
@@ -3282,13 +3673,15 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         }
 
         // If member is already in a group, remove them first
-        if (Group* memberOldGroup = pMember->GetGroup())
+        if (Group* memberOldGroup = pMember->GetGroup()) // cb:fold decl-if condition artifact
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: member pulled from old bot group", memberGuid);
             memberOldGroup->RemoveMember(pMember->GetObjectGuid(), 0);
         }
  
         if (!group->AddMember(pMember->GetObjectGuid(), pMember->GetName()))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: AddMember failed, skipped", memberGuid);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-GROUP] %s: FORM_GROUP AddMember failed for %s (GUID %u)",
                 me->GetName(), pMember->GetName(), memberGuid);
@@ -3303,6 +3696,7 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
  
     if (added == 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: no members added, disbanding, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: FORM_GROUP no members added, disbanding", me->GetName());
         group->Disband();
@@ -3330,6 +3724,7 @@ void AiBotAI::BridgeHandleDisbandGroup(const char* json)
     Group* group = me->GetGroup();
     if (!group)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP but not grouped");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: DISBAND_GROUP but not in a group", me->GetName());
         BridgeSendEvent("GROUP_DISBANDED", "was_not_grouped");
@@ -3340,6 +3735,7 @@ void AiBotAI::BridgeHandleDisbandGroup(const char* json)
     // human formed it, only the human unforms it. Same rationale as the FORM_GROUP guard.
     if (FindPartyBoss())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: disband refused, real player party, GROUP_DISBAND_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: DISBAND_GROUP refused — this is a REAL player's party",
             me->GetName());
@@ -3357,10 +3753,14 @@ void AiBotAI::BridgeHandleDisbandGroup(const char* json)
 void AiBotAI::BridgeHandleResurrect(const char* json)
 {
     if (!me)
+    {
+        CB_HIT(0u, "cpp-rez: resurrect ignored, no player");
         return;
+    }
 
     if (SuiHero::BlocksResurrection(me))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-rez: held for paid hero revive");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[SUI-RTS] %s: automatic resurrection held for paid hero revive", me->GetName());
         return;
@@ -3371,6 +3771,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
     // a stray plain RESURRECT here would rez us mid-teleport, back in the death pocket (the loop).
     if (m_pendingGraveyardRez)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-rez: ignored, graveyard self-rez in flight");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT] %s: RESURRECT ignored — graveyard self-rez in flight", me->GetName());
         return;
@@ -3378,6 +3779,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 
     if (!me->IsDead() && me->GetDeathState() != DEAD)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-rez: bot not dead, RESPAWN echo");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: RESURRECT but bot is not dead, ignoring", me->GetName());
         BridgeSendEvent("RESPAWN", "");  // tell C# we're alive anyway
@@ -3386,7 +3788,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 
     int atGraveyard = 0;
     const char* payload = strstr(json, "\"payload\"");
-    if (!payload) payload = json;
+    if (!payload) payload = json; // cb:fold payload fallback detail
     JsonExtractInt(payload, "at_graveyard", atGraveyard);
 
     // ── Death-loop / death-march escape: GHOST PORT, then SELF-rez once it lands ──
@@ -3396,6 +3798,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
     // applied — NOT on a C# roundtrip — so we can never rez in the kill pocket before moving.
     if (atGraveyard)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-rez: graveyard ghost port requested");
         float dx = me->GetPositionX(), dy = me->GetPositionY(), dz = me->GetPositionZ();
         uint32 mapId = me->GetMapId();
 
@@ -3410,6 +3813,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
             JsonExtractFloat(payload, "home_z", hz) && JsonExtractInt(payload, "home_map", hmap) &&
             hmap == (int)mapId)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-rez: racial start override, porting ghost home");
             ReGroundZ(hx, hy, hz, "rez-home");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT] %s HEARTH port (ghost): (%.1f, %.1f, %.1f) -> racial start (%.1f, %.1f, %.1f) map=%u",
@@ -3438,10 +3842,11 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         float ngx = 0.0f, ngy = 0.0f, ngz = 0.0f;
         if (me->GetLevel() <= AIBOT_NEWBIE_GRAVE_LEVEL)
         {
-            if (PlayerInfo const* startInfo = sObjectMgr.GetPlayerInfo(me->GetRace(), me->GetClass()))
-            {
+            CB_HIT(me->GetGUIDLow(), "cpp-rez: low level, racial start distance check");
+            if (PlayerInfo const* startInfo = sObjectMgr.GetPlayerInfo(me->GetRace(), me->GetClass())) // cb:fold decl-if condition artifact
+            {   // cb:fold newbie grave eval detail, decision probed below
                 if ((int)startInfo->mapId == mapId)
-                {
+                {   // cb:fold newbie grave eval detail
                     float const rsdx = startInfo->positionX - dx, rsdy = startInfo->positionY - dy;
                     float const rsDistSq = rsdx * rsdx + rsdy * rsdy;
                     float const gvDistSq = grave
@@ -3449,6 +3854,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
                         : 1e18f;
                     if (rsDistSq < gvDistSq)
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-rez: racial start closer, overriding graveyard pick");
                         newbieGrave = true;
                         ngx = startInfo->positionX; ngy = startInfo->positionY; ngz = startInfo->positionZ;
                     }
@@ -3464,6 +3870,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         // appropriate graveyard. Keep the hit closest to the actual death position.
         if (!grave && !newbieGrave)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-rez: no graveyard at death pos, probing rings");
             static const float kRings[] = { 150.0f, 350.0f, 600.0f, 1000.0f };
             float bestSq = 0.0f;
             for (float r : kRings)
@@ -3476,24 +3883,28 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
                     WorldSafeLocsEntry const* g =
                         sObjectMgr.GetClosestGraveYard(px, py, dz, mapId, me->GetTeam());
                     if (!g)
-                        continue;
+                        continue; // cb:fold ring probe scan detail
                     float gdx = g->x - dx, gdy = g->y - dy;
                     float dsq = gdx * gdx + gdy * gdy;
-                    if (!grave || dsq < bestSq) { grave = g; bestSq = dsq; }
+                    if (!grave || dsq < bestSq) { grave = g; bestSq = dsq; } // cb:fold ring probe scan detail
                 }
                 if (grave)
-                    break;   // nearest ring with any hit wins
+                    break;   // cb:fold ring probe scan detail (nearest ring with any hit wins)
             }
             if (grave)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-rez: ring probe found valid graveyard");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s graveyard port: death pos in dead zone (areaId 0?) — "
                     "probe found valid graveyard %.0fyd away", me->GetName(), sqrtf(bestSq));
+            }
         }
 
         // Last resort: still nothing AND spawn point is on this map — port to spawn
         // (always a valid, level-appropriate starter loc). Never rez-in-place into the pocket.
         if (!grave && !newbieGrave && m_spawnMapId == mapId)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-rez: no graveyard found, porting ghost to spawn");
             // [GROUND] Spawn coords are authored, but ground them anyway so a bad spawn row
             // can't float the ghost. Local copy → snap → stash the grounded value so the
             // UpdateAI landed-check measures against the real target.
@@ -3513,6 +3924,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 
         if (!grave && !newbieGrave)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-rez: no destination on map, rez in place, stuck risk");
             // Genuinely nowhere on this map (cross-map spawn + no graveyard) — degrade to the
             // old in-place rez, but log loudly so this rare case is visible if it ever bites.
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -3530,8 +3942,8 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
         // snapping catches a bad/edge graveyard entry. A newbie override (racial start) wins over
         // the stock pick — see [AIBOT-NEWBIE-GRAVE] above. const grave → local copy.
         float gx, gy, gz;
-        if (newbieGrave) { gx = ngx; gy = ngy; gz = ngz; }
-        else             { gx = grave->x; gy = grave->y; gz = grave->z; }
+        if (newbieGrave) { gx = ngx; gy = ngy; gz = ngz; } // cb:fold coord pick detail, override probed above
+        else             { gx = grave->x; gy = grave->y; gz = grave->z; } // cb:fold coord pick detail
         ReGroundZ(gx, gy, gz, newbieGrave ? "rez-newbie-start" : "rez-grave");
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -3574,7 +3986,10 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow)
 {
     if (!m_bridgeConnected)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: kill event dropped, not connected", creatureEntry);
         return;
+    }
 
     char json[256];
     snprintf(json, sizeof(json),
@@ -3588,7 +4003,10 @@ void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow)
 void AiBotAI::SendQuestUpdateEvent(uint32 questId, const char* status)
 {
     if (!m_bridgeConnected)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: quest update event dropped, not connected", questId);
         return;
+    }
 
     char json[256];
     snprintf(json, sizeof(json),
@@ -3602,7 +4020,10 @@ void AiBotAI::SendQuestUpdateEvent(uint32 questId, const char* status)
 void AiBotAI::SendLevelUpEvent(uint32 newLevel)
 {
     if (!m_bridgeConnected)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: levelup event dropped, not connected", newLevel);
         return;
+    }
 
     char json[128];
     snprintf(json, sizeof(json),
@@ -3619,19 +4040,19 @@ void AiBotAI::SendLevelUpEvent(uint32 newLevel)
 static void JsonEscapeInto(char* dst, size_t dstSize, const char* src)
 {
     size_t o = 0;
-    if (!dst || dstSize == 0) return;
+    if (!dst || dstSize == 0) return; // cb:fold json escape detail
     for (const char* p = src ? src : ""; *p && o + 2 < dstSize; ++p)
     {
         unsigned char c = (unsigned char)*p;
         if (c == '"' || c == '\\')
-        {
+        {   // cb:fold json escape detail
             dst[o++] = '\\';
-            dst[o++] = (char)c;
+            dst[o++] = (char)c; // cb:fold json escape detail
         }
         else if (c < 0x20)
-            dst[o++] = ' ';
+            dst[o++] = ' '; // cb:fold json escape detail
         else
-            dst[o++] = (char)c;
+            dst[o++] = (char)c; // cb:fold json escape detail
     }
     dst[o] = '\0';
 }
@@ -3639,7 +4060,10 @@ static void JsonEscapeInto(char* dst, size_t dstSize, const char* src)
 void AiBotAI::SendChatRecvEvent(const char* senderName, const char* message, const char* chatType, const char* channelName, uint32 senderGuidLow)
 {
     if (!m_bridgeConnected)
+    {
+        CB_HITN(me->GetGUIDLow(), "cpp-bridge: chat event dropped, not connected", chatType);
         return;
+    }
 
     // Escaped copies (§5.1): sender, message, channel_name are player-influenced text.
     // chatType is compiler-controlled ("say"/"whisper"/"channel"/"party") — no escape needed.
@@ -3661,6 +4085,7 @@ void AiBotAI::SendChatRecvEvent(const char* senderName, const char* message, con
     // A truncated line is broken JSON that poisons the newline framing — drop it instead.
     if (n < 0 || n >= (int)sizeof(json))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: chat event dropped, escaped payload too large", n);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: CHAT_RECV dropped — escaped payload exceeds buffer (%d)",
             me->GetName(), n);
@@ -3690,6 +4115,7 @@ void AiBotAI::BridgeHandleLoadRaidPlan(const char* json)
     SuiRaidPlanDiag diag;
     if (!SuiParseRaidPlan(json, parsed, diag, err, sizeof(err)))
     {
+        CB_HITN(me->GetGUIDLow(), "cpp-combatcfg: raid plan refused, previous stands", err);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-RAIDPLAN] %s: payload REFUSED — %s (previous plan stands)",
             me->GetName(), err);
@@ -3715,4 +4141,21 @@ void AiBotAI::BridgeHandleLoadRaidPlan(const char* json)
         parsed.name.c_str(), diag.assignments, diag.auras, diag.addControl,
         diag.phaseTargets, diag.avoids, diag.skipped);
     BridgeSendEvent("RAID_PLAN_ACK", ack);
+}
+
+
+// ============================================================
+// [CIRCUIT] BridgeHandleCircuitTrace — the one-switch control line (R6).
+// Payload: {"mode":0|1} global recording mode; {"ship":0|1} this bot's
+// armed-for-disk flag. C# pushes current state on HELLO and on every toggle.
+// ============================================================
+void AiBotAI::BridgeHandleCircuitTrace(const char* json)
+{
+    int mode = -1, ship = -1;
+    if (JsonExtractInt(json, "mode", mode) && mode >= 0)
+        CbCircuit::SetMode(mode); // cb:fold circuit control plumbing
+    if (JsonExtractInt(json, "ship", ship) && ship >= 0)
+        CbCircuit::SetShip(me->GetGUIDLow(), ship != 0); // cb:fold circuit control plumbing
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[AIBOT-CIRCUIT] %s: mode=%d ship=%d",
+        me->GetName(), CbCircuit::g_mode, ship);
 }

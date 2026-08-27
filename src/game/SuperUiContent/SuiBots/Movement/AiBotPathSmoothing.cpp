@@ -56,24 +56,24 @@ namespace AiBotPathSmoothing
         float const segLenIn = sqrtf(inX * inX + inY * inY);
         float const segLenOut = sqrtf(outX * outX + outY * outY);
         if (segLenIn < 0.01f || segLenOut < 0.01f)
-            return false;
+            return false;   // cb:fold pure geometry, no bot context
 
         float const dot = (inX * outX + inY * outY) / (segLenIn * segLenOut);
         float const cosTheta = dot > 1.0f ? 1.0f : (dot < -1.0f ? -1.0f : dot);
         float const turnDeg = acosf(cosTheta) * (180.0f / 3.14159265f);
 
         if (turnDeg < kFilletAngleThresholdDeg)
-            return false;
+            return false;   // cb:fold pure geometry, no bot context
 
         uint32 const seed = CornerSeed(journeySeed, B);
         float const rollPullback = DeterministicUnitFloat(seed);
         float const rollCut      = DeterministicUnitFloat(seed ^ 0x9e3779b9u);
 
         float pullback = kFilletMinPullbackYards + rollPullback * (kFilletMaxPullbackYards - kFilletMinPullbackYards);
-        if (pullback > segLenIn * 0.4f)  pullback = segLenIn * 0.4f;
-        if (pullback > segLenOut * 0.4f) pullback = segLenOut * 0.4f;
+        if (pullback > segLenIn * 0.4f)  pullback = segLenIn * 0.4f;   // cb:fold pure geometry, no bot context
+        if (pullback > segLenOut * 0.4f) pullback = segLenOut * 0.4f;   // cb:fold pure geometry, no bot context
         if (pullback < kFilletMinPullbackYards)
-            return false;
+            return false;   // cb:fold pure geometry, no bot context
 
         Vector3 const entry = Lerp3(B, A, pullback / segLenIn);
         Vector3 const exit  = Lerp3(B, C, pullback / segLenOut);
@@ -131,7 +131,7 @@ namespace AiBotPathSmoothing
         float const dy = anchorEnd.y - anchorStart.y;
         float const chordLen = sqrtf(dx * dx + dy * dy);
         if (chordLen < 1.0f)
-            return;   // anchors too close — nothing sane to bow, caller falls back to the fillet
+            return;   // anchors too close — nothing sane to bow, caller falls back to the fillet   // cb:fold pure geometry, no bot context
 
         float const perpX = -(dy / chordLen) * (float)side;
         float const perpY =  (dx / chordLen) * (float)side;
@@ -165,7 +165,7 @@ namespace AiBotPathSmoothing
             accumulated += sqrtf(dx * dx + dy * dy);
             --idx;
             if (accumulated >= targetDist)
-                break;
+                break;   // cb:fold pure geometry, no bot context
         }
         return idx;
     }
@@ -181,7 +181,7 @@ namespace AiBotPathSmoothing
             accumulated += sqrtf(dx * dx + dy * dy);
             ++idx;
             if (accumulated >= targetDist)
-                break;
+                break;   // cb:fold pure geometry, no bot context
         }
         return idx;
     }

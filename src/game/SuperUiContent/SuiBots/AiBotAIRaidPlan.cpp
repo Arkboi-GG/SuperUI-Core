@@ -38,6 +38,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h"   // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 #include "RaidPlanLaw.h"
 
 #include "Player.h"
@@ -64,19 +65,23 @@ static constexpr float RAIDPLAN_DEFAULT_CONE_RANGE_YD  = 15.0f;
 Unit* AiBotAI::RaidPlanFindBoss()
 {
     if (!me || !me->IsInWorld())
+    {   // cb:fold probed on next line
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-raid: boss scan skipped, not in world");
         return nullptr;
+    }
 
     Unit* best = nullptr;
     uint32 bestHealth = 0;
     HostileReference* ref = me->GetHostileRefManager().getFirst();
     while (ref)
     {
-        if (Unit* hostile = ref->getSourceUnit())
-        {
+        if (Unit* hostile = ref->getSourceUnit()) // cb:fold hostile deref, candidate probed inside
+        {   // cb:fold hostile deref, candidate probed inside
             if (hostile->IsAlive() && IsValidHostileTarget(hostile) &&
                 me->IsWithinDist(hostile, VISIBILITY_DISTANCE_NORMAL) &&
                 hostile->GetMaxHealth() > bestHealth)
-            {
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-raid: boss candidate bigger pool", hostile->GetMaxHealth());
                 bestHealth = hostile->GetMaxHealth();
                 best = hostile;
             }
@@ -93,10 +98,13 @@ Unit* AiBotAI::RaidPlanFindBoss()
 bool AiBotAI::RaidPlanOnAddDuty() const
 {
     if (!m_hasRaidPlan)
-        return false;
+        return false; // cb:fold no raid plan loaded, duty probed at grant
     for (auto const& pt : m_raidPlan.phaseTargets)
         if (!pt.order.empty() && pt.order[0] == 0)
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-raid: add duty found in phase order");
             return true;
+        }
     return false;
 }
 
@@ -107,7 +115,10 @@ bool AiBotAI::RaidPlanOnAddDuty() const
 Unit* AiBotAI::RaidPlanPreferredAdd()
 {
     if (!RaidPlanOnAddDuty() || !me || !me->IsInCombat())
+    {   // cb:fold probed on next line
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-raid: no add duty or out of combat");
         return nullptr;
+    }
 
     Unit* boss = RaidPlanFindBoss();
     Unit* best = nullptr;
@@ -115,14 +126,16 @@ Unit* AiBotAI::RaidPlanPreferredAdd()
     HostileReference* ref = me->GetHostileRefManager().getFirst();
     while (ref)
     {
-        if (Unit* hostile = ref->getSourceUnit())
-        {
+        if (Unit* hostile = ref->getSourceUnit()) // cb:fold hostile deref, eligibility probed inside
+        {   // cb:fold hostile deref, eligibility probed inside
             if (hostile != boss && hostile->IsAlive() && IsValidHostileTarget(hostile) &&
                 me->IsWithinDist(hostile, VISIBILITY_DISTANCE_NORMAL))
-            {
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-raid: add candidate eligible", hostile->GetEntry());
                 float distance = me->GetDistance(hostile);
                 if (!best || distance < bestDistance)
-                {
+                {   // cb:fold probed on next line
+                    CB_HITV(me->GetGUIDLow(), "cpp-raid: add nearest so far", distance);
                     best = hostile;
                     bestDistance = distance;
                 }
@@ -139,12 +152,15 @@ Unit* AiBotAI::RaidPlanPreferredAdd()
 void AiBotAI::UpdateRaidPlanTick()
 {
     if (!m_hasRaidPlan || !me || !me->IsInWorld() || !me->IsAlive())
-        return;
+        return; // cb:fold plan tick idle, no plan or bot gone (fires every sub-tick fleet-wide)
 
     RaidPlanMaintainAuras();
 
     if (m_raidPlan.doctrine.deriveFormation && me->IsInCombat())
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: formation sub-tick");
         RaidPlanFormation();
+    }
 }
 
 // ============================================================
@@ -153,41 +169,58 @@ void AiBotAI::UpdateRaidPlanTick()
 void AiBotAI::RaidPlanMaintainAuras()
 {
     if (m_raidPlan.doctrine.maintainAuras.empty())
-        return;
+        return; // cb:fold no maintained auras in this plan (fires every sub-tick)
     if (me->IsNonMeleeSpellCasted(false, false, true))
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: aura tick hold, casting");
         return;
+    }
 
     // The ward target is the REAL tank: whoever the boss is actually on, when
     // that is a player in this bot's own group. Out of combat there is no boss
     // victim, so v1 holds its wards for the pull — an honest gap.
     Player* ward = nullptr;
-    if (Unit* boss = me->IsInCombat() ? RaidPlanFindBoss() : nullptr)
-        if (Unit* victim = boss->GetVictim())
-            if (Player* player = victim->ToPlayer())
-                if (me->GetGroup() && player->GetGroup() == me->GetGroup())
-                    ward = player;
+    if (Unit* boss = me->IsInCombat() ? RaidPlanFindBoss() : nullptr) // cb:fold ward deref chain, resolution probed below
+        if (Unit* victim = boss->GetVictim()) // cb:fold ward deref chain, resolution probed below
+            if (Player* player = victim->ToPlayer()) // cb:fold ward deref chain, resolution probed below
+                if (me->GetGroup() && player->GetGroup() == me->GetGroup()) // cb:fold ward deref chain, resolution probed below
+                    ward = player; // cb:fold ward deref chain, resolution probed below
     if (!ward)
-        return;
+        return; // cb:fold no ward target yet, resolution probed below (out of combat holds wards)
 
+    CB_HIT(me->GetGUIDLow(), "cpp-raid: ward target resolved");
     uint32 const now = WorldTimer::getMSTime();
     for (auto const& rule : m_raidPlan.doctrine.maintainAuras)
     {
         if (me->GetClass() != rule.casterClassId)
-            continue;
+            continue; // cb:fold aura rule for another class, cast probed below
         if (!me->HasSpell(rule.spellId))
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-raid: aura spell not known", rule.spellId);
             continue;
+        }
         if (ward->HasAura(rule.spellId, EFFECT_INDEX_0))
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-raid: aura already up on ward", rule.spellId);
             continue;   // one is up: the chain's whole point is not doubling
+        }
 
         auto ready = m_raidPlanAuraReady.find(rule.spellId);
         if (ready != m_raidPlanAuraReady.end() && ready->second > now)
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-raid: aura on personal cooldown", rule.spellId);
             continue;   // my cast of it is on cooldown — another chain link's turn
+        }
 
         SpellEntry const* pSpell = sSpellMgr.GetSpellEntry(rule.spellId);
         if (!pSpell || !CanTryToCastSpell(ward, pSpell))
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-raid: aura cast not possible", rule.spellId);
             continue;
+        }
         if (DoCastSpell(ward, pSpell) == SPELL_CAST_OK)
-        {
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-raid: aura cast ok on ward", rule.spellId);
             m_raidPlanAuraReady[rule.spellId] = now + (uint32)(rule.cooldownMs > 0 ? rule.cooldownMs : 0);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-RAIDPLAN] %s: keeps aura %u on %s (plan '%s')",
@@ -205,21 +238,33 @@ void AiBotAI::RaidPlanFormation()
 {
     Unit* boss = RaidPlanFindBoss();
     if (!boss)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: formation hold, no boss");
         return;
+    }
 
     // A bot fighting its assigned ADD is where it should be: the normal engage
     // chase owns it, and the formation must not drag it back to the boss.
     Unit* victim = me->GetVictim();
     if (victim && victim != boss)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: formation hold, fighting add");
         return;
+    }
 
     // Precedence: only ever (re)issue over chase/follow/idle motion. Point motion
     // (a bridge MOVE_TO, a scripted run) and everything else outranks the station.
     MovementGeneratorType motion = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
     if (motion != CHASE_MOTION_TYPE && motion != FOLLOW_MOTION_TYPE && motion != IDLE_MOTION_TYPE)
+    {   // cb:fold probed on next line
+        CB_HITV(me->GetGUIDLow(), "cpp-raid: formation hold, motion outranks", motion);
         return;
+    }
     if (me->IsNonMeleeSpellCasted(false, false, true))
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: formation hold, casting");
         return;
+    }
 
     float from, to;
     SuiFormationLaw::SafeBand(RAIDPLAN_DEFAULT_FRONT_HALF_RAD,
@@ -232,25 +277,30 @@ void AiBotAI::RaidPlanFormation()
 
     float angle, dist;
     if (mainTank)
-    {
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-raid: station main tank nose");
         angle = 0.f;    // her nose: aiming her is his job
         dist = 1.0f;
     }
     else
-    {
+    {   // cb:fold probed on next line
+        CB_HITV(me->GetGUIDLow(), "cpp-raid: station slot fan", m_raidPlan.slotIndex);
         angle = (float)sideSign * SuiFormationLaw::SlotAngle(
             from, to, m_raidPlan.slotIndex, m_raidPlan.slotCount);
         float const reach = 5.5f;   // representative; the chase dist is what binds
         switch (m_raidPlan.job)
         {
-            case 1:   // spare tank: with the melee at reach, ready to peel
-            case 3:   // melee
+            case 1:   // spare tank: with the melee at reach, ready to peel // cb:fold shares the melee reach arm below
+            case 3:   // melee // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-raid: station melee reach");
                 dist = 1.0f;
                 break;
-            case 2:   // healer: the mid ring
+            case 2:   // healer: the mid ring // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-raid: station healer ring");
                 dist = SuiFormationLaw::HealerRadius(RAIDPLAN_DEFAULT_CONE_RANGE_YD, reach);
                 break;
-            default:  // ranged and unknown: standoff
+            default:  // ranged and unknown: standoff // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-raid: station ranged standoff");
                 dist = SuiFormationLaw::RangedRadius(RAIDPLAN_DEFAULT_CONE_RANGE_YD, reach);
                 break;
         }
@@ -262,8 +312,9 @@ void AiBotAI::RaidPlanFormation()
         motion == CHASE_MOTION_TYPE &&
         std::fabs(angle - m_raidPlanChaseAngle) < 0.12f &&
         std::fabs(dist - m_raidPlanChaseDist) < 0.5f)
-        return;
+        return; // cb:fold station unchanged within damping, issue probed below
 
+    CB_HITV(me->GetGUIDLow(), "cpp-raid: station issued", dist);
     me->GetMotionMaster()->MoveChase(boss, dist, angle);
     m_raidPlanChaseGuid = boss->GetObjectGuid();
     m_raidPlanChaseAngle = angle;

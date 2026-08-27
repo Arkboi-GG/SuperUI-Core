@@ -6,6 +6,7 @@
 #include "DBCStructure.h"
 #include "Database/DatabaseEnv.h"
 #include "Log.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 
 #include <algorithm>
 #include <map>
@@ -120,7 +121,7 @@ namespace
     {
         for (TalentProfile const& profile : kProfiles)
             if (profile.classId == classId && profile.specTab == specTab)
-                return &profile;
+                return &profile;   // cb:fold pure profile lookup, no bot context
         return nullptr;
     }
 
@@ -139,12 +140,12 @@ namespace
         {
             TalentEntry const* talent = sTalentStore.LookupEntry(i);
             if (!talent)
-                continue;
+                continue;   // cb:fold DBC row scan, no routing
 
             for (int32 rank = MAX_TALENT_RANK - 1; rank >= 0; --rank)
             {
                 if (talent->RankID[rank] && player->HasSpell(talent->RankID[rank]))
-                {
+                { // cb:fold DBC rank scan, outcome consumed by callers
                     ranks[talent->TalentID] = uint8(rank + 1);
                     spent += uint32(rank + 1);
                     break;
@@ -162,7 +163,7 @@ namespace
         {
             TalentRanks::const_iterator wanted = desired.find(itr->first);
             if (wanted == desired.end() || itr->second > wanted->second)
-                return false;
+                return false;   // cb:fold pure rank comparison, callers probe outcome
         }
         return true;
     }
@@ -176,14 +177,17 @@ namespace
     CombatBotRoles DefaultRoleForPlayer(TalentProfile const& profile, uint32 guidLow)
     {
         if (profile.classId == CLASS_DRUID && profile.specTab == 1)
+        {
+            CB_HIT(guidLow, "cpp-talent: feral druid role split by guid");
             return ((guidLow / 3) % 2) ? ROLE_TANK : ROLE_MELEE_DPS;
+        }
         return profile.defaultRole;
     }
 
     void PersistMetadata(PlayerBotEntry const* entry)
     {
         if (!entry || !entry->playerGUID)
-            return;
+            return;   // cb:fold guard, no entry guid to persist
 
         CharacterDatabase.PExecute(
             "UPDATE `playerbot` SET `spec_tab`='%u', `active_role`='%u' WHERE `char_guid`='%u'",
@@ -195,13 +199,13 @@ namespace
         TalentRanks actual;
         CaptureActualRanks(player, actual);
         if (actual.size() != snapshot.talents.size())
-            return false;
+            return false;   // cb:fold pure snapshot compare, callers probe outcome
 
         for (AiBotTalents::TalentSnapshotEntry const& saved : snapshot.talents)
         {
             TalentRanks::const_iterator itr = actual.find(saved.talentId);
             if (itr == actual.end() || itr->second != saved.rank)
-                return false;
+                return false;   // cb:fold pure snapshot compare, callers probe outcome
         }
         return true;
     }
@@ -210,10 +214,10 @@ namespace
 bool AiBotTalents::ValidateProfiles()
 {
     if (g_catalogState != CATALOG_NOT_VALIDATED)
-        return g_catalogState == CATALOG_VALID;
+        return g_catalogState == CATALOG_VALID;   // cb:fold load-time validation cache, no per-bot routing
 
     if (sizeof(kProfiles) / sizeof(TalentProfile) != PROFILE_COUNT)
-    {
+    { // cb:fold load-time validation, no per-bot routing
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-TALENT] manifest has wrong profile count; talent spending disabled");
         g_catalogState = CATALOG_INVALID;
@@ -225,7 +229,7 @@ bool AiBotTalents::ValidateProfiles()
     {
         if (profile.classId == 0 || profile.classId >= MAX_CLASSES || profile.specTab > 2 ||
             seen[profile.classId][profile.specTab])
-        {
+        { // cb:fold load-time validation, no per-bot routing
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-TALENT] invalid or duplicate profile %s; talent spending disabled", profile.name);
             g_catalogState = CATALOG_INVALID;
@@ -240,7 +244,7 @@ bool AiBotTalents::ValidateProfiles()
         {
             TalentChunk const& chunk = profile.chunks[i];
             if (!chunk.count)
-            {
+            { // cb:fold load-time validation, no per-bot routing
                 g_catalogState = CATALOG_INVALID;
                 return false;
             }
@@ -254,7 +258,7 @@ bool AiBotTalents::ValidateProfiles()
                     currentRank >= MAX_TALENT_RANK || !talent->RankID[currentRank] ||
                     tabPoints[talent->TalentTab] < talent->Row * MAX_TALENT_RANK ||
                     (talent->DependsOn && ranks[talent->DependsOn] < talent->DependsOnRank + 1))
-                {
+                { // cb:fold load-time validation, no per-bot routing
                     sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                         "[AIBOT-TALENT] DBC validation failed for profile %s at talent %u rank %u; spending disabled",
                         profile.name, uint32(chunk.talentId), uint32(currentRank + 1));
@@ -268,7 +272,7 @@ bool AiBotTalents::ValidateProfiles()
         }
 
         if (points != PROFILE_POINT_COUNT)
-        {
+        { // cb:fold load-time validation, no per-bot routing
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-TALENT] profile %s has %u points instead of 51; spending disabled",
                 profile.name, points);
@@ -287,12 +291,13 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
 {
     RepairResult result;
     if (!player || !entry)
-        return result;
+        return result;   // cb:fold guard, null player or entry
 
     entry->talentProfileState = PB_TALENT_PROFILE_UNCHECKED;
 
     if (!ValidateProfiles())
     {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: repair disabled, catalog invalid");
         result.status = TALENT_REPAIR_DISABLED;
         entry->talentProfileState = PB_TALENT_PROFILE_DISABLED;
         return result;
@@ -304,6 +309,7 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
         ? std::min<uint32>(player->GetLevel() - 9, PROFILE_POINT_COUNT) : 0;
     if (spentPoints > targetPoints)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: conflict, overspent for level", spentPoints);
         result.status = TALENT_REPAIR_CONFLICT;
         entry->talentProfileState = PB_TALENT_PROFILE_CONFLICT;
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -316,25 +322,32 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
 
     if (entry->specTab == SPEC_TAB_UNASSIGNED)
     {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: spec tab unassigned, picking profile");
         if (!spentPoints)
         {
+            CB_HIT(player->GetGUIDLow(), "cpp-talent: fresh bot, guid-hashed profile pick");
             profile = FindProfile(player->GetClass(), uint8(player->GetGUIDLow() % 3));
         }
         else
         {
+            CB_HIT(player->GetGUIDLow(), "cpp-talent: matching profile to existing points");
             std::vector<TalentProfile const*> compatible;
             for (uint8 specTab = 0; specTab < 3; ++specTab)
             {
                 TalentProfile const* candidate = FindProfile(player->GetClass(), specTab);
                 if (candidate && IsCompatible(actual, *candidate))
-                    compatible.push_back(candidate);
+                    compatible.push_back(candidate);   // cb:fold candidate scan, election probed below
             }
             if (!compatible.empty())
+            {
+                CB_HITV(player->GetGUIDLow(), "cpp-talent: compatible profile elected", (double)compatible.size());
                 profile = compatible[player->GetGUIDLow() % compatible.size()];
+            }
         }
 
         if (!profile)
         {
+            CB_HIT(player->GetGUIDLow(), "cpp-talent: conflict, incompatible unassigned points");
             result.status = TALENT_REPAIR_CONFLICT;
             entry->talentProfileState = PB_TALENT_PROFILE_CONFLICT;
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -351,10 +364,12 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
     }
     else if (entry->specTab <= 2)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: profile from stored spec tab", entry->specTab);
         profile = FindProfile(player->GetClass(), entry->specTab);
     }
     else
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: invalid spec tab, preserving build", entry->specTab);
         result.status = TALENT_REPAIR_INVALID_PROFILE;
         entry->talentProfileState = PB_TALENT_PROFILE_INVALID;
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -365,6 +380,7 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
 
     if (!profile)
     {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: no profile resolved, invalid");
         result.status = TALENT_REPAIR_INVALID_PROFILE;
         entry->talentProfileState = PB_TALENT_PROFILE_INVALID;
         return result;
@@ -374,14 +390,16 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
     {
         entry->activeRole = DefaultRoleForPlayer(*profile, player->GetGUIDLow());
         result.metadataChanged = true;
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: role not allowed, default assigned", entry->activeRole);
     }
     result.role = entry->activeRole;
 
     if (result.metadataChanged)
-        PersistMetadata(entry);
+        PersistMetadata(entry);   // cb:fold persist detail, outcome carried in result
 
     if (!IsCompatible(actual, *profile))
     {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: conflict with profile, preserving talents");
         result.status = TALENT_REPAIR_CONFLICT;
         entry->talentProfileState = PB_TALENT_PROFILE_CONFLICT;
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -402,10 +420,11 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
             ++plannedPoints;
             uint8 desiredRank = ++plannedRanks[chunk.talentId];
             if (actual[chunk.talentId] >= desiredRank)
-                continue;
+                continue;   // cb:fold per-purchase replay, already learned
 
             if (!player->GetFreeTalentPoints())
             {
+                CB_HITV(player->GetGUIDLow(), "cpp-talent: no free point, stopped safely", plannedPoints);
                 result.status = TALENT_REPAIR_ERROR;
                 entry->talentProfileState = PB_TALENT_PROFILE_ERROR;
                 sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -417,6 +436,7 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
 
             if (!player->LearnTalent(chunk.talentId, desiredRank - 1))
             {
+                CB_HITV(player->GetGUIDLow(), "cpp-talent: learn talent failed, stopped safely", chunk.talentId);
                 result.status = TALENT_REPAIR_ERROR;
                 entry->talentProfileState = PB_TALENT_PROFILE_ERROR;
                 sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
@@ -435,6 +455,7 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
     entry->talentProfileState = PB_TALENT_PROFILE_USABLE;
     if (result.learnedPoints)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: points learned for profile", result.learnedPoints);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TALENT] %s (guid %u) learned %u point(s) for %s; %u free remain",
             player->GetName(), player->GetGUIDLow(), result.learnedPoints,
@@ -446,7 +467,7 @@ AiBotTalents::RepairResult AiBotTalents::EnsureProfileAndTalents(Player* player,
 bool AiBotTalents::CaptureSnapshot(Player const* player, PlayerBotEntry const* entry, TalentSnapshot& snapshot)
 {
     if (!player || !entry)
-        return false;
+        return false;   // cb:fold guard, null player or entry
 
     snapshot.talents.clear();
     TalentRanks ranks;
@@ -468,7 +489,7 @@ bool AiBotTalents::CaptureSnapshot(Player const* player, PlayerBotEntry const* e
 bool AiBotTalents::RestoreSnapshot(Player* player, PlayerBotEntry* entry, TalentSnapshot const& snapshot)
 {
     if (!player || !entry)
-        return false;
+        return false;   // cb:fold guard, null player or entry
 
     // ResetTalents(true) returns false when no points are spent. That is still a
     // successful empty reset, so restoration is verified from the final ranks.
@@ -482,10 +503,10 @@ bool AiBotTalents::RestoreSnapshot(Player* player, PlayerBotEntry* entry, Talent
         for (size_t i = 0; i < snapshot.talents.size(); ++i)
         {
             if (applied[i])
-                continue;
+                continue;   // cb:fold replay scan, already applied
             TalentSnapshotEntry const& saved = snapshot.talents[i];
             if (saved.rank && player->LearnTalent(saved.talentId, saved.rank - 1))
-            {
+            { // cb:fold per-entry replay, restore outcome probed below
                 applied[i] = true;
                 progress = true;
             }
@@ -493,6 +514,7 @@ bool AiBotTalents::RestoreSnapshot(Player* player, PlayerBotEntry* entry, Talent
     }
 
     bool const exact = SnapshotMatches(player, snapshot);
+    CB_HITV(player->GetGUIDLow(), "cpp-talent: snapshot restore verified", exact ? 1 : 0);
     entry->specTab = snapshot.specTab;
     entry->activeRole = snapshot.activeRole;
     entry->talentProfileState = exact
@@ -519,10 +541,11 @@ AiBotTalents::ApplyResult AiBotTalents::ApplyProfileAndRole(Player* player, Play
 {
     ApplyResult result;
     if (!player || !entry)
-        return result;
+        return result;   // cb:fold guard, null player or entry
 
     if (!ValidateProfiles())
     {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: apply refused, catalog disabled");
         result.status = TALENT_APPLY_DISABLED;
         return result;
     }
@@ -530,14 +553,19 @@ AiBotTalents::ApplyResult AiBotTalents::ApplyProfileAndRole(Player* player, Play
     TalentProfile const* profile = FindProfile(player->GetClass(), specTab);
     if (!profile)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: apply refused, unknown profile", specTab);
         result.status = TALENT_APPLY_INVALID_PROFILE;
         return result;
     }
 
     if (role == ROLE_INVALID)
+    {
         role = DefaultRoleForPlayer(*profile, player->GetGUIDLow());
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: invalid role, defaulted", (double)role);
+    }
     if (!IsAllowedRole(*profile, role))
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: apply refused, role not allowed", role);
         result.status = TALENT_APPLY_INVALID_ROLE;
         return result;
     }
@@ -545,18 +573,23 @@ AiBotTalents::ApplyResult AiBotTalents::ApplyProfileAndRole(Player* player, Play
 
     if (!resetTalents && entry->specTab != specTab)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: apply refused, reset required for spec change", specTab);
         result.status = TALENT_APPLY_RESET_REQUIRED;
         return result;
     }
 
     TalentSnapshot before;
     if (!CaptureSnapshot(player, entry, before))
+    {
+        CB_HIT(player->GetGUIDLow(), "cpp-talent: apply aborted, snapshot capture failed");
         return result;
+    }
     for (TalentSnapshotEntry const& saved : before.talents)
         result.removedPoints += saved.rank;
 
     if (!resetTalents)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: role-only change applied", role);
         entry->specTab = specTab;
         entry->activeRole = role;
         PersistMetadata(entry);
@@ -577,6 +610,7 @@ AiBotTalents::ApplyResult AiBotTalents::ApplyProfileAndRole(Player* player, Play
     if ((repair.status == TALENT_REPAIR_ALIGNED || repair.status == TALENT_REPAIR_UPDATED) &&
         entry->talentProfileState == PB_TALENT_PROFILE_USABLE)
     {
+        CB_HITV(player->GetGUIDLow(), "cpp-talent: profile applied and persisted", result.learnedPoints);
         // EnsureProfileAndTalents only persists when it normalizes metadata. This
         // explicit operation always persists the caller's validated selection.
         PersistMetadata(entry);
@@ -585,6 +619,7 @@ AiBotTalents::ApplyResult AiBotTalents::ApplyProfileAndRole(Player* player, Play
     }
 
     result.rollbackSucceeded = RestoreSnapshot(player, entry, before);
+    CB_HITV(player->GetGUIDLow(), "cpp-talent: apply failed, rollback attempted", result.rollbackSucceeded ? 1 : 0);
     result.status = result.rollbackSucceeded ? TALENT_APPLY_FAILED : TALENT_APPLY_ROLLBACK_FAILED;
     return result;
 }
@@ -593,13 +628,13 @@ char const* AiBotTalents::GetApplyStatusCode(TalentApplyStatus status)
 {
     switch (status)
     {
-        case TALENT_APPLY_OK: return "ok";
-        case TALENT_APPLY_DISABLED: return "catalog_disabled";
-        case TALENT_APPLY_INVALID_PROFILE: return "invalid_profile";
-        case TALENT_APPLY_INVALID_ROLE: return "invalid_role";
-        case TALENT_APPLY_RESET_REQUIRED: return "reset_required";
-        case TALENT_APPLY_ROLLBACK_FAILED: return "rollback_failed";
-        default: return "apply_failed";
+        case TALENT_APPLY_OK: return "ok";                                 // cb:fold pure status code lookup, no bot context
+        case TALENT_APPLY_DISABLED: return "catalog_disabled";             // cb:fold pure status code lookup, no bot context
+        case TALENT_APPLY_INVALID_PROFILE: return "invalid_profile";       // cb:fold pure status code lookup, no bot context
+        case TALENT_APPLY_INVALID_ROLE: return "invalid_role";             // cb:fold pure status code lookup, no bot context
+        case TALENT_APPLY_RESET_REQUIRED: return "reset_required";         // cb:fold pure status code lookup, no bot context
+        case TALENT_APPLY_ROLLBACK_FAILED: return "rollback_failed";       // cb:fold pure status code lookup, no bot context
+        default: return "apply_failed";                                    // cb:fold pure status code lookup, no bot context
     }
 }
 

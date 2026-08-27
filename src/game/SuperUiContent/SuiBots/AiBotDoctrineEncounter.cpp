@@ -21,11 +21,20 @@
 
 #include "AiBotDoctrine.h"
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
+#include "Player.h"       // [CIRCUIT] GetGUIDLow on the bot player (probe guid)
 
 #include <memory>
 
 namespace
 {
+
+// [CIRCUIT] Null-safe guid for probes; evaluated only inside an armed probe.
+uint32 CbGuid(AiBotAI const& bot)
+{
+    Player* p = bot.GetBotPlayer();
+    return p ? p->GetGUIDLow() : 0;
+}
 
 class AiBotDoctrineEncounterPlay final : public IEngagementDoctrine
 {
@@ -45,7 +54,10 @@ public:
     Unit* MaintainTarget(AiBotAI& bot, Unit* victim) override
     {
         if (Unit* add = bot.RaidPlanPreferredAdd())
+        {
+            CB_HIT(CbGuid(bot), "cpp-doctrine: encounter, committing to assigned add");
             return add;
+        }
         return m_inner->MaintainTarget(bot, victim);
     }
 

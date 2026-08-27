@@ -82,6 +82,7 @@
 #define BRIDGE_RECONNECT_MAX  30000      // ms max reconnect delay
 #define BRIDGE_RECV_BUF_SIZE  4096       // inbound buffer
 #define BRIDGE_SEND_BUF_MAX   65536      // outbound queue cap (bytes) — drop oldest past this
+#define BRIDGE_PROTOCOL_VERSION 4        // v4: terminal EVENTs echo top-level cbt for exact WAIT ownership
 
 // Movement point IDs
 #define AIBOT_POINT_WANDER          100
@@ -91,6 +92,8 @@
 #define AIBOT_POINT_STALEMATE_NUDGE 104  // short hop to break an in-combat stalemate
 #define AIBOT_POINT_OVERPULL_FLEE   105  // retreat hop away from a too-dense pull
 #define AIBOT_POINT_PULL_RETREAT    106  // proactive pull: drag a freshly-tagged mob back to open ground
+#define AIBOT_POINT_INTERACT_NPC    107  // bridge-owned NPC approach; never aliases a task arrival
+#define AIBOT_MOVE_POINT_REFUSED_INTERVAL 10000 // ms; autonomous NOPATH telemetry is rate-limited per bot
 #define AIBOT_ARRIVE_JITTER_MIN 0.2f     // never path to the EXACT dest coord (it can land on a bad poly / seam edge → off-mesh).
 #define AIBOT_ARRIVE_JITTER_MAX 2.0f     //   instead resolve to a validated point this far out, random angle — fans bots out + dodges the bad poly.
 #define AIBOT_ARRIVE_JITTER_TRIES 16     // ring samples to try before giving up and using the exact coord (lets a real no_path surface).
@@ -280,6 +283,7 @@ enum AiBotTask : uint8
 struct AiBotTaskData
 {
     AiBotTask type       = TASK_IDLE;
+    uint64 commandCbt    = 0;       // protocol-v4 owner of async terminal outcomes for this task
     uint32 questId       = 0;
     float x              = 0.0f;
     float y              = 0.0f;
@@ -318,18 +322,19 @@ struct AiBotTaskData
     bool MatchesObjectiveEntry(uint32 entry) const
     {
         if (entry == 0)
-            return false;
+            return false;   // cb:fold pure helper on task data, no bot in reach
         if (entry == creatureEntry)
-            return true;
+            return true;   // cb:fold pure helper on task data, no bot in reach
         for (int i = 0; i < MAX_ALT_ENTRIES; ++i)
             if (altCreatureEntries[i] == entry)
-                return true;
+                return true;   // cb:fold pure helper on task data, no bot in reach
         return false;
     }
 
     void Clear()
     {
         type = TASK_IDLE;
+        commandCbt = 0;
         questId = 0;
         x = y = z = radius = 0.0f;
         npcGuid = 0;
@@ -431,6 +436,20 @@ public:
         BridgeDisconnect();
     }
 
+    // The brain socket is otherwise closed only by ~AiBotAI -- but a PlayerBot's AI is
+    // NOT destroyed on logout: PlayerBotEntry::ai keeps owning it so the bot can be
+    // re-added (".bot delete" parks the entry at PB_STATE_OFFLINE for ".bot add_all").
+    // Without this override the fd, and the C# brain's view of a bot that is already
+    // gone, both outlive the logout. Player::~Player -> RemoveAI() virtual-dispatches
+    // here, so the socket closes on exactly the right edge, while PlayerBotAI::Remove()
+    // still only detaches and never deletes. BridgeDisconnect() clears m_bridgeConnected,
+    // so UpdateBridgeTick -> BridgeConnect() re-establishes the link on the next login.
+    void Remove() override
+    {
+        BridgeDisconnect();
+        PlayerBotAI::Remove();
+    }
+
     bool OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess) override;
 
     // Quick-spawn name override for the ".bot addai <class> [race] [name]" path.
@@ -470,6 +489,11 @@ public:
     // (RefreshDoctrine).
     void SuiAbandonJourney()
     {
+        // A manual NPC approach is a separate bridge-owned motion. Taking the
+        // body, joining a player party, conscripting, or any other whole-journey
+        // teardown must retire that owner too; otherwise the OOC resume block
+        // can restart an obsolete interaction after the newer intent finishes.
+        CancelPendingNpcInteraction("abandon_journey");
         m_currentTask.Clear();
         ClearStoredPath();
         SuiClearWaypoints();
@@ -486,6 +510,31 @@ public:
     bool m_suiRtsHold = false;
     float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
     int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
+
+    // [SUI] Fix B — arrival-callback interrupt guard. StopMoving() Clears the MotionMaster, which
+    // finalizes the in-flight point generator SYNCHRONOUSLY; the base PointMovementGenerator::
+    // Finalize then fires MovementInform unconditionally — a FALSE arrival at the destination we
+    // are abandoning, which otherwise re-paths the stale dest or emits a phantom TASK_COMPLETE.
+    // Raised only across the interrupt; a genuine spline completion still informs normally.
+    bool m_suiSuppressArrival = false;
+
+    // [SUI] Fix A — RTS move coalescing (<=1 per unit per world tick, latest destination wins).
+    // A flood of CMSG_SUI_ORDER move packets drains whole each tick; executing each inline runs a
+    // full navmesh pathfind per packet and thrashes the spline, hanging a single unit. ORDER_MOVE
+    // now only stashes the newest destination here; ConsumePendingSuiRtsMove issues it once per
+    // UpdateAI tick. Other order types (attack/hold/formation/waypoint) stay immediate.
+    bool  m_suiPendingMove = false;
+    float m_suiPendingMoveX = 0.f;
+    float m_suiPendingMoveY = 0.f;
+    float m_suiPendingMoveZ = 0.f;
+    void QueueSuiRtsMove(float x, float y, float z)
+    {
+        m_suiPendingMove = true;
+        m_suiPendingMoveX = x;
+        m_suiPendingMoveY = y;
+        m_suiPendingMoveZ = z;
+    }
+    void ConsumePendingSuiRtsMove();   // defined in AiBotAIMovement.cpp; called each UpdateAI tick
 
     // [SUI] Conscription: this bot is enlisted in a commander's RTS army
     // (ORDER_CONSCRIPT, sent when the client assigns it to a control group).
@@ -691,10 +740,13 @@ public:
     void BridgeConnect();
     void BridgeDisconnect();
     void BridgeSend(const char* json);   // queues a complete JSON line (never truncates)
+    void CircuitFlush();                 // [CIRCUIT] ship buffered probes (AiBotCircuit.cpp, 1 Hz)
     void BridgeFlush();                  // drains m_bridgeSendBuf; tolerates partial / EWOULDBLOCK writes
     void BridgeSendHello();
     void BridgeSendState();
     void BridgeSendEvent(const char* eventType, const char* data);
+    void BridgeSendEvent(const char* eventType, const char* data, uint64 commandCbt);
+    bool CancelPendingNpcInteraction(const char* source);
     void BridgeRecv();
     void BridgeProcessLine(const char* line);
     void BridgeHandleMoveTo(const char* json);
@@ -726,7 +778,7 @@ public:
     // Pin run speed on a MovePoint so the spline never takes MoveSplineInit's velocity==0
     // inflated-spline fallback (~52yd/s glide + the model floating off slopes). The two travel
     // splines pin this already; every OTHER mover routes through here so none can forget.
-    void MovePointRun(uint32 pointId, float x, float y, float z);
+    bool MovePointRun(uint32 pointId, float x, float y, float z, bool emitAutonomousRefusal = true);
     // Navmesh-seam crossing (cave entry/exit). RecordNavBoundary stores the seam the
     // first time we teleport across inbound; FindNavBoundaryNear lets the outbound
     // leg find the recorded outside anchor to escape back to the connected mesh.
@@ -751,6 +803,7 @@ public:
     void BridgeHandleLoadRotation(const char* json); // [ROTATION] load/replace/clear the custom slate (pipe payload, resolves SpellEntry at load)
     void BridgeHandleApplyCombatLoadout(const char* json); // correlated, core-authoritative talent/profile/role/rotation mutation
     void BridgeHandleLoadRaidPlan(const char* json); // [RAID-PLAN] adopt this bot's raid-plan slice (PLAN_19 M-C; executes at M-D)
+    void BridgeHandleCircuitTrace(const char* json); // [CIRCUIT] mode/ship toggle from C# (CIRCUIT_BOARD.md R6)
     void BridgeHandleRepairItems(const char* json);
     char const* GetTalentProfileStateName() const;
     char const* GetEffectiveRotationSource() const;
@@ -855,6 +908,16 @@ public:
     // m_pathIndex is the NEXT waypoint to walk toward.
     std::vector<Vector3> m_pathWaypoints;
     uint32 m_pathIndex = 0;
+    // A task replacement raises this before the old generator is cleared. It also remains raised
+    // when combat defers that Clear, so a late command-A callback cannot read command B's task/cbt.
+    // StopMoving releases it only after the synchronous MotionMaster::Clear finalizer returns.
+    bool m_suppressTaskDestInform = false;
+    uint32 m_lastMovePointRefusedMs = 0;
+
+    // INTERACT_NPC owns a distinct point id and outcome correlation. It may temporarily interrupt
+    // an autonomous task, but its arrival can never masquerade as that task's TASK_COMPLETE.
+    ObjectGuid m_pendingInteractNpcGuid;
+    uint64 m_pendingInteractNpcCbt = 0;
 
     // [FINDING_017] Continuation progress gate: tracks distance-to-dest across
     // leg-exhausted continuations of one TASK_MOVE_TO dest. Re-armed when the
@@ -1023,6 +1086,7 @@ public:
     BridgeSocket m_bridgeSocket;
     bool m_bridgeConnected = false;
     bool m_bridgeHelloSent = false;
+    uint64 m_bridgeDispatchCbt = 0;      // exact cbt of the command handler currently on this stack
     uint32 m_bridgeStateTimer = 0;
     uint32 m_bridgeReconnectTimer = 0;
     uint32 m_bridgeReconnectDelay = BRIDGE_RECONNECT_BASE;

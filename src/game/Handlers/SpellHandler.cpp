@@ -37,12 +37,19 @@ using namespace Spells;
 void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packet)
 {
     Player* pUser = _player;
+    // [SUI] While possessing, the item is used BY the possessed bot from ITS OWN bags — the item
+    // twin of the GetSuiActor cast path (HandleCastSpellOpcode). Equip-error feedback below still
+    // goes to the commander's session (pUser), never the sessionless bot, exactly as the cast path
+    // sends its results to the commander; only the lookup, the use-gates and the actual use act as
+    // the bot (pActor).
+    Player* pActor = GetSuiActor();
+    bool suiActing = pActor != _player;
 
-    // ignore for remote control state
-    if (!pUser->IsSelfMover())
+    // ignore for remote control state (SUI possession counts as self-control)
+    if (!pUser->IsSelfMover() && !suiActing)
         return;
 
-    Item *pItem = pUser->GetItemByPos(packet.bagIndex, packet.slot);
+    Item *pItem = pActor->GetItemByPos(packet.bagIndex, packet.slot);
     if (!pItem)
     {
         pUser->SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, nullptr, nullptr);
@@ -71,7 +78,7 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
         return;
     }
 
-    InventoryResult msg = pUser->CanUseItem(pItem);
+    InventoryResult msg = pActor->CanUseItem(pItem);
     if (msg != EQUIP_ERR_OK)
     {
         pUser->SendEquipError(msg, pItem, nullptr);
@@ -85,7 +92,7 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
         return;
     }
 
-    if (pUser->IsInCombat())
+    if (pActor->IsInCombat())
     {
         for (const auto& itr : proto->Spells)
         {
@@ -105,17 +112,17 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
     {
         if (!pItem->IsSoulBound())
         {
-            pItem->SetState(ITEM_CHANGED, pUser);
+            pItem->SetState(ITEM_CHANGED, pActor);
             pItem->SetBinding(true);
         }
     }
 
-    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(_player);
+    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pActor);
     SpellCastResult itemCastCheckResult = SPELL_CAST_OK;
 
     if (!pItem->IsTargetValidForItemUse(packet.targets.getUnitTarget()))
         itemCastCheckResult = SPELL_FAILED_BAD_TARGETS;
-    else if (pUser->IsShapeShifted())
+    else if (pActor->IsShapeShifted())
     {
         // World of Warcraft Client Patch 1.10.0 (2006-03-28)
         // - All shapeshift forms can now use equipped items.
@@ -137,7 +144,7 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
         return;
     }
 
-    pUser->CastItemUseSpell(pItem, const_cast<SpellCastTargets&>(packet.targets));
+    pActor->CastItemUseSpell(pItem, const_cast<SpellCastTargets&>(packet.targets));
 }
 
 void WorldSession::HandleOpenItemOpcode(WorldPackets::Spell::OpenItem const& packet)
