@@ -647,6 +647,48 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // Retreat hop landed — go idle; HandleOverpullRetreat re-evaluates next tick.
             me->GetMotionMaster()->MoveIdle();
         }
+        else if (Data == AIBOT_POINT_INTERACT_NPC)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: NPC interaction approach point reached");
+            if (m_suiSuppressArrival)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: NPC approach cancellation callback suppressed");
+                return;
+            }
+
+            uint64 const interactCbt = m_pendingInteractNpcCbt;
+            ObjectGuid const npcGuid = m_pendingInteractNpcGuid;
+            m_pendingInteractNpcGuid.Clear();
+            m_pendingInteractNpcCbt = 0;
+            if (npcGuid.IsEmpty())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: NPC approach arrived without an owner");
+                return;
+            }
+
+            Creature* pNpc = me->GetMap()->GetCreature(npcGuid);
+            if (!pNpc)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: NPC approach target disappeared");
+                BridgeSendEvent("NPC_INTERACT_FAIL", "reason=npc_lost|source=interact_npc", interactCbt);
+                return;
+            }
+
+            float const npcDist = me->GetDistance(pNpc);
+            if (npcDist > 10.0f)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-task: NPC approach ended too far away", npcDist);
+                char eventData[128];
+                snprintf(eventData, sizeof(eventData),
+                    "reason=too_far|source=interact_npc|dist=%.1f", npcDist);
+                BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+                return;
+            }
+
+            CB_HIT(me->GetGUIDLow(), "cpp-task: NPC approach arrived, interaction emitted");
+            me->SetFacingToObject(pNpc);
+            BridgeSendEvent("NPC_INTERACT", pNpc->GetName(), interactCbt);
+        }
         else if (Data == AIBOT_POINT_TASK_DEST)
         {
             // [SUI] Fix B: ignore the arrival callback when it is really an interrupt. StopMoving()
@@ -655,6 +697,11 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             if (m_suiSuppressArrival)
             {
                 CB_HIT(me->GetGUIDLow(), "cpp-task: arrival suppressed (interrupt, not a real arrival)");
+                return;
+            }
+            if (m_suppressTaskDestInform)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: stale task-dest finalizer suppressed");
                 return;
             }
             CB_HIT(me->GetGUIDLow(), "cpp-task: task dest point reached");
@@ -739,7 +786,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
                             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|start_isolated=%u",
                             m_currentTask.x, m_currentTask.y, m_currentTask.z,
                             IsStartIsolated() ? 1u : 0u);   // [FINDING_020] tag start-side failures
-                        BridgeSendEvent("MOVE_FAILED", eventData);
+                        BridgeSendEvent("MOVE_FAILED", eventData, m_currentTask.commandCbt);
 
                         m_contLastDist = -1.0f;
                         m_contNoProgress = 0;
@@ -777,7 +824,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             char arrBuf[96];
             snprintf(arrBuf, sizeof(arrBuf), "MOVE_TO arrived|x=%.1f|y=%.1f|z=%.1f",
                      me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
-            BridgeSendEvent("TASK_COMPLETE", arrBuf);
+            BridgeSendEvent("TASK_COMPLETE", arrBuf, m_currentTask.commandCbt);
             m_currentTask.Clear();
             ClearStoredPath();
 
@@ -1866,7 +1913,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT] %s: flight complete (arrived at node %u)",
                 me->GetName(), m_currentTask.taxiDestNode);
-            BridgeSendEvent("FLIGHT_COMPLETE", "");
+            BridgeSendEvent("FLIGHT_COMPLETE", "", m_currentTask.commandCbt);
             m_currentTask.Clear();
             // Don't return — fall through to normal idle behavior this tick
         }
@@ -2008,6 +2055,41 @@ void AiBotAI::UpdateAI(uint32 const diff)
             AttackStart(pVictim);
         }
         return;
+    }
+
+    // Finish any task replacement that combat forced us to defer. The old generator is cleared
+    // under both cancellation guards before the new task can scan, move, or publish an outcome.
+    if (!me->IsInCombat() && m_suppressTaskDestInform)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: applying deferred task preemption OOC");
+        StopMoving();
+
+        // SET_TASK GRIND also deferred its initial approach so combat remained untouched. Own the
+        // first path refusal here, exactly as the synchronous handler does, instead of letting a
+        // random patrol report only autonomous telemetry and burn the correlated WAIT deadline.
+        if (m_currentTask.type == TASK_GRIND &&
+            me->GetDistance2d(m_currentTask.x, m_currentTask.y) > m_currentTask.radius)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: deferred GRIND replacement needs initial approach");
+            if (!MovePointRun(AIBOT_POINT_GRIND_PATROL,
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z, false))
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: deferred GRIND approach NOPATH, terminal fail");
+                uint64 const taskCbt = m_currentTask.commandCbt;
+                char eventData[256];
+                snprintf(eventData, sizeof(eventData),
+                    "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|source=set_task_approach|start_isolated=%u",
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z,
+                    IsStartIsolated() ? 1u : 0u);
+                m_currentTask.Clear();
+                BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
+            }
+            else
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: deferred GRIND approach issued, motion owns tick");
+                return;
+            }
+        }
     }
 
     // --- Out of combat: eat/drink — [EAT-HYST] hysteresis latch (2026-07-05) ---
@@ -2174,7 +2256,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                             "[AIBOT] %s: GRIND task complete (%d/%d kills)",
                             me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
-                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished");
+                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
                         m_currentTask.Clear();
                     }
                 }
@@ -2188,6 +2270,56 @@ void AiBotAI::UpdateAI(uint32 const diff)
             CB_HIT(me->GetGUIDLow(), "cpp-main: caching victim for kill detection");
             m_lastVictimEntry = static_cast<Creature*>(pVictim)->GetEntry();
             m_lastVictimGuidLow = pVictim->GetGUIDLow();
+        }
+
+        // A manual NPC approach temporarily owns OOC movement without stealing the autonomous
+        // task or its cbt. Natural arrival clears it in MovementInform; combat or another mover may
+        // interrupt the spline, in which case resume here before task/follow logic can overwrite it.
+        if (!m_pendingInteractNpcGuid.IsEmpty())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: pending NPC interaction owns OOC movement");
+            if (me->IsMoving())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: NPC interaction approach still moving");
+                return;
+            }
+
+            uint64 const interactCbt = m_pendingInteractNpcCbt;
+            Creature* pNpc = me->GetMap()->GetCreature(m_pendingInteractNpcGuid);
+            if (!pNpc)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: pending NPC interaction target disappeared");
+                m_pendingInteractNpcGuid.Clear();
+                m_pendingInteractNpcCbt = 0;
+                BridgeSendEvent("NPC_INTERACT_FAIL", "reason=npc_lost|source=interact_npc", interactCbt);
+                return;
+            }
+
+            float const npcDist = me->GetDistance(pNpc);
+            if (npcDist <= 10.0f)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-task: interrupted NPC approach is now in range", npcDist);
+                m_pendingInteractNpcGuid.Clear();
+                m_pendingInteractNpcCbt = 0;
+                me->SetFacingToObject(pNpc);
+                BridgeSendEvent("NPC_INTERACT", pNpc->GetName(), interactCbt);
+                return;
+            }
+
+            float nx, ny, nz;
+            pNpc->GetContactPoint(me, nx, ny, nz);
+            if (!MovePointRun(AIBOT_POINT_INTERACT_NPC, nx, ny, nz, false))
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: resumed NPC approach NOPATH, terminal fail");
+                m_pendingInteractNpcGuid.Clear();
+                m_pendingInteractNpcCbt = 0;
+                char eventData[192];
+                snprintf(eventData, sizeof(eventData),
+                    "reason=no_path|source=interact_npc|dest_x=%.1f|dest_y=%.1f|dest_z=%.1f",
+                    nx, ny, nz);
+                BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+            }
+            return;
         }
 
         // ── [PLAYERPARTY] Escort mode (2026-07-07): a REAL player leads this group ──
@@ -2389,7 +2521,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         "x=%.1f|y=%.1f|z=%.1f|entry=%u|reason=no_target",
                         m_currentTask.x, m_currentTask.y, m_currentTask.z,
                         m_currentTask.creatureEntry);
-                    BridgeSendEvent("GRIND_BLOCKED", ev);
+                    BridgeSendEvent("GRIND_BLOCKED", ev, m_currentTask.commandCbt);
                 }
             }
 
@@ -2524,7 +2656,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     char arrBuf[96];
                     snprintf(arrBuf, sizeof(arrBuf), "MOVE_TO arrived|x=%.1f|y=%.1f|z=%.1f",
                              me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
-                    BridgeSendEvent("TASK_COMPLETE", arrBuf);
+                    BridgeSendEvent("TASK_COMPLETE", arrBuf, m_currentTask.commandCbt);
                     m_currentTask.Clear();
                     ClearStoredPath();
                 }
@@ -2740,7 +2872,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                             "[AIBOT] %s: GRIND task complete (%d/%d kills)",
                             me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
-                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished");
+                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
                         m_currentTask.Clear();
                     }
                 }

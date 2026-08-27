@@ -134,6 +134,12 @@ namespace
 
 void AiBotAI::StopMoving()
 {
+    // Explicit movement teardown is terminal for a manual NPC approach. This
+    // central seam covers RTS ORDER_STOP / ORDER_LINK and sibling-TU callers;
+    // command handlers that know the newer owner cancel first with a more
+    // specific source, so this becomes a no-op and cannot double-emit.
+    CancelPendingNpcInteraction("stop_moving");
+
     // [SUI] Fix B: Clear() finalizes the in-flight point generator synchronously, and the base
     // Finalize fires MovementInform as a FALSE arrival at the abandoned destination. Latch the
     // guard (save/restore for re-entrancy) so the AIBOT_POINT_TASK_DEST handler ignores that
@@ -142,6 +148,9 @@ void AiBotAI::StopMoving()
     m_suiSuppressArrival = true;
     me->StopMoving();
     me->GetMotionMaster()->Clear();
+    // MotionMaster::Clear synchronously finalized every removed generator. A bridge task
+    // replacement (including one deferred through combat) can safely release its broader guard.
+    m_suppressTaskDestInform = false;
     me->GetMotionMaster()->MoveIdle();
     m_suiSuppressArrival = prevSuppress;
 }
@@ -153,10 +162,13 @@ void AiBotAI::StopMoving()
 void AiBotAI::ConsumePendingSuiRtsMove()
 {
     if (!m_suiPendingMove)
-        return;
+        return; // cb:fold high-frequency coalescer no-op; the pending drain is observed below
     m_suiPendingMove = false;
     if (!me || !me->IsInWorld() || me->IsBeingTeleported())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-move: queued RTS move discarded, actor unavailable");
         return;
+    }
     SuiClearWaypoints();
     char json[192];
     snprintf(json, sizeof(json),
@@ -645,7 +657,9 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
             x, y, z,
             unsafeX, unsafeY, unsafeZ,
             dangerLevel, me->GetLevel());
-        BridgeSendEvent("PATH_UNSAFE", eventData);
+        uint64 const taskCbt = m_currentTask.commandCbt;
+        SuiAbandonJourney();
+        BridgeSendEvent("PATH_UNSAFE", eventData, taskCbt);
         return;
     }
 
@@ -698,7 +712,11 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         me->NearTeleportTo(origX, origY, z, me->GetOrientation());
 
         CB_HIT(me->GetGUIDLow(), "cpp-move: seam crossed, emitting arrival");
-        BridgeSendEvent("TASK_COMPLETE", "MOVE_TO arrived (seam crossed)");
+        char arrBuf[128];
+        snprintf(arrBuf, sizeof(arrBuf),
+            "MOVE_TO arrived (seam crossed)|x=%.1f|y=%.1f|z=%.1f",
+            me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+        BridgeSendEvent("TASK_COMPLETE", arrBuf, m_currentTask.commandCbt);
         m_currentTask.Clear();
         ClearStoredPath();
         return;
@@ -829,8 +847,9 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|start_isolated=%u",
             x, y, z, startIsolated ? 1u : 0u);
+        uint64 const taskCbt = m_currentTask.commandCbt;
         SuiAbandonJourney();
-        BridgeSendEvent("MOVE_FAILED", eventData);
+        BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
         return;
     }
 
@@ -847,8 +866,9 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=empty_path|start_isolated=%u",
             x, y, z, IsStartIsolated() ? 1u : 0u);   // [FINDING_020]
+        uint64 const taskCbt = m_currentTask.commandCbt;
         SuiAbandonJourney();
-        BridgeSendEvent("MOVE_FAILED", eventData);
+        BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
         return;
     }
 
@@ -890,8 +910,9 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|start_isolated=%u",
             x, y, z, startIsolated ? 1u : 0u);
+        uint64 const taskCbt = m_currentTask.commandCbt;
         SuiAbandonJourney();
-        BridgeSendEvent("MOVE_FAILED", eventData);
+        BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
         return;
     }
 
@@ -1413,7 +1434,7 @@ void AiBotAI::UpdateMovementTrace(uint32 diff)
 // hops, the interact approach. They all route here now. Clamp matches the travel pin: >9
 // (>~1.3x run) is not legit for these bots.
 // ============================================================
-void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
+bool AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z, bool emitAutonomousRefusal)
 {
     // [WALL-CLIP GUARD] (FINDING_011) MOVE_PATHFINDING is NOT a guarantee of a walkable route:
     // MoveSplineInit::MoveTo runs the PathFinder and feeds Move(&path) UNCONDITIONALLY, and on
@@ -1431,7 +1452,26 @@ void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: MovePointRun NOPATH to (%.1f, %.1f, %.1f) — refusing straight-line shortcut (wall-clip guard, point %u)",
             me->GetName(), x, y, z, pointId);
-        return;
+        // Command/task callers pass false and emit their own correlated terminal outcome.
+        // Autonomous wander/patrol/combat hops use a distinct, rate-limited diagnostic event;
+        // it must never be mistaken for MOVE_FAILED or poison durable destination bookkeeping.
+        if (emitAutonomousRefusal)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: autonomous MovePoint refusal eligible for telemetry", pointId);
+            uint32 const now = WorldTimer::getMSTime();
+            if (m_lastMovePointRefusedMs == 0 ||
+                WorldTimer::getMSTimeDiff(m_lastMovePointRefusedMs, now) >= AIBOT_MOVE_POINT_REFUSED_INTERVAL)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: autonomous MovePoint refusal telemetry emitted", pointId);
+                m_lastMovePointRefusedMs = now;
+                char eventData[224];
+                snprintf(eventData, sizeof(eventData),
+                    "reason=no_path|source=move_point|point_id=%u|dest_x=%.1f|dest_y=%.1f|dest_z=%.1f",
+                    pointId, x, y, z);
+                BridgeSendEvent("MOVE_POINT_REFUSED", eventData, 0);
+            }
+        }
+        return false;
     }
 
     float useSpeed = me->GetSpeed(MOVE_RUN);
@@ -1441,6 +1481,7 @@ void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
         useSpeed = 7.0f;
     }
     me->GetMotionMaster()->MovePoint(pointId, x, y, z, MOVE_PATHFINDING, useSpeed);
+    return true;
 }
 
 

@@ -4,7 +4,7 @@
  * Split from the monolithic AiBotAI.cpp. THIS TU holds the bridge domain:
  *   - the non-blocking TCP transport (connect / disconnect / send / flush / recv)
  *   - HELLO / STATE / EVENT senders
- *   - the file-local minimal JSON extractors (JsonExtractFloat/Int/String)
+ *   - the file-local minimal JSON extractors (JsonExtractFloat/Int/UInt64/String)
  *   - BridgeProcessLine dispatch + every BridgeHandle* command handler
  *   - the C++→C# event senders (SendKillEvent / SendQuestUpdateEvent / SendLevelUpEvent /
  *     SendChatRecvEvent)
@@ -218,14 +218,14 @@ void AiBotAI::BridgeSendHello()
     char json[768];
     snprintf(json, sizeof(json),
         "{\"type\":\"HELLO\",\"payload\":{"
-        "\"guid\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
+        "\"guid\":%u,\"bridgeProtocol\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
         "\"level\":%u,\"specTab\":%u,\"specProfile\":\"%s\",\"activeRole\":%u,"
         "\"talentProfileState\":\"%s\",\"rotationSource\":\"%s\","
         "\"rotationProfile\":\"%s\",\"rotationInstructionCount\":%u,"
         "\"rotationCastableCount\":%u,\"combatConfigRevision\":%u,"
         "\"mapId\":%u,\"zoneId\":%u,"
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-        me->GetGUIDLow(), me->GetName(), me->GetRace(), me->GetClass(),
+        me->GetGUIDLow(), uint32(BRIDGE_PROTOCOL_VERSION), me->GetName(), me->GetRace(), me->GetClass(),
         me->GetLevel(), botEntry ? uint32(botEntry->specTab) : 255u,
         specProfile, uint32(m_role), GetTalentProfileStateName(),
         GetEffectiveRotationSource(), GetEffectiveRotationProfile(),
@@ -521,19 +521,47 @@ void AiBotAI::BridgeSendState()
 
 void AiBotAI::BridgeSendEvent(const char* eventType, const char* data)
 {
+    // A two-argument outcome is synchronous when called from a command handler and
+    // unsolicited otherwise; m_bridgeDispatchCbt is nonzero only for that dispatch stack.
+    BridgeSendEvent(eventType, data, m_bridgeDispatchCbt);
+}
+
+void AiBotAI::BridgeSendEvent(const char* eventType, const char* data, uint64 commandCbt)
+{
     if (!m_bridgeConnected)
     {
         CB_HITN(me->GetGUIDLow(), "cpp-bridge: event dropped, not connected", eventType);
         return;
     }
 
-    char json[512];
+    // Async owners pass their persisted cbt explicitly, including an exact zero for legacy work.
+    // That prevents a cancellation callback from borrowing the cbt of its interrupting command.
+    char json[768];
     snprintf(json, sizeof(json),
-        "{\"type\":\"EVENT\",\"payload\":{"
+        "{\"type\":\"EVENT\",\"cbt\":" UI64FMTD ",\"payload\":{"
         "\"guid\":%u,\"event\":\"%s\",\"data\":\"%s\"}}",
-        me->GetGUIDLow(), eventType, data);
+        commandCbt, me->GetGUIDLow(), eventType, data);
 
     BridgeSend(json);
+}
+
+bool AiBotAI::CancelPendingNpcInteraction(const char* source)
+{
+    if (m_pendingInteractNpcGuid.IsEmpty())
+        return false; // cb:fold no pending manual approach to cancel
+
+    // A newer motion owner must retire the older INTERACT_NPC before it clears or replaces the
+    // point generator. Otherwise its suppressed cancellation callback leaves this owner alive and
+    // the OOC resume block can mistake the newer command's spline for the old NPC approach.
+    CB_HIT(me->GetGUIDLow(), "cpp-task: pending NPC interaction preempted by newer motion owner");
+    uint64 const interactCbt = m_pendingInteractNpcCbt;
+    m_pendingInteractNpcGuid.Clear();
+    m_pendingInteractNpcCbt = 0;
+    char eventData[128];
+    snprintf(eventData, sizeof(eventData),
+        "reason=preempted|source=%s", source);
+    BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+    return true;
 }
 
 void AiBotAI::BridgeRecv()
@@ -626,6 +654,17 @@ static bool JsonExtractInt(const char* json, const char* key, int& out)
     return true;
 }
 
+static bool JsonExtractUInt64(const char* json, const char* key, uint64& out)
+{
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return false; // cb:fold json parse detail
+    p += strlen(pattern);
+    while (*p == ' ') p++;
+    return sscanf(p, UI64FMTD, &out) == 1; // cb:fold json parse detail
+}
+
 static bool JsonExtractString(const char* json, const char* key, char* out, int maxLen)
 {
     char pattern[64];
@@ -702,15 +741,15 @@ void AiBotAI::BridgeProcessLine(const char* line)
         return;
     }
 
-    // [CIRCUIT] Chain adoption (R2) + dispatch probe. C# stamps "cbt" on every
-    // envelope; recording it as a VALUE here lets the viewer stitch this side's
-    // execution to the exact C# send that caused it.
-    {
-        int cbt = 0;
-        if (JsonExtractInt(line, "cbt", cbt) && cbt > 0)
-            CB_HITV(me->GetGUIDLow(), "cpp-chain: command adopted", cbt);
-        CB_HITN(me->GetGUIDLow(), "cpp-bridge: dispatch", msgType);
-    }
+    // Protocol v4 promotes cbt from trace-only metadata to behavioral ownership. Preserve a
+    // prior value in case a locally-injected command ever nests dispatch on this same stack.
+    uint64 cbt = 0;
+    JsonExtractUInt64(line, "cbt", cbt);
+    uint64 const previousDispatchCbt = m_bridgeDispatchCbt;
+    m_bridgeDispatchCbt = cbt;
+    if (cbt > 0)
+        CB_HITV(me->GetGUIDLow(), "cpp-chain: command adopted", static_cast<double>(cbt));
+    CB_HITN(me->GetGUIDLow(), "cpp-bridge: dispatch", msgType);
 
     // [SUI] While a real player drives this bot every mutating command would
     // execute under the human's feet (MOVE_TO would yank the mover). Drop with
@@ -727,6 +766,7 @@ void AiBotAI::BridgeProcessLine(const char* line)
             me->GetName(), msgType);
         CB_HITN(me->GetGUIDLow(), "cpp-bridge: dropped (possessed)", msgType);
         BridgeSendEvent("POSSESSED_DROP", msgType);
+        m_bridgeDispatchCbt = previousDispatchCbt;
         return;
     }
 
@@ -746,6 +786,7 @@ void AiBotAI::BridgeProcessLine(const char* line)
             me->GetName(), msgType);
         CB_HITN(me->GetGUIDLow(), "cpp-bridge: dropped (conscripted)", msgType);
         BridgeSendEvent("CONSCRIPTED_DROP", msgType);
+        m_bridgeDispatchCbt = previousDispatchCbt;
         return;
     }
 
@@ -806,6 +847,7 @@ void AiBotAI::BridgeProcessLine(const char* line)
         CB_HITN(me->GetGUIDLow(), "cpp-bridge: unknown command", msgType);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: unknown command '%s'", me->GetName(), msgType);
     }
+    m_bridgeDispatchCbt = previousDispatchCbt;
 }
 
 // ============================================================
@@ -912,6 +954,7 @@ void AiBotAI::BridgeHandleTeleport(const char* json)
     // Clean reset: stop the failed approach, drop the stored path + task, then relocate.
     // The MOVE_TO that no_path'd is finished; nothing in-flight needs to survive (the
     // interaction that follows — TRAIN/SELL/REPAIR — doesn't read m_currentTask).
+    CancelPendingNpcInteraction("teleport_to");
     StopMoving();
     ClearStoredPath();
     m_currentTask.Clear();
@@ -1067,9 +1110,24 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: MOVE_TO map=%d (%.1f, %.1f, %.1f)%s",
         me->GetName(), mapId, x, y, z, entry ? " [objective]" : "");
 
+    // Preempt command A before assigning command B's task/cbt. MotionMaster::Clear finalizes
+    // point movement synchronously and calls MovementInform; both arrival guards make that
+    // cancellation callback a no-op. Combat keeps its existing defer-without-stopping behavior:
+    // the task-dest guard remains raised until the first out-of-combat tick performs the Clear.
+    m_suppressTaskDestInform = true;
+    CancelPendingNpcInteraction("move_to");
+    if (!me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: preempting prior task before cbt replacement");
+        StopMoving();
+    }
+    ClearStoredPath();
+    m_currentTask.Clear();
+
     // Stash the objective hint on the task BEFORE MoveToDestination. MoveToDestination
     // only writes type/x/y/z, so these persist through every continuation leg until the
     // approach scan or an arrival hands off to GRIND (re-centering on the bot).
+    m_currentTask.commandCbt    = m_bridgeDispatchCbt;
     m_currentTask.creatureEntry = (uint32)entry;
     m_currentTask.radius        = grindRadius;
     m_currentTask.killGoal      = killCount;
@@ -1542,6 +1600,11 @@ void AiBotAI::BridgeHandleSetEscort(const char* json)
         lowered.push_back((char)tolower((unsigned char)*p));
 
     m_escortOverrideName = lowered;
+    if (CancelPendingNpcInteraction("set_escort") && !me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: escort order tears down preempted NPC approach");
+        StopMoving();
+    }
     if (m_escortOverrideName.empty())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-group: escort override cleared, auto split resumes");
@@ -2276,6 +2339,15 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: attacking %s (guid %d)",
         me->GetName(), pCreature->GetName(), guidLow);
+    if (CancelPendingNpcInteraction("attack_target"))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: attack order tears down preempted NPC approach");
+        // AttackStart is a no-op for the already-selected victim. Retire that
+        // attack first so an NPC point spline cannot survive underneath a
+        // same-target explicit attack order.
+        me->AttackStop(false);
+        StopMoving();
+    }
     AttackStart(pCreature);
 }
 
@@ -2303,6 +2375,15 @@ void AiBotAI::BridgeHandleInteractNpc(const char* json)
         return;
     }
 
+    // A newer manual interaction supersedes an older approach. StopMoving's SUI latch suppresses
+    // that point generator's synchronous cancellation callback; clear its owner before continuing.
+    if (!m_pendingInteractNpcGuid.IsEmpty())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: replacing pending NPC interaction approach");
+        CancelPendingNpcInteraction("interact_npc");
+        StopMoving();
+    }
+
     float dist = me->GetDistance(pCreature);
     if (dist > 10.0f)
     {
@@ -2310,10 +2391,26 @@ void AiBotAI::BridgeHandleInteractNpc(const char* json)
         // Too far — move closer first, then interact on arrival
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC moving to %s (dist=%.1f)",
             me->GetName(), pCreature->GetName(), dist);
+        // This is a temporary manual approach, not an autonomous-task arrival. Guard the old task
+        // finalizer, keep the task state available for later resume, and use a distinct point id.
+        m_suppressTaskDestInform = true;
         StopMoving();
+        m_pendingInteractNpcGuid = pCreature->GetObjectGuid();
+        m_pendingInteractNpcCbt = m_bridgeDispatchCbt;
         float nx, ny, nz;
         pCreature->GetContactPoint(me, nx, ny, nz);
-        MovePointRun(AIBOT_POINT_TASK_DEST, nx, ny, nz);
+        if (!MovePointRun(AIBOT_POINT_INTERACT_NPC, nx, ny, nz, false))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-bridge: INTERACT_NPC approach NOPATH, terminal fail");
+            uint64 const interactCbt = m_pendingInteractNpcCbt;
+            m_pendingInteractNpcGuid.Clear();
+            m_pendingInteractNpcCbt = 0;
+            char eventData[192];
+            snprintf(eventData, sizeof(eventData),
+                "reason=no_path|source=interact_npc|dest_x=%.1f|dest_y=%.1f|dest_z=%.1f",
+                nx, ny, nz);
+            BridgeSendEvent("NPC_INTERACT_FAIL", eventData, interactCbt);
+        }
         return;
     }
 
@@ -2335,8 +2432,17 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
     if (strcmp(taskType, "GRIND") == 0)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-task: SET_TASK GRIND adopted");
+        m_suppressTaskDestInform = true;
+        CancelPendingNpcInteraction("set_task_grind");
+        if (!me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: preempting prior task for OOC GRIND replacement");
+            StopMoving();
+        }
+        ClearStoredPath();
         m_currentTask.Clear();
         m_currentTask.type = TASK_GRIND;
+        m_currentTask.commandCbt = m_bridgeDispatchCbt;
         JsonExtractFloat(payload, "x", m_currentTask.x);
         JsonExtractFloat(payload, "y", m_currentTask.y);
         JsonExtractFloat(payload, "z", m_currentTask.z);
@@ -2361,17 +2467,35 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
 
         // Immediately move to grind area if not already there
         float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
-        if (dist > m_currentTask.radius)
+        if (!me->IsInCombat() && dist > m_currentTask.radius)
         {
             CB_HITV(me->GetGUIDLow(), "cpp-task: outside grind radius, moving to area", dist);
-            StopMoving();
-            MovePointRun(AIBOT_POINT_GRIND_PATROL,
-                m_currentTask.x, m_currentTask.y, m_currentTask.z);
+            if (!MovePointRun(AIBOT_POINT_GRIND_PATROL,
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z, false))
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: initial grind approach NOPATH, terminal fail");
+                uint64 const taskCbt = m_currentTask.commandCbt;
+                char eventData[256];
+                snprintf(eventData, sizeof(eventData),
+                    "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|reason=no_path|source=set_task_approach|start_isolated=%u",
+                    m_currentTask.x, m_currentTask.y, m_currentTask.z,
+                    IsStartIsolated() ? 1u : 0u);
+                m_currentTask.Clear();
+                BridgeSendEvent("MOVE_FAILED", eventData, taskCbt);
+            }
         }
     }
     else if (strcmp(taskType, "IDLE") == 0)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-task: SET_TASK IDLE, task cleared");
+        m_suppressTaskDestInform = true;
+        CancelPendingNpcInteraction("set_task_idle");
+        if (!me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: preempting prior task for OOC IDLE replacement");
+            StopMoving();
+        }
+        ClearStoredPath();
         m_currentTask.Clear();
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: SET_TASK IDLE (clearing task)", me->GetName());
@@ -2394,8 +2518,11 @@ void AiBotAI::BridgeHandleSetTask(const char* json)
             CB_HIT(me->GetGUIDLow(), "cpp-task: stranded escape accepted, hearth attempt");
             float fx = me->GetPositionX(), fy = me->GetPositionY(), fz = me->GetPositionZ();
             uint32 fmap = me->GetMapId();
-            m_currentTask.Clear();
+            m_suppressTaskDestInform = true;
+            CancelPendingNpcInteraction("port_home");
             StopMoving();
+            ClearStoredPath();
+            m_currentTask.Clear();
 
             // [HEARTH] Instead of the old instant TeleportTo, cast a real Hearthstone (8690) so the
             // escape shows the authentic ~10s cast bar + animation and is interrupted by damage /
@@ -2602,11 +2729,11 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
  
         char failJson[256];
         snprintf(failJson, sizeof(failJson),
-            "{\"type\":\"EVENT\",\"payload\":{"
+            "{\"type\":\"EVENT\",\"cbt\":" UI64FMTD ",\"payload\":{"
             "\"guid\":%u,\"event\":\"FLIGHT_FAILED\","
             "\"reason\":\"not_enough_money\","
             "\"have\":%u,\"need\":%u,\"cost\":%u}}",
-            me->GetGUIDLow(), me->GetMoney(), pathCost, pathCost);
+            m_bridgeDispatchCbt, me->GetGUIDLow(), me->GetMoney(), pathCost, pathCost);
         BridgeSend(failJson);
         return;
     }
@@ -2623,7 +2750,10 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     }
  
     // Stop any current movement/combat
+    m_suppressTaskDestInform = true;
+    CancelPendingNpcInteraction("take_flight");
     StopMoving();
+    ClearStoredPath();
     if (me->IsMounted())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-flight: dismounting before taxi");
@@ -2634,6 +2764,7 @@ void AiBotAI::BridgeHandleTakeFlight(const char* json)
     // Set task state so UpdateAI doesn't interfere during flight
     m_currentTask.Clear();
     m_currentTask.type = TASK_TAXI;
+    m_currentTask.commandCbt = m_bridgeDispatchCbt;
     m_currentTask.taxiSourceNode = (uint32)sourceNode;
     m_currentTask.taxiDestNode = (uint32)destNode;
  
@@ -3383,7 +3514,8 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
         return;
     }
 
-    me->StopMoving();
+    CancelPendingNpcInteraction("quest_cast");
+    StopMoving();
     me->SetFacingToObject(pTarget);
 
     bool triggered = !me->HasSpell(spellId);
