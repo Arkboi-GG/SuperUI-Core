@@ -91,6 +91,7 @@ void WorldSession::SendShowBank(ObjectGuid guid)
 
 void WorldSession::HandleTrainerListOpcode(WorldPackets::Npc::TrainerList const& packet)
 {
+    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: HandleTrainerListOpcode received, guid=%s", packet.guid.GetString().c_str());
     SendTrainerList(packet.guid);
 }
 
@@ -143,13 +144,18 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
     Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_TRAINER);
     if (!unit)
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: SendTrainerList - %s not found or you can't interact with him.", guid.GetString().c_str());
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - GetNPCIfCanInteractWith FAILED for guid=%s", guid.GetString().c_str());
         return;
     }
 
+    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - unit found, entry=%u", unit->GetEntry());
+
     // trainer list loaded at check;
     if (!unit->IsTrainerOf(_player, true))
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - IsTrainerOf FAILED for entry=%u", unit->GetEntry());
         return;
+    }
 
     CreatureInfo const* ci = unit->GetCreatureInfo();
     if (!ci)
@@ -160,9 +166,12 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
     if (!cSpells && !tSpells)
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: SendTrainerList - Training spells not found for %s", guid.GetString().c_str());
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - no cSpells/tSpells at all for entry=%u trainer_id=%u", unit->GetEntry(), ci->trainer_id);
         return;
     }
+
+    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - entry=%u trainer_id=%u cSpells=%d tSpells=%d",
+        unit->GetEntry(), ci->trainer_id, cSpells ? 1 : 0, tSpells ? 1 : 0);
 
     GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
     GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
