@@ -91,7 +91,6 @@ void WorldSession::SendShowBank(ObjectGuid guid)
 
 void WorldSession::HandleTrainerListOpcode(WorldPackets::Npc::TrainerList const& packet)
 {
-    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: HandleTrainerListOpcode received, guid=%s", packet.guid.GetString().c_str());
     SendTrainerList(packet.guid);
 }
 
@@ -144,18 +143,13 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
     Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_TRAINER);
     if (!unit)
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - GetNPCIfCanInteractWith FAILED for guid=%s", guid.GetString().c_str());
+        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: SendTrainerList - %s not found or you can't interact with him.", guid.GetString().c_str());
         return;
     }
-
-    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - unit found, entry=%u", unit->GetEntry());
 
     // trainer list loaded at check;
     if (!unit->IsTrainerOf(_player, true))
-    {
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - IsTrainerOf FAILED for entry=%u", unit->GetEntry());
         return;
-    }
 
     CreatureInfo const* ci = unit->GetCreatureInfo();
     if (!ci)
@@ -166,12 +160,9 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
     if (!cSpells && !tSpells)
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - no cSpells/tSpells at all for entry=%u trainer_id=%u", unit->GetEntry(), ci->trainer_id);
+        sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: SendTrainerList - Training spells not found for %s", guid.GetString().c_str());
         return;
     }
-
-    sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "TRAINERDEBUG3: SendTrainerList - entry=%u trainer_id=%u cSpells=%d tSpells=%d",
-        unit->GetEntry(), ci->trainer_id, cSpells ? 1 : 0, tSpells ? 1 : 0);
 
     GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
     GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
@@ -228,49 +219,22 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
     if (tSpells)
     {
-        // TEMP DIAGNOSTIC (2026-08-27, round 2, Holy Strike/Divine Strike trainer-
-        // visibility bug): re-added after the round-1 trace showed all 13 wrapper
-        // entries INCLUDED, yet the user's client still doesn't show them. Logs
-        // list size + every candidate for templates 28/29. Remove once root-caused.
-        bool debugThisTrainer = ci && (ci->trainer_id == 28 || ci->trainer_id == 29);
-        if (debugThisTrainer)
-            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-                "TRAINERDEBUG2: template %u tSpells->spellList.size()=%u maxcount=%u",
-                ci->trainer_id, (uint32)tSpells->spellList.size(), maxcount);
-
         for (const auto& itr : tSpells->spellList)
         {
             TrainerSpell const* tSpell = &itr.second;
 
             uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
 
-            bool fits = _player->IsSpellFitByClassAndRace(triggerSpell);
-
-            if (debugThisTrainer && (tSpell->spell >= 50000 && tSpell->spell <= 50012))
-                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-                    "TRAINERDEBUG2: template %u wrapper=%u trigger=%u fits=%d",
-                    ci->trainer_id, tSpell->spell, triggerSpell, fits ? 1 : 0);
-
-            if (!fits)
+            if (!_player->IsSpellFitByClassAndRace(triggerSpell))
                 continue;
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
-
-            if (debugThisTrainer && (tSpell->spell >= 50000 && tSpell->spell <= 50012))
-                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-                    "TRAINERDEBUG2: template %u wrapper=%u trigger=%u INCLUDED state=%d count-before=%u",
-                    ci->trainer_id, tSpell->spell, triggerSpell, (int)state, count);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
 
             ++count;
         }
     }
-
-    if (ci && (ci->trainer_id == 28 || ci->trainer_id == 29))
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-            "TRAINERDEBUG2: template %u FINAL count=%u maxcount=%u packetBytes=%u",
-            ci->trainer_id, count, maxcount, (uint32)data.size());
 
     data << strTitle;
 
