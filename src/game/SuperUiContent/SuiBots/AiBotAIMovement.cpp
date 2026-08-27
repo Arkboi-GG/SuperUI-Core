@@ -29,6 +29,7 @@
 #include "AiBotAIMain.h"
 #include "Movement/AiBotMovementGenerators.h"
 #include "Movement/AiBotPathSmoothing.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros + fold contract (CIRCUIT_BOARD.md)
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -90,7 +91,7 @@ namespace
     {
         time_t const now = time(nullptr);
         if (s_aibotTraceLoad != 0 && (now - s_aibotTraceLoad) < AIBOT_TRACE_LIST_RELOAD_SEC)
-            return;
+            return;   // cb:fold trace-list log machinery, no bot context
         s_aibotTraceLoad = now;
 
         s_aibotTraceNames.clear();
@@ -98,7 +99,7 @@ namespace
 
         std::ifstream in(AIBOT_TRACE_LIST_FILE);
         if (!in.is_open())
-            return;   // no file = nothing armed. Not an error, it is the default.
+            return;   // no file = nothing armed. Not an error, it is the default.   // cb:fold trace-list log machinery, no bot context
 
         std::string line;
         while (std::getline(in, line))
@@ -107,12 +108,12 @@ namespace
                 line.pop_back();
             size_t const first = line.find_first_not_of(" \t");
             if (first == std::string::npos)
-                continue;
+                continue;   // cb:fold trace-list log machinery, no bot context
             line = line.substr(first);
             if (line[0] == '#')
-                continue;
+                continue;   // cb:fold trace-list log machinery, no bot context
             if (line == "*")
-            {
+            {   // cb:fold trace-list log machinery, no bot context
                 s_aibotTraceAll = true;
                 continue;
             }
@@ -124,18 +125,44 @@ namespace
     {
         AiBotTraceReloadIfStale();
         if (s_aibotTraceAll)
-            return true;
+            return true;   // cb:fold trace-list log machinery, no bot context
         if (!botName || !*botName || s_aibotTraceNames.empty())
-            return false;
+            return false;   // cb:fold trace-list log machinery, no bot context
         return s_aibotTraceNames.find(AiBotTraceLower(botName)) != s_aibotTraceNames.end();
     }
 }
 
 void AiBotAI::StopMoving()
 {
+    // [SUI] Fix B: Clear() finalizes the in-flight point generator synchronously, and the base
+    // Finalize fires MovementInform as a FALSE arrival at the abandoned destination. Latch the
+    // guard (save/restore for re-entrancy) so the AIBOT_POINT_TASK_DEST handler ignores that
+    // re-entrant, non-arrival callback instead of re-pathing the stale dest.
+    bool const prevSuppress = m_suiSuppressArrival;
+    m_suiSuppressArrival = true;
     me->StopMoving();
     me->GetMotionMaster()->Clear();
     me->GetMotionMaster()->MoveIdle();
+    m_suiSuppressArrival = prevSuppress;
+}
+
+// [SUI] Fix A: issue at most one coalesced RTS move per tick. ORDER_MOVE stashes the newest
+// destination (QueueSuiRtsMove); this drains it once per UpdateAI tick so a flood of move packets
+// cannot each trigger a full pathfind + spline restart. A plain move replaces any queued RTS
+// waypoint chain, exactly as the old inline ORDER_MOVE did.
+void AiBotAI::ConsumePendingSuiRtsMove()
+{
+    if (!m_suiPendingMove)
+        return;
+    m_suiPendingMove = false;
+    if (!me || !me->IsInWorld() || me->IsBeingTeleported())
+        return;
+    SuiClearWaypoints();
+    char json[192];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
+        me->GetMapId(), m_suiPendingMoveX, m_suiPendingMoveY, m_suiPendingMoveZ);
+    SuiInjectCommandLine(json);
 }
 
 // ============================================================
@@ -145,18 +172,30 @@ void AiBotAI::StopMoving()
 void AiBotAI::DoRandomWander()
 {
     if (me->IsMoving() || me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: wander skip, moving or in combat");
         return;
+    }
 
     // [SUI] An RTS-commanded or enlisted bot stands where it was told; no idle stroll.
     if (m_suiRtsHold || IsSuiConscripted())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: wander skip, rts hold or conscripted");
         return;
+    }
 
     if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: wander skip, not idle motion");
         return;
+    }
 
     // Wander to a random nearby point every 10-20 seconds
     if (m_wanderTimer > 0)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: wander skip, timer pending", m_wanderTimer);
         return;
+    }
 
     m_wanderTimer = urand(10000, 20000);
 
@@ -170,7 +209,10 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
                           uint32 &dangerLevel)
 {
     if (!me || !me->IsInWorld() || !me->GetMap())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-path: safety unverifiable, allowing move");
         return true; // can't validate — allow the move
+    }
 
     uint32 botLevel = me->GetLevel();
     uint32 maxSafeLevel = botLevel + 3;
@@ -186,6 +228,7 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
     PathType pType = path.getPathType();
     if (pType & PATHFIND_NOPATH)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: safety precheck NOPATH, allowing move");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: NOPATH to (%.1f, %.1f, %.1f) — allowing (not a safety issue)",
             me->GetName(), destX, destY, destZ);
@@ -194,7 +237,10 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
 
     PointsArray const& points = path.getPath();
     if (points.empty())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: safety path empty, allowing move");
         return true;
+    }
 
     // ── 2. Walk waypoints, check creature spawns ──
     // Points are ~6yd apart. Check every 3rd = every ~18yd.
@@ -214,42 +260,42 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
 
             // Wrong map — skip
             if (data.position.mapId != myMapId)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Fast 2D distance squared
             float dx = data.position.x - pt.x;
             float dy = data.position.y - pt.y;
             float distSq = dx * dx + dy * dy;
             if (distSq > CHECK_RADIUS_SQ)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Look up creature template for level
             uint32 entry = data.creature_id[0];
             if (entry == 0)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             CreatureInfo const* cInfo = sObjectMgr.GetCreatureTemplate(entry);
             if (!cInfo)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip level-0 triggers/objects
             if (cInfo->level_max == 0)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip critters (rabbits, squirrels, etc.)
             if (cInfo->type == CREATURE_TYPE_CRITTER)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip service NPCs (vendors, trainers, quest givers, etc.)
             if (cInfo->npc_flags & (UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER |
                                     UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_FLIGHTMASTER |
                                     UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_BANKER |
                                     UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_STABLEMASTER))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip non-aggressive creatures (won't aggro the bot)
             if (cInfo->flags_extra & CREATURE_FLAG_EXTRA_NO_AGGRO)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // [FINDING_020] Skip creatures that cannot fight players at all: IMMUNE_TO_PC (applies
             // UNIT_FLAG_IMMUNE_TO_PLAYER on spawn) / UNINTERACTIBLE (UNIT_FLAG_NOT_SELECTABLE). The live
@@ -257,20 +303,21 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
             // Menethil inn and flagged EVERY path to the innkeeper / Red Jack Flint / vendors UNSAFE for the
             // whole L16-22 Wetlands cohort (57 PATH_UNSAFE / 5 min) — a holiday prop, not a threat.
             if (cInfo->static_flags1 & (CREATURE_STATIC_FLAG_IMMUNE_TO_PC | CREATURE_STATIC_FLAG_UNINTERACTIBLE))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip invisible triggers
             if (cInfo->flags_extra & CREATURE_FLAG_EXTRA_INVISIBLE)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip creatures not hostile to the bot (guards, friendly faction NPCs)
             FactionTemplateEntry const* creatureFTE = sObjectMgr.GetFactionTemplateEntry(cInfo->faction);
             if (creatureFTE && botFTE && !creatureFTE->IsHostileTo(*botFTE))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // ── Level check ──
             if (cInfo->level_max > maxSafeLevel)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: corridor UNSAFE, hostile level on path", cInfo->level_max);
                 unsafeX = pt.x;
                 unsafeY = pt.y;
                 unsafeZ = pt.z;
@@ -294,41 +341,43 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
     uint32 lastIdx = (uint32)points.size() - 1;
     if (lastIdx > 0 && (lastIdx % STEP != 0))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: checking final waypoint off-step");
         Vector3 const& pt = points[lastIdx];
 
         for (auto const& pair : allSpawns)
         {
             CreatureData const& data = pair.second;
             if (data.position.mapId != myMapId)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             float dx = data.position.x - pt.x;
             float dy = data.position.y - pt.y;
             if (dx * dx + dy * dy > CHECK_RADIUS_SQ)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             uint32 entry = data.creature_id[0];
             if (entry == 0)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             CreatureInfo const* cInfo = sObjectMgr.GetCreatureTemplate(entry);
             if (!cInfo || cInfo->level_max == 0 || cInfo->type == CREATURE_TYPE_CRITTER)
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
             if (cInfo->npc_flags & (UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER |
                                     UNIT_NPC_FLAG_QUESTGIVER | UNIT_NPC_FLAG_FLIGHTMASTER |
                                     UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_BANKER |
                                     UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_STABLEMASTER))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
             if (cInfo->flags_extra & (CREATURE_FLAG_EXTRA_NO_AGGRO | CREATURE_FLAG_EXTRA_INVISIBLE))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             // Skip creatures not hostile to the bot (guards, friendly faction NPCs)
             FactionTemplateEntry const* creatureFTE = sObjectMgr.GetFactionTemplateEntry(cInfo->faction);
             if (creatureFTE && botFTE && !creatureFTE->IsHostileTo(*botFTE))
-                continue;
+                continue;   // cb:fold hot per-spawn scan filter
 
             if (cInfo->level_max > maxSafeLevel)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: dest UNSAFE, hostile level at dest", cInfo->level_max);
                 unsafeX = pt.x;
                 unsafeY = pt.y;
                 unsafeZ = pt.z;
@@ -371,7 +420,10 @@ void AiBotAI::ClearStoredPath()
 bool AiBotAI::StartNextPathChunk()
 {
     if (m_pathWaypoints.empty() || m_pathIndex >= (uint32)m_pathWaypoints.size())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: no next chunk, stored path exhausted");
         return false;
+    }
 
     float accumulated = 0.0f;
     uint32 startIdx = m_pathIndex;
@@ -387,7 +439,10 @@ bool AiBotAI::StartNextPathChunk()
         targetIdx = i + 1;
 
         if (accumulated >= AIBOT_PATH_CHUNK_DIST)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-move: chunk cut at distance cap", accumulated);
             break;
+        }
     }
 
     Vector3 const& target = m_pathWaypoints[targetIdx];
@@ -402,7 +457,10 @@ bool AiBotAI::StartNextPathChunk()
     float const runRate  = me->GetSpeedRate(MOVE_RUN);
     float       useSpeed = runSpeed;
     if (useSpeed > 9.0f)   // vanilla on-foot run = 7.0; >9 (>~1.3x) is not legit for these L1-5 bots
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: travel speed pinned to 7", useSpeed);
         useSpeed = 7.0f;
+    }
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-PATH] %s: chunk smoothed-path to waypoint %u/%u (%.1f, %.1f, %.1f) "
@@ -438,6 +496,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 {
     if (me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: in combat, deferring MOVE_TO, task armed for resume");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-BRIDGE] %s: in combat, deferring MOVE_TO (task armed for resume)", me->GetName());
         // A fresh MOVE_TO received in combat must leave a RESUMABLE task. Previously this
@@ -467,16 +526,21 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         bool isNewJourney = !m_hasDispatchedDest;
         if (m_hasDispatchedDest)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-move: journey compare, prior dispatched dest exists");
             float const ddx = destX - m_lastDispatchedDestX;
             float const ddy = destY - m_lastDispatchedDestY;
             float const ddz = destZ - m_lastDispatchedDestZ;
             float const distSq = ddx * ddx + ddy * ddy + ddz * ddz;
             if (distSq > AIBOT_JOURNEY_DEST_EPSILON * AIBOT_JOURNEY_DEST_EPSILON)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-move: dest differs from last dispatched, new journey", distSq);
                 isNewJourney = true;
+            }
         }
 
         if (isNewJourney)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-move: new journey, rolling smoothing seed");
             m_pathJourneySeed = (urand(0, 0xFFFF) << 16) ^ urand(0, 0xFFFF);
             m_lastDispatchedDestX = destX;
             m_lastDispatchedDestY = destY;
@@ -498,12 +562,15 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // when we actually move the bot — an on-mesh start leaves it armed for a later off-mesh leg.
     if (!m_didNavmeshSnap)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: off-mesh start check, snap one-shot armed");
         float snapX = 0.0f, snapY = 0.0f, snapZ = 0.0f;
         if (FindNearestNavmeshPoint(snapX, snapY, snapZ, AIBOT_NAVMESH_SNAP_SEARCH))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: navmesh poly located near start");
             float off = me->GetDistance2d(snapX, snapY);
             if (off > AIBOT_OFFMESH_EPSILON)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: start off-mesh, re-taring onto navmesh", off);
                 // Off-mesh, but valid navmesh is within the cap → snap onto it and re-path from
                 // solid ground. This is the common recoverable case (NOT a failure).
                 m_didNavmeshSnap = true;
@@ -515,7 +582,10 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
                     me->GetName(), me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
                     off, snapX, snapY, snapZ, destX, destY, destZ);
                 if (stopCurrentMovement)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-move: stop before offmesh retare port");
                     StopMoving();
+                }
                 me->NearTeleportTo(snapX, snapY, snapZ, me->GetOrientation());
                 MoveToDestination(destX, destY, destZ, true);   // re-path from the on-mesh start
                 return;
@@ -525,6 +595,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: STRANDED, no navmesh in search box");
             // ALARM (hard): NO navmesh poly within the search box at all → the bot is genuinely
             // stranded (deep out-of-bounds / fell through the world) and cannot path from here.
             // Last-resort help: port to its authored spawn (always valid + on-mesh) if same-map,
@@ -533,6 +604,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
             m_didNavmeshSnap = true;
             if (m_spawnMapId == me->GetMapId())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: stranded same-map, porting to spawn and re-pathing");
                 float sx = m_spawnX, sy = m_spawnY, sz = m_spawnZ;
                 ReGroundZ(sx, sy, sz, "stranded-spawn");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -541,7 +613,10 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
                     me->GetName(), AIBOT_NAVMESH_SNAP_SEARCH,
                     me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), sx, sy, sz);
                 if (stopCurrentMovement)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-move: stop before stranded spawn port");
                     StopMoving();
+                }
                 me->NearTeleportTo(sx, sy, sz, m_spawnO);
                 MoveToDestination(destX, destY, destZ, true);
                 return;
@@ -561,6 +636,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     uint32 dangerLevel = 0;
     if (!IsPathSafe(x, y, z, unsafeX, unsafeY, unsafeZ, dangerLevel))
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: PATH_UNSAFE, emitting and refusing leg", dangerLevel);
         char eventData[256];
         snprintf(eventData, sizeof(eventData),
             "dest_x=%.1f|dest_y=%.1f|dest_z=%.1f|"
@@ -592,9 +668,11 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // so a NOPATH here within seam range is a genuine unmeshed gap to the dest — cross it.
     if (!pathOk && me->GetDistance2d(origX, origY) <= AIBOT_SEAM_CROSS_DIST)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: NOPATH but near dest, seam candidate");
         // §4: an enriched objective MOVE_TO does NOT teleport into the cave — grind at the mouth.
         if (m_currentTask.creatureEntry != 0)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: objective seam, grind at mouth not teleport", m_currentTask.creatureEntry);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-PATH] %s: objective MOVE_TO hit seam %.1fyd out — grinding at the mouth (no teleport)",
                 me->GetName(), me->GetDistance2d(origX, origY));
@@ -613,9 +691,13 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         // interior intact).
         ReGroundZ(origX, origY, z, "seam-cross");
         if (stopCurrentMovement)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-move: stop before seam cross");
             StopMoving();
+        }
         me->NearTeleportTo(origX, origY, z, me->GetOrientation());
 
+        CB_HIT(me->GetGUIDLow(), "cpp-move: seam crossed, emitting arrival");
         BridgeSendEvent("TASK_COMPLETE", "MOVE_TO arrived (seam crossed)");
         m_currentTask.Clear();
         ClearStoredPath();
@@ -625,12 +707,14 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // ── Retry 1: Nudge 3yd toward bot (NOPATH only) ──
     if (!pathOk)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: NOPATH, retry 1 nudge toward bot");
         float dx = me->GetPositionX() - x;
         float dy = me->GetPositionY() - y;
         float len = sqrtf(dx * dx + dy * dy);
 
         if (len > 0.5f)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: nudge geometry viable, repathing nudged dest");
             float nudgeDist = 3.0f;
             float nx = x + (dx / len) * nudgeDist;
             float ny = y + (dy / len) * nudgeDist;
@@ -645,6 +729,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
             if (!(retryType & PATHFIND_NOPATH))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: nudge succeeded, using nudged dest");
                 x = nx;
                 y = ny;
                 pathOk = true;
@@ -661,6 +746,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // ── Retry 2: Ring scan — 8 points at 3yd around original destination ──
     if (!pathOk)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: nudge failed, retry 2 ring scan");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: nudge failed — trying ring scan around (%.1f, %.1f)",
             me->GetName(), origX, origY);
@@ -678,6 +764,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
             if (!(ringType & PATHFIND_NOPATH))
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: ring scan hit, using ring point", i * 45);
                 x = rx;
                 y = ry;
                 pathOk = true;
@@ -693,6 +780,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
         if (!pathOk)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: ring scan found no valid point");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-PATH] %s: ring scan found no valid point", me->GetName());
         }
@@ -700,14 +788,17 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
     if (!pathOk)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: NOPATH after retries, recovery arm");
         // ── Outbound seam escape ──
         // The START is on-mesh (off-mesh was re-tared at the top) but we still can't path OUT —
         // a learned cave-portal seam between us and open terrain. Teleport to the recorded outside
         // anchor and re-path. One per journey.
         if (stopCurrentMovement && !m_didBoundaryExit)
         {
-            if (NavBoundary const* b = FindNavBoundaryNear(me->GetPositionX(), me->GetPositionY(), AIBOT_BOUNDARY_SCOPE))
+            CB_HIT(me->GetGUIDLow(), "cpp-path: boundary escape check, one-shot armed");
+            if (NavBoundary const* b = FindNavBoundaryNear(me->GetPositionX(), me->GetPositionY(), AIBOT_BOUNDARY_SCOPE))   // cb:fold checker artifact, decl-if condition; arm probed inside
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: known seam found, escaping to outer anchor");
                 m_didBoundaryExit = true;
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-PATH] %s: no path out — escaping known seam to anchor (%.1f, %.1f), re-pathing",
@@ -729,6 +820,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         // checks "is there a poly under me" and an island HAS one. Probe the start and tag the event
         // (start_isolated=1) so C# keeps the failure per-bot instead of blacklisting the dest fleet-wide.
         bool startIsolated = IsStartIsolated();
+        CB_HITV(me->GetGUIDLow(), "cpp-path: MOVE_FAILED no_path, start_isolated in value", startIsolated ? 1 : 0);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: MOVE_FAILED — no_path to (%.1f, %.1f, %.1f)%s",
             me->GetName(), x, y, z, startIsolated ? " [start ISOLATED]" : "");
@@ -746,6 +838,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
 
     if (points.empty())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: MOVE_FAILED empty_path, no waypoints");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: MOVE_FAILED — empty waypoint array to (%.1f, %.1f, %.1f)",
             me->GetName(), x, y, z);
@@ -781,12 +874,14 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // planner shelves the leg, exactly as the ring-scan-miss branch does.
     if (isPartial && totalDist < 5.0f)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: degenerate partial, MOVE_FAILED no_path", totalDist);
         // [FINDING_020] A ≤5yd partial toward a FAR dest is the signature of a bot standing on a
         // disconnected navmesh island (the reachable mesh ends where it stands): 409 bots / 54% of
         // the fleet produced these on 2026-08-21, stacked at inn / smithy / pier / graveyard coords,
         // and their failures poisoned the C# fleet no-path memory (76% of the inflow). Probe the
         // start and tag the event so C# can tell "dest unreachable" from "I am unreachable".
         bool startIsolated = IsStartIsolated();
+        CB_HITV(me->GetGUIDLow(), "cpp-path: degenerate partial start_isolated in value", startIsolated ? 1 : 0);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: degenerate partial (%.1fyd, %u waypoints) — MOVE_FAILED no_path%s",
             me->GetName(), totalDist, (uint32)points.size(), startIsolated ? " [start ISOLATED]" : "");
@@ -801,7 +896,10 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     }
 
     if (stopCurrentMovement)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: stop before path dispatch");
         StopMoving();
+    }
     ClearStoredPath();
 
     // The journey's TRUE destination.
@@ -825,8 +923,13 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
     // ── Complete + short path: smoothed MovePoint straight to dest ──
     if (!isPartial && totalDist <= AIBOT_PATH_CHUNK_DIST)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: short path, smoothed MovePoint dispatch", totalDist);
         float useSpeed = me->GetSpeed(MOVE_RUN);
-        if (useSpeed > 9.0f) useSpeed = 7.0f;
+        if (useSpeed > 9.0f)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-move: travel speed pinned to 7", useSpeed);
+            useSpeed = 7.0f;
+        }
 
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: short path (%.0fyd, %u waypoints, %u smoothed) — smoothed MovePoint (speed=%.1f)",
@@ -847,6 +950,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         me->GetName(), isPartial ? "partial" : "long",
         totalDist, (uint32)points.size(), (uint32)smoothed.size());
 
+    CB_HITV(me->GetGUIDLow(), "cpp-move: long or partial path, chunked dispatch", totalDist);
     StartNextPathChunk();
 }
 
@@ -861,11 +965,17 @@ bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float quer
 {
     MMAP::MMapManager* mmap = MMAP::MMapFactory::createOrGetMMapManager();
     if (!mmap)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: no mmap manager, navmesh query unavailable");
         return false;
+    }
 
     dtNavMeshQuery const* query = mmap->GetNavMeshQuery(me->GetMapId());   // per-map query (single arg on this fork)
     if (!query)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: no navmesh query for map", me->GetMapId());
         return false;
+    }
 
     // MaNGOS (x,y,z) → Detour (y,z,x).
     float const center[3]  = { queryY, queryZ, queryX };
@@ -877,7 +987,10 @@ bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float quer
 
     dtStatus st = query->findNearestPoly(center, extents, &filter, &nearestPoly, nearestPt);
     if (dtStatusFailed(st) || nearestPoly == 0)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: findNearestPoly failed, no poly in box");
         return false;
+    }
 
     // Detour (y,z,x) → MaNGOS (x,y,z).
     outX = nearestPt[2];
@@ -895,6 +1008,7 @@ bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float quer
         float const drop = outZ - ground;
         if (drop > 0.5f)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: nav poly floats above floor", drop);
             // [GROUND] 2026-07-20 — CAP THE SNAP. A genuine navmesh-over-hull float is sub-yard
             // to a few yards; the live log carried 12.3yd, 41.7yd and 159yd "corrections", and a
             // 159yd snap is not float correction, it is dropping a bot off a cliff. Beyond the cap
@@ -903,12 +1017,14 @@ bool AiBotAI::FindNearestNavmeshPointNear(float queryX, float queryY, float quer
             // bad geometry is one grep. This is the guard that never existed.
             if (drop > AIBOT_NAVSNAP_MAX_DROP)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: navsnap refused, drop beyond cap, keeping poly z", drop);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-GROUND] %s: navsnap REFUSED — floor reads %.1fyd below poly (Z %.1f -> %.1f, cap %.1f) @ (%.1f, %.1f) map=%u — suspect geometry, keeping poly Z",
                     me->GetName(), drop, outZ, ground, AIBOT_NAVSNAP_MAX_DROP, outX, outY, me->GetMapId());
             }
             else
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: navsnap z snapped down to floor", drop);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-GROUND] %s: navmesh poly floats — snap Z %.1f -> %.1f (%.1fyd) @ (%.1f, %.1f)",
                     me->GetName(), outZ, ground, drop, outX, outY);
@@ -968,9 +1084,13 @@ bool AiBotAI::IsStartIsolated()
         probe.calculate(px, py, pz);
         PathType const t = probe.getPathType();
         if (t & PATHFIND_NOPATH)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: isolation probe NOPATH");
             continue;
+        }
         if (t & PATHFIND_INCOMPLETE)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: isolation probe partial, verifying endpoint");
             // ROUND 3b: a partial only counts if it actually REACHES the probe point. From inside
             // a 25yd pocket Detour returns 6–15yd partials toward ANY far point (ShadowCrit, Menethil
             // gate tower: "partial path (15yd, 6 waypoints)" toward a dest 6,584yd away), so the old
@@ -979,13 +1099,21 @@ bool AiBotAI::IsStartIsolated()
             // flagged. A partial whose endpoint stops short of the probe is the island signature.
             PointsArray const& pts = probe.getPath();
             if (pts.empty())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: isolation probe partial empty");
                 continue;
+            }
             float const ex = pts.back().x - px, ey = pts.back().y - py;
             if ((ex * ex + ey * ey) > 8.0f * 8.0f)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: isolation probe stops short, island signature");
                 continue;
+            }
         }
+        CB_HIT(me->GetGUIDLow(), "cpp-path: start connected, honest route out");
         return false;   // at least one honest route out of here → not isolated
     }
+    CB_HIT(me->GetGUIDLow(), "cpp-path: start ISOLATED, no route from 16 probes");
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-PATH] %s: start ISOLATED — no route to any of 16 probe points %.0f/%.0fyd around (%.1f,%.1f,%.1f)",
         me->GetName(), AIBOT_ISOLATION_PROBE_YARDS, AIBOT_ISOLATION_PROBE_YARDS_2, sx, sy, sz);
@@ -1009,7 +1137,10 @@ void AiBotAI::TeleportToWalkable(float x, float y, float z, float o, const char*
     ReGroundZ(gx, gy, gz, tag);
     me->NearTeleportTo(gx, gy, gz, o);
     if (!IsStartIsolated())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: teleport landing walkable");
         return;   // landed on walkable ground — done
+    }
 
     static const float radii[5] = { 8.0f, 16.0f, 32.0f, 64.0f, 120.0f };
     for (int r = 0; r < 5; ++r)
@@ -1024,6 +1155,7 @@ void AiBotAI::TeleportToWalkable(float x, float y, float z, float o, const char*
             me->NearTeleportTo(cx, cy, cz, o);
             if (!IsStartIsolated())
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-move: landing in wall, nudged to walkable ring", radii[r]);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-PATH] %s: landing (%.1f,%.1f) was in a wall — nudged %.0fyd to walkable (%.1f,%.1f,%.1f)",
                     me->GetName(), x, y, radii[r], cx, cy, cz);
@@ -1033,6 +1165,7 @@ void AiBotAI::TeleportToWalkable(float x, float y, float z, float o, const char*
     }
 
     // Nothing walkable within 120yd (should never happen at a town) — leave at the requested coord.
+    CB_HIT(me->GetGUIDLow(), "cpp-move: no walkable landing within 120yd, left as requested");
     ReGroundZ(x, y, z, tag);
     me->NearTeleportTo(x, y, z, o);
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -1065,7 +1198,10 @@ void AiBotAI::TeleportToWalkable(float x, float y, float z, float o, const char*
 void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDrop)
 {
     if (!me || !me->GetMap())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-path: reground skipped, no world context");
         return;
+    }
 
     float const zReq = z;
     float ground = zReq;
@@ -1077,6 +1213,7 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDr
 
     if (drop > 0.5f)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: reground, floor below request", drop);
         // [GROUND] 2026-07-20 — maxDrop guard. 0.0f preserves the original unlimited behaviour
         // for every teleport call site (they pass a deliberate destination and want it grounded
         // whatever the distance). The WAYPOINT path passes a real cap, because there a huge
@@ -1084,6 +1221,7 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDr
         // and silently yanking a waypoint 40yd down builds a path that dives through terrain.
         if (maxDrop > 0.0f && drop > maxDrop)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: reground refused, beyond cap, keeping request", drop);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-GROUND] %s: %s REFUSED re-ground — floor %.1fyd below request (z %.1f -> %.1f, cap %.1f) @ (%.1f, %.1f) map=%u — keeping request",
                 me->GetName(), tag ? tag : "?", drop, zReq, ground, maxDrop, x, y, me->GetMapId());
@@ -1097,6 +1235,7 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDr
     }
     else if (ground > zReq + 25.0f)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: kept z, floor far above request", ground - zReq);
         // Diagnostic only — floor reads far ABOVE the request (cave/bridge): we KEPT z.
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUND] %s: %s kept z %.1f (floor %.1f, +%.1f above — cave/bridge?) @ (%.1f, %.1f)",
@@ -1134,7 +1273,10 @@ void AiBotAI::ReGroundZ(float x, float y, float& z, const char* tag, float maxDr
 void AiBotAI::GroundPathPoints(PointsArray& pts, const char* tag)
 {
     if (!me || !me->GetMap() || pts.empty())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-path: ground pass skipped, no context or empty");
         return;
+    }
 
     bool const traced = AiBotTraceIsArmed(me->GetName());
 
@@ -1148,21 +1290,21 @@ void AiBotAI::GroundPathPoints(PointsArray& pts, const char* tag)
         float const drop = zBefore - pts[i].z;
 
         if (drop > 0.01f)
-        {
+        {   // cb:fold hot per-waypoint spline stat detail
             ++grounded;
             sumDrop += drop;
             if (drop > maxDrop)
-                maxDrop = drop;
+                maxDrop = drop;   // cb:fold hot per-waypoint spline stat detail
         }
         else if (zBefore == pts[i].z)
-        {
+        {   // cb:fold hot per-waypoint spline stat detail
             // ReGroundZ refuses past the cap and leaves z alone; we can't distinguish "no float"
             // from "refused" here without re-querying, so the REFUSED line in ReGroundZ is the
             // authoritative count. This branch stays cheap on purpose.
         }
 
         if (traced && drop >= AIBOT_TRACE_WAYPOINT_DZ)
-        {
+        {   // cb:fold trace log emission, format trivia
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-TRACE] %s: WP i=%u z=%.2f -> %.2f dz=%.2f @ (%.1f, %.1f)",
                 me->GetName(), i, zBefore, pts[i].z, drop, pts[i].x, pts[i].y);
@@ -1172,7 +1314,7 @@ void AiBotAI::GroundPathPoints(PointsArray& pts, const char* tag)
     (void)refused;
 
     if (traced)
-    {
+    {   // cb:fold trace log emission, format trivia
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TRACE] %s: PATH %s pts=%u grounded=%u maxdz=%.2f meandz=%.2f map=%u",
             me->GetName(), tag ? tag : "?", (uint32)pts.size(), grounded, maxDrop,
@@ -1201,15 +1343,15 @@ void AiBotAI::GroundPathPoints(PointsArray& pts, const char* tag)
 void AiBotAI::UpdateMovementTrace(uint32 diff)
 {
     if (!me || !me->IsInWorld() || !me->GetMap())
-        return;
+        return;   // cb:fold trace sampler guard, log machinery
 
     m_traceSampleMs += diff;
     if (m_traceSampleMs < AIBOT_TRACE_SAMPLE_MS)
-        return;
+        return;   // cb:fold trace sampler throttle, log machinery
     m_traceSampleMs = 0;
 
     if (!AiBotTraceIsArmed(me->GetName()))
-    {
+    {   // cb:fold trace disarm latch reset, log machinery
         // Disarmed mid-incident: drop the latch silently so a later arm starts clean.
         m_traceFloating  = false;
         m_traceFloatMs   = 0;
@@ -1222,7 +1364,7 @@ void AiBotAI::UpdateMovementTrace(uint32 diff)
     // in-tree rather than assumed — house rule.)
     MovementGeneratorType const genType = me->GetMotionMaster()->GetCurrentMovementGeneratorType();
     if (genType == FLIGHT_MOTION_TYPE)
-        return;
+        return;   // cb:fold taxi exclusion, trace log machinery
 
     float const px = me->GetPositionX();
     float const py = me->GetPositionY();
@@ -1234,12 +1376,14 @@ void AiBotAI::UpdateMovementTrace(uint32 diff)
 
     if (dz >= AIBOT_TRACE_FLOAT_YARDS)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: float sample above threshold", dz);
         m_traceFloatMs += AIBOT_TRACE_SAMPLE_MS;
         if (dz > m_traceFloatPeak)
-            m_traceFloatPeak = dz;
+            m_traceFloatPeak = dz;   // cb:fold trace peak bookkeeping, log machinery
 
         if (!m_traceFloating)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-move: FLOAT-OPEN, airborne above floor", dz);
             m_traceFloating = true;
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-TRACE] %s: FLOAT-OPEN dz=%.2f z=%.2f floor=%.2f moving=%d gen=%u @ (%.1f, %.1f) map=%u",
@@ -1250,6 +1394,7 @@ void AiBotAI::UpdateMovementTrace(uint32 diff)
 
     if (m_traceFloating)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: FLOAT-CLOSE, back near floor", m_traceFloatPeak);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-TRACE] %s: FLOAT-CLOSE peak=%.2f held=%ums dz=%.2f @ (%.1f, %.1f) map=%u",
             me->GetName(), m_traceFloatPeak, m_traceFloatMs, dz, px, py, me->GetMapId());
@@ -1282,6 +1427,7 @@ void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
     path.calculate(x, y, z);
     if (path.getPathType() & PATHFIND_NOPATH)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: MovePointRun NOPATH, refusing shortcut, staying put", pointId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: MovePointRun NOPATH to (%.1f, %.1f, %.1f) — refusing straight-line shortcut (wall-clip guard, point %u)",
             me->GetName(), x, y, z, pointId);
@@ -1289,7 +1435,11 @@ void AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z)
     }
 
     float useSpeed = me->GetSpeed(MOVE_RUN);
-    if (useSpeed > 9.0f) useSpeed = 7.0f;
+    if (useSpeed > 9.0f)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-move: travel speed pinned to 7", useSpeed);
+        useSpeed = 7.0f;
+    }
     me->GetMotionMaster()->MovePoint(pointId, x, y, z, MOVE_PATHFINDING, useSpeed);
 }
 
@@ -1299,10 +1449,13 @@ void AiBotAI::RecordNavBoundary(float innerX, float innerY, float innerZ)
     uint32 mapId = me->GetMapId();
     for (NavBoundary const& b : m_navBoundaries)   // dedup: same seam within 10yd
     {
-        if (b.mapId != mapId) continue;
+        if (b.mapId != mapId) continue;   // cb:fold per-entry map filter detail
         float dx = b.innerX - innerX, dy = b.innerY - innerY;
         if (dx * dx + dy * dy < 100.0f)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: nav seam already recorded, dedup");
             return;
+        }
     }
 
     NavBoundary nb;
@@ -1312,6 +1465,7 @@ void AiBotAI::RecordNavBoundary(float innerX, float innerY, float innerZ)
     nb.outerZ = me->GetPositionZ();
     nb.mapId  = mapId;
     m_navBoundaries.push_back(nb);
+    CB_HIT(me->GetGUIDLow(), "cpp-path: nav seam recorded");
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-PATH] %s: recorded nav seam — inner (%.1f, %.1f, %.1f) outer (%.1f, %.1f, %.1f) map=%u (%zu known)",
@@ -1325,10 +1479,10 @@ NavBoundary const* AiBotAI::FindNavBoundaryNear(float x, float y, float scope) c
     NavBoundary const* best = nullptr;
     for (NavBoundary const& b : m_navBoundaries)
     {
-        if (b.mapId != mapId) continue;
+        if (b.mapId != mapId) continue;   // cb:fold per-entry map filter detail
         float dx = b.innerX - x, dy = b.innerY - y;
         float dSq = dx * dx + dy * dy;
-        if (dSq < bestSq) { bestSq = dSq; best = &b; }
+        if (dSq < bestSq) { bestSq = dSq; best = &b; }   // cb:fold pure nearest-scan detail
     }
     return best;
 }
@@ -1352,7 +1506,10 @@ NavBoundary const* AiBotAI::FindNavBoundaryNear(float x, float y, float scope) c
 PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
 {
     if (raw.size() < 3)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: smoothing skipped, path too short", raw.size());
         return raw;
+    }
 
     uint32 const journeySeed = m_pathJourneySeed;
     uint32 const n = (uint32)raw.size();
@@ -1367,7 +1524,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
         float const lenIn = sqrtf(inX * inX + inY * inY);
         float const lenOut = sqrtf(outX * outX + outY * outY);
         if (lenIn < 0.01f || lenOut < 0.01f)
-            continue;
+            continue;   // cb:fold per-vertex degenerate segment, spline detail
 
         float const dot = (inX * outX + inY * outY) / (lenIn * lenOut);
         float const cosT = dot > 1.0f ? 1.0f : (dot < -1.0f ? -1.0f : dot);
@@ -1386,7 +1543,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
     while (i + 1 < n)
     {
         if (turnDeg[i] < AIBOT_FILLET_MIN_TURN_EPSILON_DEG)
-        {
+        {   // cb:fold hot per-vertex straight carry, spline detail
             result.push_back(raw[i]);
             ++i;
             continue;
@@ -1411,6 +1568,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
 
         if (cumulative < AiBotPathSmoothing::kFilletAngleThresholdDeg)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: corner run below fillet bar, kept raw", cumulative);
             // didn't clear the bar even merged — carry just this run's own points through
             // unchanged; advance past only the run's first vertex so a later corner starting
             // mid-run still gets its own chance
@@ -1431,7 +1589,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
         {
             float distSq = 0.0f;
             if (acLenSq >= 0.0001f)
-            {
+            {   // cb:fold pure geometry, peak projection
                 float const apx = raw[k].x - A.x, apy = raw[k].y - A.y;
                 float const t = (apx * acx + apy * acy) / acLenSq;
                 float const projX = A.x + acx * t, projY = A.y + acy * t;
@@ -1439,7 +1597,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
                 distSq = dx * dx + dy * dy;
             }
             if (distSq > bestDistSq)
-            {
+            {   // cb:fold pure geometry, peak selection
                 bestDistSq = distSq;
                 peakIdx = k;
             }
@@ -1449,6 +1607,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
         PointsArray candidate;
         if (!AiBotPathSmoothing::ComputeCornerFillet(A, B, C, journeySeed, candidate))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: fillet declined, keeping raw corner run");
             for (uint32 k = runStart; k <= runEnd; ++k)
                 result.push_back(raw[k]);
             i = runEnd + 1;
@@ -1461,12 +1620,14 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
             float navX, navY, navZ;
             if (!FindNearestNavmeshPointNear(p.x, p.y, p.z, navX, navY, navZ, AIBOT_FILLET_VALIDATE_SEARCH_YARDS))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-path: fillet reject, no navmesh near candidate");
                 allValid = false;
                 break;
             }
             float const off = sqrtf((navX - p.x) * (navX - p.x) + (navY - p.y) * (navY - p.y));
             if (off > AIBOT_FILLET_VALIDATE_EPSILON)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: fillet reject, candidate off mesh 2d", off);
                 allValid = false;
                 break;
             }
@@ -1485,8 +1646,9 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
             float const zOff = fabsf(navZ - p.z);
             if (zOff > AIBOT_FILLET_VALIDATE_Z_YARDS)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-path: fillet reject, wrong floor z", zOff);
                 if (AiBotTraceIsArmed(me->GetName()))
-                {
+                {   // cb:fold trace log emission, format trivia
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-TRACE] %s: FILLET REJECT z — candidate z=%.2f poly z=%.2f dz=%.2f (cap %.1f) @ (%.1f, %.1f)",
                         me->GetName(), p.z, navZ, zOff, AIBOT_FILLET_VALIDATE_Z_YARDS, p.x, p.y);
@@ -1502,6 +1664,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
 
         if (allValid)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: fillet applied to corner run");
             filletedRuns++;
             filletedVertices += (runEnd - runStart + 1);
             for (Vector3 const& p : candidate)
@@ -1509,6 +1672,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-path: fillet validation failed, raw run kept");
             for (uint32 k = runStart; k <= runEnd; ++k)
                 result.push_back(raw[k]);
         }
@@ -1520,6 +1684,7 @@ PointsArray AiBotAI::SmoothPathCorners(PointsArray const& raw)
 
     if (consideredRuns > 0)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: smoothing summary, filleted runs", filletedRuns);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: corner smoothing — %u/%u candidate runs filleted (%u raw vertices merged), %u -> %u points",
             me->GetName(), filletedRuns, consideredRuns, filletedVertices, (uint32)raw.size(), (uint32)result.size());

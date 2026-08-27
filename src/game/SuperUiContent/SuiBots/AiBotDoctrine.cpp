@@ -15,8 +15,19 @@
 
 #include "AiBotDoctrine.h"
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 #include "Player.h"
 #include "Group.h"
+
+namespace
+{
+    // [CIRCUIT] Null-safe guid for probes; evaluated only inside an armed probe.
+    uint32 CbGuid(AiBotAI const& bot)
+    {
+        Player* p = bot.GetBotPlayer();
+        return p ? p->GetGUIDLow() : 0;
+    }
+}
 
 DoctrineKind ResolveDoctrine(AiBotAI const& bot)
 {
@@ -34,7 +45,10 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     // actually lands). Leaving the party un-resolves FindPartyBoss and this drops straight
     // back to the frozen ladder next behaviour tick -- swap == reset, as always.
     if (bot.FindPartyBoss())
+    {
+        CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, player party, live human in group");
         return DoctrineKind::PlayerParty;
+    }
 
     // [SUI] The owner's non-autonomy decree, enforced LOCALLY (2026-08-10). An unattended
     // real character — the body its human left behind to possess a bot or fly the free view —
@@ -51,7 +65,10 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     // whole task machinery down — no grind, no patrol, no wander. CMSG_SUI_ORDER injections
     // remain the only thing that moves it deliberately, exactly as the decree says.
     if (bot.IsUnattendedRealCharacter())
+    {
+        CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, player party hold, unattended real character");
         return DoctrineKind::PlayerParty;
+    }
     //
     // Posture source is the M2 ConductState. Until it lands, every bot is AUTONOMOUS (§3), so the
     // Directed branch below is present-but-dark and the resolver only ever picks TeamAuto or Solo
@@ -60,7 +77,10 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     ConductPosture const posture = ConductPosture::Autonomous;   // TODO(M2): bot.GetConductPosture();
 
     if (posture == ConductPosture::Companion || posture == ConductPosture::Puppet)
+    {
+        CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, directed posture");
         return DoctrineKind::Directed;
+    }
 
     Player* me = bot.GetBotPlayer();   // GetBotPlayer() is const but returns the non-const `me`
     bool const grouped = (me != nullptr && me->GetGroup() != nullptr);
@@ -69,11 +89,18 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     // TeamAuto group game plus the plan's add-duty targeting. Same activation
     // conditions as TeamAuto so the composed inner delegate's assumptions hold.
     if (bot.m_combatDirective.IsActive() && grouped && bot.HasRaidPlan())
+    {
+        CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, encounter play, raid plan adopted");
         return DoctrineKind::EncounterPlay;
+    }
 
     if (bot.m_combatDirective.IsActive() && grouped)
+    {
+        CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, team auto, directive and grouped");
         return DoctrineKind::TeamAuto;
+    }
 
+    CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, solo");
     return DoctrineKind::Solo;
 }
 
@@ -81,11 +108,11 @@ std::unique_ptr<IEngagementDoctrine> MakeDoctrine(DoctrineKind kind)
 {
     switch (kind)
     {
-        case DoctrineKind::Solo:        return MakeSoloDoctrine();
-        case DoctrineKind::TeamAuto:    return MakeTeamDoctrine();
-        case DoctrineKind::Directed:    return MakeDirectedDoctrine();
-        case DoctrineKind::PlayerParty: return MakePlayerPartyDoctrine();
-        case DoctrineKind::EncounterPlay: return MakeEncounterDoctrine();
+        case DoctrineKind::Solo:        return MakeSoloDoctrine();          // cb:fold factory dispatch, resolve probes carry the choice
+        case DoctrineKind::TeamAuto:    return MakeTeamDoctrine();          // cb:fold factory dispatch, resolve probes carry the choice
+        case DoctrineKind::Directed:    return MakeDirectedDoctrine();      // cb:fold factory dispatch, resolve probes carry the choice
+        case DoctrineKind::PlayerParty: return MakePlayerPartyDoctrine();   // cb:fold factory dispatch, resolve probes carry the choice
+        case DoctrineKind::EncounterPlay: return MakeEncounterDoctrine();   // cb:fold factory dispatch, resolve probes carry the choice
     }
     return MakeSoloDoctrine();   // unreachable — total switch; keeps the compiler happy
 }

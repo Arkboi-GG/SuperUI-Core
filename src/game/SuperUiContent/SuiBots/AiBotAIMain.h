@@ -318,12 +318,12 @@ struct AiBotTaskData
     bool MatchesObjectiveEntry(uint32 entry) const
     {
         if (entry == 0)
-            return false;
+            return false;   // cb:fold pure helper on task data, no bot in reach
         if (entry == creatureEntry)
-            return true;
+            return true;   // cb:fold pure helper on task data, no bot in reach
         for (int i = 0; i < MAX_ALT_ENTRIES; ++i)
             if (altCreatureEntries[i] == entry)
-                return true;
+                return true;   // cb:fold pure helper on task data, no bot in reach
         return false;
     }
 
@@ -500,6 +500,31 @@ public:
     bool m_suiRtsHold = false;
     float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
     int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
+
+    // [SUI] Fix B — arrival-callback interrupt guard. StopMoving() Clears the MotionMaster, which
+    // finalizes the in-flight point generator SYNCHRONOUSLY; the base PointMovementGenerator::
+    // Finalize then fires MovementInform unconditionally — a FALSE arrival at the destination we
+    // are abandoning, which otherwise re-paths the stale dest or emits a phantom TASK_COMPLETE.
+    // Raised only across the interrupt; a genuine spline completion still informs normally.
+    bool m_suiSuppressArrival = false;
+
+    // [SUI] Fix A — RTS move coalescing (<=1 per unit per world tick, latest destination wins).
+    // A flood of CMSG_SUI_ORDER move packets drains whole each tick; executing each inline runs a
+    // full navmesh pathfind per packet and thrashes the spline, hanging a single unit. ORDER_MOVE
+    // now only stashes the newest destination here; ConsumePendingSuiRtsMove issues it once per
+    // UpdateAI tick. Other order types (attack/hold/formation/waypoint) stay immediate.
+    bool  m_suiPendingMove = false;
+    float m_suiPendingMoveX = 0.f;
+    float m_suiPendingMoveY = 0.f;
+    float m_suiPendingMoveZ = 0.f;
+    void QueueSuiRtsMove(float x, float y, float z)
+    {
+        m_suiPendingMove = true;
+        m_suiPendingMoveX = x;
+        m_suiPendingMoveY = y;
+        m_suiPendingMoveZ = z;
+    }
+    void ConsumePendingSuiRtsMove();   // defined in AiBotAIMovement.cpp; called each UpdateAI tick
 
     // [SUI] Conscription: this bot is enlisted in a commander's RTS army
     // (ORDER_CONSCRIPT, sent when the client assigns it to a control group).
@@ -705,6 +730,7 @@ public:
     void BridgeConnect();
     void BridgeDisconnect();
     void BridgeSend(const char* json);   // queues a complete JSON line (never truncates)
+    void CircuitFlush();                 // [CIRCUIT] ship buffered probes (AiBotCircuit.cpp, 1 Hz)
     void BridgeFlush();                  // drains m_bridgeSendBuf; tolerates partial / EWOULDBLOCK writes
     void BridgeSendHello();
     void BridgeSendState();
@@ -765,6 +791,7 @@ public:
     void BridgeHandleLoadRotation(const char* json); // [ROTATION] load/replace/clear the custom slate (pipe payload, resolves SpellEntry at load)
     void BridgeHandleApplyCombatLoadout(const char* json); // correlated, core-authoritative talent/profile/role/rotation mutation
     void BridgeHandleLoadRaidPlan(const char* json); // [RAID-PLAN] adopt this bot's raid-plan slice (PLAN_19 M-C; executes at M-D)
+    void BridgeHandleCircuitTrace(const char* json); // [CIRCUIT] mode/ship toggle from C# (CIRCUIT_BOARD.md R6)
     void BridgeHandleRepairItems(const char* json);
     char const* GetTalentProfileStateName() const;
     char const* GetEffectiveRotationSource() const;

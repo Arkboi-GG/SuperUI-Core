@@ -21,11 +21,20 @@
 
 #include "AiBotDoctrine.h"
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
+#include "Player.h"       // [CIRCUIT] GetGUIDLow on the bot player (probe guid)
 
 #include <memory>
 
 namespace
 {
+
+// [CIRCUIT] Null-safe guid for probes; evaluated only inside an armed probe.
+uint32 CbGuid(AiBotAI const& bot)
+{
+    Player* p = bot.GetBotPlayer();
+    return p ? p->GetGUIDLow() : 0;
+}
 
 class AiBotDoctrineSolo final : public IEngagementDoctrine
 {
@@ -41,7 +50,11 @@ public:
     Unit* AcquireTarget(AiBotAI& bot) override
     {
         if (bot.m_currentTask.type == TASK_MOVE_TO)
+        {
+            CB_HIT(CbGuid(bot), "cpp-doctrine: solo, approach scan on move leg");
             return bot.ScanApproachTarget();
+        }
+        CB_HIT(CbGuid(bot), "cpp-doctrine: solo, grind scan");
         return bot.SelectGrindTarget();
     }
 

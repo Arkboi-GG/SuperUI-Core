@@ -736,11 +736,10 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         switch (orderType)
         {
             case ORDER_MOVE:
-                ai->SuiClearWaypoints();   // a plain move order replaces any chain
-                snprintf(json, sizeof(json),
-                    "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-                    pMember->GetMapId(), x, y, z);
-                ai->SuiInjectCommandLine(json);
+                // [SUI] Fix A: coalesced — stash the newest dest; UpdateAI issues it once next
+                // tick (SuiClearWaypoints + MOVE_TO happen there), so a right-click flood can no
+                // longer trigger a full pathfind + spline restart per packet on a single unit.
+                ai->QueueSuiRtsMove(x, y, z);
                 break;
             case ORDER_ATTACK:
                 if (targetGuid.IsCreature())

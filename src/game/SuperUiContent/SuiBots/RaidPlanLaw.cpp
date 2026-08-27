@@ -51,7 +51,7 @@ static bool ExtractString(char const* json, char const* key, char* out, size_t o
 {
     out[0] = '\0';
     char const* at = FindKey(json, key);
-    if (!at || *at != '"') return false;
+    if (!at || *at != '"') return false; // cb:fold pure json helper, no bot context
     ++at;
     size_t i = 0;
     while (*at && *at != '"' && i + 1 < outLen)
@@ -63,14 +63,14 @@ static bool ExtractString(char const* json, char const* key, char* out, size_t o
 static bool ExtractInt(char const* json, char const* key, int& out)
 {
     char const* at = FindKey(json, key);
-    if (!at) return false;
+    if (!at) return false; // cb:fold pure json helper, no bot context
     return sscanf(at, "%d", &out) == 1;
 }
 
 static bool ExtractFloat(char const* json, char const* key, float& out)
 {
     char const* at = FindKey(json, key);
-    if (!at) return false;
+    if (!at) return false; // cb:fold pure json helper, no bot context
     return sscanf(at, "%f", &out) == 1;
 }
 
@@ -101,14 +101,14 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
     diag = SuiRaidPlanDiag();
 
     if (!ExtractInt(json, "schema", plan.schema) || plan.schema != 1)
-    {
+    {   // cb:fold pure parser refusal, ack carries the error
         snprintf(err, errLen, "schema missing or unsupported (want 1)");
         return false;
     }
 
     char buf[256];
-    if (ExtractString(json, "plan", buf, sizeof(buf))) plan.name = buf;
-    if (ExtractString(json, "encounter", buf, sizeof(buf))) plan.encounterKey = buf;
+    if (ExtractString(json, "plan", buf, sizeof(buf))) plan.name = buf; // cb:fold pure parser, no bot context
+    if (ExtractString(json, "encounter", buf, sizeof(buf))) plan.encounterKey = buf; // cb:fold pure parser, no bot context
 
     SuiRaidDoctrine& d = plan.doctrine;
     ExtractBool(json, "d_formation", d.deriveFormation, true);
@@ -118,16 +118,16 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
     ExtractFloat(json, "d_spreadyd", d.spreadYards);
     ExtractBool(json, "d_groupheal", d.groupHealing, true);
     ExtractBool(json, "d_threatlite", d.bossThreatLite, false);
-    if (d.spreadYards <= 0.f || d.spreadYards > 60.f) d.spreadYards = 8.f;
+    if (d.spreadYards <= 0.f || d.spreadYards > 60.f) d.spreadYards = 8.f; // cb:fold pure parser default clamp, no bot context
 
     char listBuf[2048];
     if (ExtractString(json, "assignments", listBuf, sizeof(listBuf)) && listBuf[0])
-        ForEachPipeSegment(listBuf, [&](char* seg)
+        ForEachPipeSegment(listBuf, [&](char* seg) // cb:fold pure parser, counts land in diag
         {
             char phase[48]; int job, ord, target;
             if (sscanf(seg, "%47[^:]:%d:%d:%d", phase, &job, &ord, &target) != 4 ||
                 job < 0 || job > 4 || target < 0 || target > 2 || ord < 1)
-            { ++diag.skipped; return; }
+            { ++diag.skipped; return; } // cb:fold pure parser, skips counted in diag
             SuiPhaseJobAssignment a;
             a.phaseKey = phase; a.job = (uint8_t)job;
             a.fromOrdinal = ord; a.target = (uint8_t)target;
@@ -136,12 +136,12 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
         });
 
     if (ExtractString(json, "auras", listBuf, sizeof(listBuf)) && listBuf[0])
-        ForEachPipeSegment(listBuf, [&](char* seg)
+        ForEachPipeSegment(listBuf, [&](char* seg) // cb:fold pure parser, counts land in diag
         {
             unsigned spell, cls; int dur, cd, ord;
             if (sscanf(seg, "%u:%u:%d:%d:%d", &spell, &cls, &dur, &cd, &ord) != 5 ||
                 spell == 0 || cls == 0 || dur <= 0 || ord < 1)
-            { ++diag.skipped; return; }
+            { ++diag.skipped; return; } // cb:fold pure parser, skips counted in diag
             SuiMaintainAuraRule r;
             r.spellId = spell; r.casterClassId = cls;
             r.durationMs = dur; r.cooldownMs = cd < 0 ? 0 : cd;
@@ -151,12 +151,12 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
         });
 
     if (ExtractString(json, "addctl", listBuf, sizeof(listBuf)) && listBuf[0])
-        ForEachPipeSegment(listBuf, [&](char* seg)
+        ForEachPipeSegment(listBuf, [&](char* seg) // cb:fold pure parser, counts land in diag
         {
             unsigned cls; float radius, slow, range; int minAdds;
             if (sscanf(seg, "%u:%f:%f:%d:%f", &cls, &radius, &slow, &minAdds, &range) != 5 ||
                 cls == 0 || radius <= 0.f || slow <= 0.f || slow > 1.f || minAdds < 1)
-            { ++diag.skipped; return; }
+            { ++diag.skipped; return; } // cb:fold pure parser, skips counted in diag
             SuiAddControlJob j;
             j.casterClassId = cls; j.radiusYards = radius; j.slowFactor = slow;
             j.minAdds = minAdds; j.castRangeYards = range > 0.f ? range : 30.f;
@@ -166,26 +166,26 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
 
     // ── this bot's slice ──
     int v;
-    if (ExtractInt(json, "b_job", v) && v >= 0 && v <= 4) plan.job = (uint8_t)v;
-    if (ExtractInt(json, "b_side", v) && v >= 0 && v <= 3) plan.side = (uint8_t)v;
-    if (ExtractInt(json, "b_class", v) && v >= 0) plan.classId = (uint32_t)v;
-    if (ExtractString(json, "b_rot", buf, sizeof(buf))) plan.rotationId = buf;
-    if (ExtractInt(json, "b_slot", v) && v >= 0) plan.slotIndex = v;
-    if (ExtractInt(json, "b_slotcount", v) && v >= 1) plan.slotCount = v;
-    if (ExtractInt(json, "b_mt", v)) plan.mainTank = v != 0 ? 1 : 0;
+    if (ExtractInt(json, "b_job", v) && v >= 0 && v <= 4) plan.job = (uint8_t)v; // cb:fold pure parser, no bot context
+    if (ExtractInt(json, "b_side", v) && v >= 0 && v <= 3) plan.side = (uint8_t)v; // cb:fold pure parser, no bot context
+    if (ExtractInt(json, "b_class", v) && v >= 0) plan.classId = (uint32_t)v; // cb:fold pure parser, no bot context
+    if (ExtractString(json, "b_rot", buf, sizeof(buf))) plan.rotationId = buf; // cb:fold pure parser, no bot context
+    if (ExtractInt(json, "b_slot", v) && v >= 0) plan.slotIndex = v; // cb:fold pure parser, no bot context
+    if (ExtractInt(json, "b_slotcount", v) && v >= 1) plan.slotCount = v; // cb:fold pure parser, no bot context
+    if (ExtractInt(json, "b_mt", v)) plan.mainTank = v != 0 ? 1 : 0; // cb:fold pure parser, no bot context
 
     if (ExtractString(json, "b_avoid", listBuf, sizeof(listBuf)) && listBuf[0])
-    {
+    {   // cb:fold pure parser, avoids counted in diag
         char* save = nullptr;
         for (char* key = strtok_r(listBuf, ",", &save); key; key = strtok_r(nullptr, ",", &save))
-            if (*key) { plan.avoidAbilityKeys.emplace_back(key); ++diag.avoids; }
+            if (*key) { plan.avoidAbilityKeys.emplace_back(key); ++diag.avoids; } // cb:fold pure parser, avoids counted in diag
     }
 
     if (ExtractString(json, "b_targets", listBuf, sizeof(listBuf)) && listBuf[0])
-        ForEachPipeSegment(listBuf, [&](char* seg)
+        ForEachPipeSegment(listBuf, [&](char* seg) // cb:fold pure parser, counts land in diag
         {
             char* colon = strchr(seg, ':');
-            if (!colon || colon == seg) { ++diag.skipped; return; }
+            if (!colon || colon == seg) { ++diag.skipped; return; } // cb:fold pure parser, skips counted in diag
             SuiPhaseTargets pt;
             pt.phaseKey.assign(seg, colon - seg);
             char* save = nullptr;
@@ -193,9 +193,9 @@ bool SuiParseRaidPlan(char const* json, SuiRaidPlan& out, SuiRaidPlanDiag& diag,
             {
                 int kind;
                 if (sscanf(k, "%d", &kind) == 1 && kind >= 0 && kind <= 2)
-                    pt.order.push_back((uint8_t)kind);
+                    pt.order.push_back((uint8_t)kind); // cb:fold pure parser, counts land in diag
             }
-            if (pt.order.empty()) { ++diag.skipped; return; }
+            if (pt.order.empty()) { ++diag.skipped; return; } // cb:fold pure parser, skips counted in diag
             plan.phaseTargets.push_back(pt);
             ++diag.phaseTargets;
         });
@@ -219,7 +219,7 @@ namespace SuiFormationLaw
         fromRad = frontHalfRad + ArcMarginRad;
         toRad = Pi - rearHalfRad - ArcMarginRad;
         if (toRad <= fromRad)
-        {
+        {   // cb:fold pure formation math, no bot context
             fromRad = Pi / 2.f;
             toRad = Pi / 2.f;
         }
@@ -252,9 +252,9 @@ namespace SuiFormationLaw
     {
         float r = coneRangeYards + 4.f;
         float floorR = meleeReach + 15.f;
-        if (r < floorR) r = floorR;
-        if (r < 12.f) r = 12.f;
-        if (r > 30.f) r = 30.f;
+        if (r < floorR) r = floorR; // cb:fold pure formation math, no bot context
+        if (r < 12.f) r = 12.f; // cb:fold pure formation math, no bot context
+        if (r > 30.f) r = 30.f; // cb:fold pure formation math, no bot context
         return r;
     }
 

@@ -58,6 +58,7 @@
 
 #include "AiBotDoctrine.h"
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 #include "Player.h"
 #include "WorldSession.h"   // [MULTI-HUMAN] GetSession()->GetBot() — the real-player test in rungs 1-2
 #include "Group.h"
@@ -73,6 +74,13 @@
 
 namespace
 {
+
+// [CIRCUIT] Null-safe guid for probes; evaluated only inside an armed probe.
+uint32 CbGuid(AiBotAI const& bot)
+{
+    Player* p = bot.GetBotPlayer();
+    return p ? p->GetGUIDLow() : 0;
+}
 
 class AiBotDoctrinePlayerParty final : public IEngagementDoctrine
 {
@@ -107,10 +115,16 @@ public:
     Unit* MaintainTarget(AiBotAI& bot, Unit* victim) override
     {
         if (Unit* focus = ResolvePartyFocus(bot))
+        {
+            CB_HIT(CbGuid(bot), "cpp-doctrine: pparty, converging on party focus");
             return focus;
+        }
 
         if (victim && bot.IsValidAssistTarget(victim))
+        {
+            CB_HIT(CbGuid(bot), "cpp-doctrine: pparty, keeping own valid victim");
             return victim;
+        }
 
         return nullptr;
     }
@@ -133,11 +147,15 @@ private:
     {
         Player* me = bot.GetBotPlayer();
         if (!me || !me->IsInWorld())
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-doctrine: pparty, no focus, bot not in world");
             return nullptr;
+        }
 
         Player* boss = bot.FindPartyBoss();
         if (!boss || !boss->IsInWorld())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, boss gone, standing down");
             ClearSticky();
             return nullptr;   // human left / logged — ResolveDoctrine flips us back next tick
         }
@@ -153,19 +171,19 @@ private:
         int humanCount = 0;
         {
             if (Player* pAssigned = bot.FindEscortBoss())
-                humans[humanCount++] = pAssigned;
+                humans[humanCount++] = pAssigned;   // cb:fold roster gather detail
             if (Group* pGroup = me->GetGroup())
-            {
+            { // cb:fold roster gather, rung probes carry the outcome
                 for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr && humanCount < 8; itr = itr->next())
                 {
                     Player* pMember = itr->getSource();
                     if (!pMember || pMember == me || !pMember->IsInWorld())
-                        continue;
+                        continue;   // cb:fold roster gather scan
                     WorldSession* pSess = pMember->GetSession();
                     if (!pSess || pSess->GetBot())
-                        continue;   // a bot — not a human
+                        continue;   // cb:fold roster gather scan, a bot not a human
                     if (humanCount > 0 && pMember == humans[0])
-                        continue;   // the assigned human is already front-loaded
+                        continue;   // cb:fold roster gather scan, assigned human already front-loaded
                     humans[humanCount++] = pMember;
                 }
             }
@@ -175,14 +193,15 @@ private:
         {
             Player* pHuman = humans[h];
             if (!pHuman->IsAlive())
-                continue;
+                continue;   // cb:fold per-human scan, dead human
 
             // Rung 1: a human's own fight is authoritative — "attack my targets".
             if (Unit* pVictim = pHuman->GetVictim())
-            {
+            { // cb:fold candidate gate, rung 1 probe below
                 if (bot.IsValidAssistTarget(pVictim) &&
                     me->IsWithinDist(pVictim, VISIBILITY_DISTANCE_NORMAL))
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, rung 1, attacking human victim");
                     m_lastAssistedVictimGuid = pVictim->GetObjectGuid();
                     m_assistStickyTicks = 0;
                     TraceFocus(me, pVictim, h == 0 ? "my human's victim" : "human victim");
@@ -195,10 +214,11 @@ private:
             // GetAttackerForHelper is the same deterministic read for every companion, so
             // each escort half converges on the SAME unit.
             if (Unit* pAggro = pHuman->GetAttackerForHelper())
-            {
+            { // cb:fold candidate gate, rung 2 probe below
                 if (bot.IsValidAssistTarget(pAggro) &&
                     me->IsWithinDist(pAggro, VISIBILITY_DISTANCE_NORMAL))
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, rung 2, defending human under attack");
                     m_lastAssistedVictimGuid = pAggro->GetObjectGuid();
                     m_assistStickyTicks = 0;
                     TraceFocus(me, pAggro, h == 0 ? "my human's attacker" : "human attacker");
@@ -211,19 +231,20 @@ private:
         // reads quest text. First member-under-attack in group order (deterministic enough;
         // the whole escort walks the same list).
         if (Group* pGroup = me->GetGroup())
-        {
+        { // cb:fold group walk, rung 3 probe below
             for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
             {
                 Player* pMember = itr->getSource();
                 if (!pMember || pMember == me || pMember == boss || !pMember->IsAlive())
-                    continue;
+                    continue;   // cb:fold member scan gate
                 if (!me->IsWithinDist(pMember, VISIBILITY_DISTANCE_NORMAL))
-                    continue;
+                    continue;   // cb:fold member scan, out of range
                 if (Unit* pAggro = pMember->GetAttackerForHelper())
-                {
+                { // cb:fold candidate gate, rung 3 probe below
                     if (bot.IsValidAssistTarget(pAggro) &&
                         me->IsWithinDist(pAggro, VISIBILITY_DISTANCE_NORMAL))
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, rung 3, defending party member");
                         m_lastAssistedVictimGuid = pAggro->GetObjectGuid();
                         m_assistStickyTicks = 0;
                         TraceFocus(me, pAggro, "member attacker");
@@ -253,31 +274,32 @@ private:
             for (Unit* u : nearby)
             {
                 if (!u->IsCreature())
-                    continue;
+                    continue;   // cb:fold mob-side scan gate
                 Unit* uVictim = u->GetVictim();
                 if (!uVictim)
-                    continue;
+                    continue;   // cb:fold mob-side scan gate, idle mob
                 // [PET-FIX] (2026-07-16) Resolve pets/minions to their owning player: a mob
                 // beating on the warlock's voidwalker or the hunter's cat IS a party fight,
                 // but uVictim->IsPlayer() used to exclude it — the Hogger report (mob tagged
                 // on a real player's minion, escort stood watching) lands exactly here.
                 Player* pVictimPlayer = uVictim->GetCharmerOrOwnerPlayerOrPlayerItself();
                 if (!pVictimPlayer)
-                    continue;
+                    continue;   // cb:fold mob-side scan gate, not a player fight
                 bool const onBoss = (pVictimPlayer == boss);
                 bool const onMember = onBoss ||
                     (pVictimPlayer == me) ||
                     (pGroup && pGroup->IsMember(pVictimPlayer->GetObjectGuid()));
                 if (!onMember)
-                    continue;
+                    continue;   // cb:fold mob-side scan gate, not our party
                 if (!bot.IsValidAssistTarget(u))
-                    continue;
+                    continue;   // cb:fold mob-side scan gate, invalid target
                 float const d = me->GetDistance(u);
-                if (onBoss)      { if (d < bestBossD) { bestBossD = d; bestBoss = u; } }
-                else             { if (d < bestMembD) { bestMembD = d; bestMemb = u; } }
+                if (onBoss)      { if (d < bestBossD) { bestBossD = d; bestBoss = u; } }   // cb:fold nearest-pick bookkeeping
+                else             { if (d < bestMembD) { bestMembD = d; bestMemb = u; } }   // cb:fold nearest-pick bookkeeping
             }
             if (Unit* pick = bestBoss ? bestBoss : bestMemb)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, rung 3b, mob-side scan pick");
                 m_lastAssistedVictimGuid = pick->GetObjectGuid();
                 m_assistStickyTicks = 0;
                 TraceFocus(me, pick, "mob-side scan");
@@ -289,12 +311,13 @@ private:
         // swings / kills; keep the escort on the last assisted mob through the gap, same
         // validity gate + budget as TeamAuto (a mob the boss just killed self-clears).
         if (!m_lastAssistedVictimGuid.IsEmpty() && m_assistStickyTicks < AIBOT_ASSIST_STICKY_MAX_TICKS)
-        {
+        { // cb:fold sticky gate, hold probe below
             if (Creature* pSticky = me->GetMap()->GetCreature(m_lastAssistedVictimGuid))
-            {
+            { // cb:fold sticky lookup, hold probe below
                 if (bot.IsValidAssistTarget(pSticky) &&
                     me->IsWithinDist(pSticky, VISIBILITY_DISTANCE_NORMAL))
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-doctrine: pparty, rung 4, sticky bridge hold", m_assistStickyTicks);
                     ++m_assistStickyTicks;
                     return pSticky;
                 }
@@ -310,6 +333,7 @@ private:
         // have caught it mob-side). Cheap; remove after the shakedown.
         if (++m_diagTick >= 10)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-doctrine: pparty, no focus, diag window");
             m_diagTick = 0;
             Unit* bv = boss->IsAlive() ? boss->GetVictim() : nullptr;
             Unit* ba = boss->IsAlive() ? boss->GetAttackerForHelper() : nullptr;
@@ -327,7 +351,7 @@ private:
     {
         ObjectGuid const g = focus ? focus->GetObjectGuid() : ObjectGuid();
         if (g == m_lastFocusGuid)
-            return;
+            return;   // cb:fold log throttle, focus unchanged
         m_lastFocusGuid = g;
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PARTY] %s: focus -> %s (%s)",

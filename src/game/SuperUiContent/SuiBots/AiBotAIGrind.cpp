@@ -30,6 +30,7 @@
 
 #include "AiBotAIMain.h"
 #include "AiBotAITeamPlay.h"   // [TEAMPLAY] ResolveCombatTarget — the group focus-fire resolver
+#include "AiBotCircuit.h"      // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -73,7 +74,10 @@
 uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
 {
     if (!pCandidate || !pCandidate->IsAlive())
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: hostile tally skipped, candidate gone");
         return 0;
+    }
 
     uint32 count = 0;
     std::list<Unit*> targets;
@@ -84,13 +88,13 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
     for (Unit* pUnit : targets)
     {
         if (pUnit == pCandidate)
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
         if (!pUnit->IsAlive())
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
         if (!pUnit->IsCreature())
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
         if (!IsValidHostileTarget(pUnit))
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
         // FACTION GATE (the neutral fix): only count units that will actually PILE ON when we pull —
         // i.e. reaction-hostile to us (proximity-aggro). IsValidHostileTarget/AnyUnfriendly include
         // NEUTRALS (a player CAN swing at them), but pulling a mob doesn't wake neutral bystanders, so
@@ -98,10 +102,10 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
         // (Same-faction social-assist among a tight neutral pack is the one residue — a future one-
         // predicate add here; proximity-aggro is the whole starter-field case.)
         if (!me->IsHostileTo(pUnit))
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
         if (static_cast<Creature*>(pUnit)->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED)
             && !static_cast<Creature*>(pUnit)->IsTappedBy(me))
-            continue;
+            continue; // cb:fold hostile tally filter, count is the outcome
 
         count++;
     }
@@ -121,7 +125,10 @@ uint32 AiBotAI::CountNearbyHostiles(Unit* pCandidate, float radius) const
 uint32 AiBotAI::CountNearbyBots(Unit* pCenter, float radius) const
 {
     if (!pCenter)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: bot tally skipped, no center");
         return 0;
+    }
 
     std::list<Player*> players;
     MaNGOS::AnyPlayerInObjectRangeCheck check(pCenter, radius);
@@ -133,11 +140,11 @@ uint32 AiBotAI::CountNearbyBots(Unit* pCenter, float radius) const
     for (Player* p : players)
     {
         if (!p || p == me)
-            continue;
+            continue; // cb:fold bot tally filter, count is the outcome
         if (!p->IsBot())               // real players are not convergence
-            continue;
+            continue; // cb:fold bot tally filter, count is the outcome
         if (pMyGroup && pMyGroup->IsMember(p->GetObjectGuid()))
-            continue;                  // groupmates are meant to stack
+            continue;                  // cb:fold bot tally filter (groupmates are meant to stack)
         ++count;
     }
     return count;
@@ -174,9 +181,9 @@ uint32 AiBotAI::CountNearbyBots(Unit* pCenter, float radius) const
 // Inlined exact (fork-independent) so the grind never wastes a swing on a no-xp mob.
 static uint32 AiBotGrayLevel(uint32 plLevel)
 {
-    if (plLevel <= 5)  return 0;
-    if (plLevel <= 39) return plLevel - 5 - plLevel / 10;
-    if (plLevel <= 59) return plLevel - 1 - plLevel / 5;
+    if (plLevel <= 5)  return 0;                            // cb:fold pure level formula, no bot context
+    if (plLevel <= 39) return plLevel - 5 - plLevel / 10;   // cb:fold pure level formula, no bot context
+    if (plLevel <= 59) return plLevel - 1 - plLevel / 5;    // cb:fold pure level formula, no bot context
     return plLevel - 9;
 }
 
@@ -188,7 +195,10 @@ static uint32 const AIBOT_GRIND_PREF_HIGH = 1;   // preferred band ceiling: L + 
 Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
 {
     if (m_currentTask.type != TASK_GRIND)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: scan skipped, task not grind");
         return nullptr;
+    }
 
     // [DOCTRINE] SelectGrindTarget is now the PURE solo priority scan. The group focus-fire
     // override that used to prefix it here moved into the TeamAuto doctrine's AcquireTarget
@@ -210,13 +220,14 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
         HostileReference* pRef = me->GetHostileRefManager().getFirst();
         while (pRef)
         {
-            if (Unit* pTarget = pRef->getSourceUnit())
-            {
+            if (Unit* pTarget = pRef->getSourceUnit()) // cb:fold threat ref deref, verdicts probed inside
+            {   // cb:fold threat ref deref, verdicts probed inside
                 if (pTarget != pExcept &&
                     IsValidHostileTarget(pTarget) &&
                     !IsCombatIgnored(pTarget->GetGUIDLow()) &&
                     me->IsWithinDist(pTarget, bestDist))
-                {
+                {   // cb:fold probed on next line
+                    CB_HITV(me->GetGUIDLow(), "cpp-grind: aggro candidate in range", pTarget->GetEntry());
                     // Filler grind (entry==0) must NEVER pick a CITY GUARD: an L18 bot pulls an L47
                     // town guard, which social-assists + respawns → unwinnable 100-attacker chain-pull
                     // → overpull thrash → 1%-HP grind-lock (MSUIBotTracer FINDING_005). An explicit
@@ -227,10 +238,12 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
                          !(pTarget->IsCreature() && static_cast<Creature*>(pTarget)->IsGuard())) ||
                         (pTarget->IsCreature() &&
                          m_currentTask.MatchesObjectiveEntry(static_cast<Creature*>(pTarget)->GetEntry())))
-                    {
+                    {   // cb:fold probed on next line
+                        CB_HIT(me->GetGUIDLow(), "cpp-grind: aggro candidate eligible");
                         float d = me->GetDistance(pTarget);
                         if (d < bestDist)
-                        {
+                        {   // cb:fold probed on next line
+                            CB_HITV(me->GetGUIDLow(), "cpp-grind: aggro best so far", d);
                             bestDist = d;
                             bestTarget = pTarget;
                         }
@@ -241,7 +254,10 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
         }
 
         if (bestTarget)
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: picked aggroed target", bestTarget->GetEntry());
             return bestTarget;
+        }
     }
 
     // Scores a creature list against the BOT and returns the best (lowest score).
@@ -256,24 +272,46 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
         for (Creature* c : list)
         {
             if (c == pExcept)
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, chain exclusion");
                 continue;
+            }
             if (!c->IsAlive())
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, dead");
                 continue;
+            }
             if (!IsValidHostileTarget(c))
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, not valid hostile");
                 continue;
+            }
             if (IsCombatIgnored(c->GetGUIDLow()))
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, combat ignored");
                 continue;
+            }
             if (c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !c->IsTappedBy(me))
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, tapped by other");
                 continue;
+            }
             float d = me->GetDistance(c);
             if (d > maxDist)
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-grind: pick skip, out of ring", d);
                 continue;
+            }
             if (requireLos && !me->IsWithinLOSInMap(c))
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: pick skip, no los");
                 continue;
+            }
 
             float score = d + const_cast<AiBotAI*>(this)->CountNearbyHostiles(c, 15.0f) * AGGRO_PENALTY;
             if (score < bestScore)
-            {
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-grind: pick best so far", score);
                 bestScore = score;
                 best = c;
             }
@@ -291,14 +329,15 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
     // NO level-band preference here: an objective entry is what the quest names,
     // and the server only credits that exact entry (or a shipped tied alternate).
     if (m_currentTask.creatureEntry != 0)
-    {
+    {   // cb:fold probed on next line
+        CB_HITV(me->GetGUIDLow(), "cpp-grind: objective scan begins", m_currentTask.creatureEntry);
         // Scan entries: the primary dispatched objective + any tied item-drop alternates
         // (wolf-meat fix, 2026-06-30). Most legs carry only the primary (alts all 0, skipped).
         uint32 scanEntries[1 + AiBotTaskData::MAX_ALT_ENTRIES] = { m_currentTask.creatureEntry };
         int scanEntryCount = 1;
         for (int i = 0; i < AiBotTaskData::MAX_ALT_ENTRIES; ++i)
             if (m_currentTask.altCreatureEntries[i] != 0)
-                scanEntries[scanEntryCount++] = m_currentTask.altCreatureEntries[i];
+                scanEntries[scanEntryCount++] = m_currentTask.altCreatureEntries[i]; // cb:fold alt entry gather, scan probed below
 
         static float const kRungs[] = { 50.0f, 100.0f, 150.0f, 200.0f };
         for (float rung : kRungs)
@@ -308,8 +347,9 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
                 const_cast<Player*>(me)->GetCreatureListWithEntryInGrid(
                     creatures, scanEntries[i], rung);
 
-            if (Unit* pick = pickBest(creatures, rung, /*requireLos*/ false))
-            {
+            if (Unit* pick = pickBest(creatures, rung, /*requireLos*/ false)) // cb:fold ring pick deref, hit probed inside
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-grind: objective rescan hit ring", rung);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-GRIND] %s: objective rescan hit entry=%u at %.0fyd (ring=%.0f, %d entries scanned)",
                     me->GetName(), static_cast<Creature*>(pick)->GetEntry(), me->GetDistance(pick), rung, scanEntryCount);
@@ -332,11 +372,15 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
         std::list<Creature*> fillerCreatures;
         for (Unit* u : fillers)
             if (u->IsCreature())
-                fillerCreatures.push_back(static_cast<Creature*>(u));
+                fillerCreatures.push_back(static_cast<Creature*>(u)); // cb:fold filler list assembly, pick probed below
 
-        if (Unit* pick = pickBest(fillerCreatures, 50.0f, /*requireLos*/ true))
+        if (Unit* pick = pickBest(fillerCreatures, 50.0f, /*requireLos*/ true)) // cb:fold filler pick deref, pick probed inside
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: filler target picked", pick->GetEntry());
             return pick;
+        }
 
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: objective scan dry, no filler");
         return nullptr;   // 200y dry + no filler → caller falls back to DoGrindPatrol
     }
 
@@ -365,55 +409,99 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
     for (Unit* pUnit : targets)
     {
         if (pUnit == pExcept)
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, chain exclusion");
             continue;
+        }
         if (!pUnit->IsCreature())
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, not a creature");
             continue;
+        }
         Creature* c = static_cast<Creature*>(pUnit);
         if (!c->IsAlive())
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, dead");
             continue;
+        }
         if (!IsValidHostileTarget(c))
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, not valid hostile");
             continue;
+        }
         if (IsCombatIgnored(c->GetGUIDLow()))
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, combat ignored");
             continue;
+        }
         if (c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !c->IsTappedBy(me))
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, tapped by other");
             continue;
+        }
 
         // skip critters (Cow/Sheep/Chicken — 0 XP farm)
-        if (CreatureInfo const* ci = c->GetCreatureInfo())
+        if (CreatureInfo const* ci = c->GetCreatureInfo()) // cb:fold creature info deref, critter verdict probed inside
+        {   // cb:fold creature info deref, critter verdict probed inside
             if (ci->type == CREATURE_TYPE_CRITTER)
+            {   // cb:fold probed on next line
+                CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, critter");
                 continue;
+            }
+        }
 
         // skip CITY GUARDS — never a filler-grind target (unwinnable town chain-pull, FINDING_005).
         // This is the indefinite entry==0 scan, so the exclusion is unconditional here.
         if (c->IsGuard())
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, city guard");
             continue;
+        }
 
         // skip grey (no XP) and reds (don't suicide — leave the bot to find something killable)
         uint32 const cl = c->GetLevel();
         if (cl <= grayLevel)
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: xp scan skip, grey level", cl);
             continue;
+        }
         if (cl > myLevel + AIBOT_GRIND_HIGH_OFFSET)
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: xp scan skip, level too high", cl);
             continue;
+        }
 
         if (!me->IsWithinLOSInMap(c))
+        {   // cb:fold probed on next line
+            CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan skip, no los");
             continue;
+        }
 
         float d = me->GetDistance(c);
         if (cl >= prefLow && cl <= prefHigh)
-        {
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: xp candidate preferred band", cl);
             if (d < bestPrefDist)
-            {
+            {   // cb:fold probed on next line
+                CB_HITV(me->GetGUIDLow(), "cpp-grind: xp nearest preferred so far", d);
                 bestPrefDist = d;
                 bestPref = c;
             }
         }
         else if (d < bestFallDist)
-        {
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: xp nearest fallback so far", d);
             bestFallDist = d;
             bestFall = c;
         }
     }
 
+    if (bestPref)
+        CB_HITV(me->GetGUIDLow(), "cpp-grind: xp target picked, preferred band", bestPref->GetEntry());
+    else if (bestFall)
+        CB_HITV(me->GetGUIDLow(), "cpp-grind: xp target picked, fallback band", bestFall->GetEntry());
+    else
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: xp scan empty, nothing valid in radius");
     return bestPref ? bestPref : bestFall;
 }
 
@@ -421,14 +509,26 @@ Unit* AiBotAI::SelectGrindTarget(Unit* pExcept) const
 void AiBotAI::DoGrindPatrol()
 {
     if (me->IsMoving() || me->IsInCombat())
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: patrol hold, moving or combat");
         return;
+    }
     // [SUI] An RTS-commanded or enlisted bot stands where it was told; no grind stroll.
     if (m_suiRtsHold || IsSuiConscripted())
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: patrol hold, rts or conscripted");
         return;
+    }
     if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: patrol hold, motion busy");
         return;
+    }
     if (m_wanderTimer > 0)
+    {   // cb:fold probed on next line
+        CB_HITV(me->GetGUIDLow(), "cpp-grind: patrol hold, wander timer", m_wanderTimer);
         return;
+    }
 
     m_wanderTimer = urand(3000, 6000);  // faster than idle wander
 
@@ -440,6 +540,7 @@ void AiBotAI::DoGrindPatrol()
     float z = m_currentTask.z;
 
     me->GetRandomPoint(x, y, z, 5.0f, x, y, z);  // snap to valid terrain
+    CB_HITV(me->GetGUIDLow(), "cpp-grind: patrol point issued", dist);
     MovePointRun(AIBOT_POINT_GRIND_PATROL, x, y, z);
 }
 
@@ -485,7 +586,10 @@ void AiBotAI::DoGrindPatrol()
 Unit* AiBotAI::ScanApproachTarget()
 {
     if (m_currentTask.creatureEntry == 0)
+    {   // cb:fold probed on next line
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: approach scan skipped, no objective entry");
         return nullptr;
+    }
 
     // ── Build the valid-kill union from our own quest log ──
     std::set<uint32> validEntries;
@@ -495,24 +599,24 @@ Unit* AiBotAI::ScanApproachTarget()
     // and Timber Wolf both dropping Tough Wolf Meat at the same chance. 0 = unused slot.
     for (int i = 0; i < AiBotTaskData::MAX_ALT_ENTRIES; ++i)
         if (m_currentTask.altCreatureEntries[i] != 0)
-            validEntries.insert(m_currentTask.altCreatureEntries[i]);
+            validEntries.insert(m_currentTask.altCreatureEntries[i]); // cb:fold alt entry gather, election probed below
 
     const auto& questMap = me->GetQuestStatusMap();
     for (const auto& pair : questMap)
     {
         const auto& qData = pair.second;
         if (qData.m_status != QUEST_STATUS_INCOMPLETE)
-            continue;   // COMPLETE = objectives met (no kills owed); NONE/UNAVAILABLE = not held
+            continue;   // cb:fold quest tally filter (COMPLETE = objectives met, no kills owed; NONE/UNAVAILABLE = not held)
         Quest const* pQuest = sObjectMgr.GetQuestTemplate(pair.first);
         if (!pQuest)
-            continue;
+            continue; // cb:fold quest tally filter, template missing
         for (int j = 0; j < QUEST_OBJECTIVES_COUNT; ++j)
         {
             int32 reqId = pQuest->ReqCreatureOrGOId[j];
             if (reqId <= 0)
-                continue;   // 0 = empty slot; <0 = gameobject objective (not a kill)
+                continue;   // cb:fold quest tally filter (0 = empty slot; <0 = gameobject objective, not a kill)
             if (qData.m_creatureOrGOcount[j] >= pQuest->ReqCreatureOrGOCount[j])
-                continue;   // this slot is already satisfied — its mob yields no quest credit
+                continue;   // cb:fold quest tally filter (slot already satisfied, its mob yields no credit)
             validEntries.insert((uint32)reqId);
         }
     }
@@ -530,26 +634,31 @@ Unit* AiBotAI::ScanApproachTarget()
     for (Unit* u : nearby)
     {
         if (!u->IsCreature())
-            continue;
+            continue; // cb:fold approach sweep filter, election probed below
         Creature* c = static_cast<Creature*>(u);
         if (!c->IsAlive())
-            continue;
+            continue; // cb:fold approach sweep filter, election probed below
         if (validEntries.find(c->GetEntry()) == validEntries.end())
-            continue;   // not valid for any unmet objective we hold
+            continue;   // cb:fold approach sweep filter (not valid for any unmet objective we hold)
         if (!IsValidHostileTarget(c))
-            continue;
+            continue; // cb:fold approach sweep filter, election probed below
         if (IsCombatIgnored(c->GetGUIDLow()))
-            continue;
+            continue; // cb:fold approach sweep filter, election probed below
         if (c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !c->IsTappedBy(me))
-            continue;
+            continue; // cb:fold approach sweep filter, election probed below
         // NO center-radius filter, NO LOS — scan around the bot, path to it (§4.2).
         float d = me->GetDistance(c);
         if (d < bestDist)
-        {
+        {   // cb:fold probed on next line
+            CB_HITV(me->GetGUIDLow(), "cpp-grind: approach nearest so far", d);
             bestDist = d;
             best = c;
         }
     }
+    if (best)
+        CB_HITV(me->GetGUIDLow(), "cpp-grind: approach target elected", best->GetEntry());
+    else
+        CB_HIT(me->GetGUIDLow(), "cpp-grind: approach scan empty");
     return best;
 }
 
@@ -571,8 +680,9 @@ void AiBotAI::ConvertMoveToGrindInPlace()
     m_currentTask.y = me->GetPositionY();
     m_currentTask.z = me->GetPositionZ();
     if (m_currentTask.radius < 10.0f)
-        m_currentTask.radius = 40.0f;
+        m_currentTask.radius = 40.0f; // cb:fold radius floor default, conversion probed below
     ClearStoredPath();
+    CB_HITV(me->GetGUIDLow(), "cpp-grind: move converted to grind in place", m_currentTask.creatureEntry);
 
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-PATH] %s: objective MOVE_TO -> GRIND in place (entry=%u goal=%d r=%.0f) at (%.1f, %.1f, %.1f)",

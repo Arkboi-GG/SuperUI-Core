@@ -13,6 +13,7 @@
  */
 
 #include "AiBotAIMain.h"
+#include "AiBotCircuit.h" // [CIRCUIT] probe macros (CIRCUIT_BOARD.md)
 #include "AiBotTalents.h"
 #include "SuiHero.h"
 #include "Server/Packets/Quest.h"   // shared-quest accept/decline reply packets (PLAN_20 P3)
@@ -65,7 +66,10 @@ void AiBotAI::OnPlayerLogin()
     me->SetAcceptWhispers(true);
 
     if (!m_initialized)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: first login, spawning flag set");
         me->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_SPAWNING);
+    }
 
         // Persist character to DB so it survives restarts
         me->SaveToDB();
@@ -78,6 +82,7 @@ void AiBotAI::SuiQueueWaypoint(float x, float y, float z)
 {
     if (m_currentTask.type == TASK_MOVE_TO)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: waypoint appended to active leg");
         m_suiWaypoints.push_back({x, y, z});
         return;
     }
@@ -91,7 +96,10 @@ void AiBotAI::SuiQueueWaypoint(float x, float y, float z)
 AiBotAI* AiBotAI::AttachToRealCharacter(Player* owner)
 {
     if (!owner || !owner->IsInWorld())
+    {
+        CB_HIT(owner ? owner->GetGUIDLow() : 0, "cpp-main: attach refused, no owner in world");
         return nullptr;
+    }
 
     AiBotAI* ai = new AiBotAI(owner->GetRace(), owner->GetClass(), owner->GetLevel(),
         owner->GetMapId(), owner->GetInstanceId(),
@@ -131,19 +139,22 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
     if (result)
     {
+        CB_HIT(entry->playerGUID, "cpp-main: existing character found, restart path");
         // [SUI] HARD WALL: never adopt a character owned by a REAL account. The
         // brain auto-register once swallowed an enrolled real character
         // (Tesfff, 2026-08-10); logging it in on a synthetic bot account lets
         // SaveToDB stamp that account over the owner and the character
         // vanishes from their account list. Whatever a registry row says, a
         // real-account character is refused here.
-        if (auto acctResult = CharacterDatabase.PQuery(
+        if (auto acctResult = CharacterDatabase.PQuery(   // cb:fold decl-in-condition artifact, body probed
                 "SELECT `account` FROM `characters` WHERE `guid` = '%u'", entry->playerGUID))
         {
+            CB_HIT(entry->playerGUID, "cpp-main: checking character owner account");
             uint32 ownerAccount = acctResult->Fetch()[0].GetUInt32();
             if (LoginDatabase.PQuery(
                     "SELECT 1 FROM `account` WHERE `id` = '%u'", ownerAccount))
             {
+                CB_HIT(entry->playerGUID, "cpp-main: real account owner, spawn refused");
                 sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                     "[AIBOT] REFUSING to spawn guid %u as a bot: character belongs to REAL account %u",
                     entry->playerGUID, ownerAccount);
@@ -176,6 +187,7 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
     if (!SpawnNewPlayer(sess, m_spawnClass, m_spawnRace, m_spawnMapId,
         m_spawnInstanceId, m_spawnX, m_spawnY, m_spawnZ, m_spawnO, nullptr, m_spawnName))
     {
+        CB_HIT(entry->playerGUID, "cpp-main: fresh spawn failed");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT] SpawnNewPlayer FAILED for GUID=%u", entry->playerGUID);
         return false;
@@ -186,10 +198,14 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
     // immediately. (This is the WHISPER half; the name-lookup half is fixed by creating
     // the character under m_spawnName above, so it registers correctly for /w AND /invite.)
     if (me)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: fresh spawn accepts whispers");
         me->SetAcceptWhispers(true);
+    }
 
     if (!m_spawnName.empty() && me)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: renaming fresh spawn");
         std::string oldName = me->GetName();
         sObjectMgr.DeletePlayerFromCache(me->GetGUIDLow());
         me->SetName(m_spawnName);
@@ -201,6 +217,7 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
     if (m_spawnLevel > 1 && me)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-main: applying spawn level", m_spawnLevel);
         me->GiveLevel(m_spawnLevel);
         me->SetUInt32Value(PLAYER_XP, 0);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] Set level %u for %s (GUID=%u)",
@@ -217,8 +234,10 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
     // We intercept first and make an intelligent decision using ScoreItem.
     if (packet->GetOpcode() == SMSG_LOOT_START_ROLL)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: loot roll packet intercepted");
         if (!me || !me->IsInWorld() || !me->GetGroup())
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: roll skipped, no group or not in world");
             CombatBotBaseAI::OnPacketReceived(packet);
             return;
         }
@@ -245,11 +264,13 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
  
             if (proto)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: roll evaluating item", itemId);
                 bool canEquip = false;
                 bool isUpgrade = false;
- 
+
                 if (proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: roll item is gear, checking eligibility");
                     // Check class/race/level requirements
                     bool classOk = (proto->AllowableClass == 0 ||
                                     (proto->AllowableClass & me->GetClassMask()));
@@ -259,48 +280,56 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
  
                     if (classOk && raceOk && levelOk)
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-main: roll item equippable");
                         canEquip = true;
  
                         // Map InventoryType → equipment slot for ScoreItem comparison
                         uint8 targetSlot = 255;
                         switch (proto->InventoryType)
                         {
-                            case INVTYPE_HEAD:           targetSlot = EQUIPMENT_SLOT_HEAD; break;
-                            case INVTYPE_NECK:           targetSlot = EQUIPMENT_SLOT_NECK; break;
-                            case INVTYPE_SHOULDERS:      targetSlot = EQUIPMENT_SLOT_SHOULDERS; break;
-                            case INVTYPE_CHEST:
-                            case INVTYPE_ROBE:           targetSlot = EQUIPMENT_SLOT_CHEST; break;
-                            case INVTYPE_WAIST:          targetSlot = EQUIPMENT_SLOT_WAIST; break;
-                            case INVTYPE_LEGS:           targetSlot = EQUIPMENT_SLOT_LEGS; break;
-                            case INVTYPE_FEET:           targetSlot = EQUIPMENT_SLOT_FEET; break;
-                            case INVTYPE_WRISTS:         targetSlot = EQUIPMENT_SLOT_WRISTS; break;
-                            case INVTYPE_HANDS:          targetSlot = EQUIPMENT_SLOT_HANDS; break;
-                            case INVTYPE_FINGER:         targetSlot = EQUIPMENT_SLOT_FINGER1; break;
-                            case INVTYPE_TRINKET:        targetSlot = EQUIPMENT_SLOT_TRINKET1; break;
-                            case INVTYPE_CLOAK:          targetSlot = EQUIPMENT_SLOT_BACK; break;
-                            case INVTYPE_WEAPON:
-                            case INVTYPE_2HWEAPON:
-                            case INVTYPE_WEAPONMAINHAND: targetSlot = EQUIPMENT_SLOT_MAINHAND; break;
-                            case INVTYPE_SHIELD:
-                            case INVTYPE_WEAPONOFFHAND:
-                            case INVTYPE_HOLDABLE:       targetSlot = EQUIPMENT_SLOT_OFFHAND; break;
-                            case INVTYPE_RANGED:
-                            case INVTYPE_THROWN:
-                            case INVTYPE_RANGEDRIGHT:    targetSlot = EQUIPMENT_SLOT_RANGED; break;
-                            default: break;
+                            case INVTYPE_HEAD:           targetSlot = EQUIPMENT_SLOT_HEAD; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_NECK:           targetSlot = EQUIPMENT_SLOT_NECK; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_SHOULDERS:      targetSlot = EQUIPMENT_SLOT_SHOULDERS; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_CHEST:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_ROBE:           targetSlot = EQUIPMENT_SLOT_CHEST; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_WAIST:          targetSlot = EQUIPMENT_SLOT_WAIST; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_LEGS:           targetSlot = EQUIPMENT_SLOT_LEGS; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_FEET:           targetSlot = EQUIPMENT_SLOT_FEET; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_WRISTS:         targetSlot = EQUIPMENT_SLOT_WRISTS; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_HANDS:          targetSlot = EQUIPMENT_SLOT_HANDS; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_FINGER:         targetSlot = EQUIPMENT_SLOT_FINGER1; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_TRINKET:        targetSlot = EQUIPMENT_SLOT_TRINKET1; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_CLOAK:          targetSlot = EQUIPMENT_SLOT_BACK; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_WEAPON:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_2HWEAPON:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_WEAPONMAINHAND: targetSlot = EQUIPMENT_SLOT_MAINHAND; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_SHIELD:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_WEAPONOFFHAND:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_HOLDABLE:       targetSlot = EQUIPMENT_SLOT_OFFHAND; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_RANGED:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_THROWN:   // cb:fold mapping detail, slot carried by adjacent probe
+                            case INVTYPE_RANGEDRIGHT:    targetSlot = EQUIPMENT_SLOT_RANGED; break;   // cb:fold mapping detail, slot carried by adjacent probe
+                            default: CB_HITV(me->GetGUIDLow(), "cpp-main: roll slot unmappable", proto->InventoryType); break;
                         }
- 
+
                         if (targetSlot != 255)
                         {
+                            CB_HITV(me->GetGUIDLow(), "cpp-main: roll comparing scores for slot", targetSlot);
                             float newScore = ScoreItem(proto, targetSlot);
                             float oldScore = 0.0f;
  
                             Item* currentItem = me->GetItemByPos(INVENTORY_SLOT_BAG_0, targetSlot);
                             if (currentItem && currentItem->GetProto())
+                            {
+                                CB_HIT(me->GetGUIDLow(), "cpp-main: scoring currently equipped item");
                                 oldScore = ScoreItem(currentItem->GetProto(), targetSlot);
- 
+                            }
+
                             if (newScore > oldScore)
+                            {
+                                CB_HIT(me->GetGUIDLow(), "cpp-main: item is an upgrade");
                                 isUpgrade = true;
+                            }
                         }
                     }
                 }
@@ -317,6 +346,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
             }
             else
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: roll unknown item, greed", itemId);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-ROLL] %s: unknown item %u → GREED",
                     me->GetName(), itemId);
@@ -331,6 +361,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
         catch (...)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: roll parse failed, base class fallback");
             sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-ROLL] %s: parse failed, falling back to base class (pass)",
                 me->GetName());
@@ -343,6 +374,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
     // ── Existing: Intercept incoming chat messages (say, whisper, channel) ──
     if (packet->GetOpcode() == SMSG_MESSAGECHAT)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: chat packet received");
         try
         {
             WorldPacket pkt(*packet); // copy so we can read
@@ -352,12 +384,13 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
  
             if (chatType == CHAT_MSG_SAY || chatType == CHAT_MSG_WHISPER || chatType == CHAT_MSG_PARTY)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: say whisper or party chat", chatType);
                 ObjectGuid senderGuid;
                 pkt >> senderGuid;
- 
+
                 // SAY, YELL, PARTY have a SECOND copy of senderGuid
                 if (chatType == CHAT_MSG_SAY || chatType == CHAT_MSG_YELL || chatType == CHAT_MSG_PARTY)
-                {
+                {   // cb:fold parse detail, chat carried by adjacent probes
                     ObjectGuid dupGuid;
                     pkt >> dupGuid;
                 }
@@ -366,21 +399,26 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                 // Forwarding it would let the bot converse with itself (reply loop). Skip entirely.
                 if (senderGuid == me->GetObjectGuid())
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: own chat echo, skipping");
                     CombatBotBaseAI::OnPacketReceived(packet);
                     return;
                 }
- 
+
                 uint32 textLen;
                 pkt >> textLen;
                 if (textLen > 0 && textLen < 512)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: forwarding chat to bridge");
                     std::string message;
                     pkt >> message;
- 
+
                     std::string senderName = "Unknown";
-                    if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))
+                    if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))   // cb:fold decl-in-condition artifact, body probed
+                    {
+                        CB_HIT(me->GetGUIDLow(), "cpp-main: chat sender resolved");
                         senderName = pSender->GetName();
- 
+                    }
+
                     const char* typeStr = (chatType == CHAT_MSG_WHISPER) ? "whisper"
                                         : (chatType == CHAT_MSG_PARTY)   ? "party"
                                         : "say";
@@ -393,6 +431,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
             }
             else if (chatType == CHAT_MSG_CHANNEL)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: channel chat received");
                 std::string channelName;
                 pkt >> channelName;
  
@@ -405,20 +444,25 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
                 // ── C0 self-echo filter (D16, §5.1): channel Say echoes back to the speaker too.
                 if (senderGuid == me->GetObjectGuid())
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: own channel echo, skipping");
                     CombatBotBaseAI::OnPacketReceived(packet);
                     return;
                 }
- 
+
                 uint32 textLen;
                 pkt >> textLen;
                 if (textLen > 0 && textLen < 512)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: forwarding channel chat to bridge");
                     std::string message;
                     pkt >> message;
  
                     std::string senderName = "Unknown";
-                    if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))
+                    if (Player* pSender = sObjectMgr.GetPlayer(senderGuid))   // cb:fold decl-in-condition artifact, body probed
+                    {
+                        CB_HIT(me->GetGUIDLow(), "cpp-main: chat sender resolved");
                         senderName = pSender->GetName();
+                    }
  
                     // sender_guid: GUID low when the sender is a player, else 0 (§5.1)
                     uint32 senderGuidLow = senderGuid.IsPlayer() ? senderGuid.GetCounter() : 0;
@@ -430,6 +474,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
         catch (...)
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: chat parse failed, skipping");
             // Packet parse failed — not critical, just skip
         }
     }
@@ -445,15 +490,21 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
     // swaps to PlayerParty; STATE echoes pparty=1 and C# stands down.
     if (packet->GetOpcode() == SMSG_GROUP_INVITE)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: group invite received");
         bool accept = false;
-        if (Group* pInviteGroup = me->GetGroupInvite())
+        if (Group* pInviteGroup = me->GetGroupInvite())   // cb:fold decl-in-condition artifact, body probed
         {
-            if (Player* pLeader = sObjectMgr.GetPlayer(pInviteGroup->GetLeaderGuid()))
+            CB_HIT(me->GetGUIDLow(), "cpp-main: resolving invite leader");
+            if (Player* pLeader = sObjectMgr.GetPlayer(pInviteGroup->GetLeaderGuid()))   // cb:fold decl-in-condition artifact, body probed
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: invite leader resolved, checking realness");
                 accept = pLeader->GetSession() && !pLeader->GetSession()->GetBot();
+            }
         }
 
         if (accept)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: invite from real player, accepting");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-PARTY] %s: group invite from a REAL player — accepting (escort mode arms next tick)",
                 me->GetName());
@@ -463,6 +514,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: invite not from real player, declining");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-PARTY] %s: group invite is not from a real player — declining",
                 me->GetName());
@@ -487,8 +539,10 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
     //    means "someone shared this with you".
     if (packet->GetOpcode() == SMSG_QUESTGIVER_QUEST_DETAILS)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: quest details packet");
         if (!me || packet->size() < 12)
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: quest details malformed, base class");
             CombatBotBaseAI::OnPacketReceived(packet);
             return;
         }
@@ -501,6 +555,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
         if (!giverGuid.IsPlayer() || !questId)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: NPC quest offer, bridge owns it");
             CombatBotBaseAI::OnPacketReceived(packet);
             return;   // an NPC offer -- the bridge owns that path
         }
@@ -516,6 +571,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
 
         if (accept)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: accepting shared quest", questId);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-QUEST] %s: accepting quest %u shared by %s",
                 me->GetName(), questId, pSharer->GetName());
@@ -526,6 +582,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
         }
         else if (fromRealPartyMember)
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: declining shared quest", questId);
             // Decline explicitly. Silence would leave the sharer's share info on
             // this bot, and every later share to it would answer BUSY.
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -543,8 +600,10 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
     // inline-ish here because that path sets the share info BEFORE it sends.
     if (packet->GetOpcode() == SMSG_QUEST_CONFIRM_ACCEPT)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: escort quest confirm packet");
         if (me && packet->size() >= 4)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: quest confirm parse");
             uint32 questId = 0;
             {
                 WorldPacket copy(*packet);
@@ -553,6 +612,7 @@ void AiBotAI::OnPacketReceived(WorldPacket const* packet)
             }
             if (questId)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: confirming escort quest", questId);
                 auto data = std::make_unique<WorldPackets::Quest::QuestConfirmAccept>();
                 data->questId = questId;
                 me->GetSession()->QueuePacket(std::move(data));
@@ -568,23 +628,36 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
 {
     if (MovementType == POINT_MOTION_TYPE)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-task: point motion inform", Data);
         if (Data == AIBOT_POINT_WANDER)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: wander point reached, idle");
             // Arrived at wander destination — go idle, will wander again after timer
             me->GetMotionMaster()->MoveIdle();
         }
         else if (Data == AIBOT_POINT_STALEMATE_NUDGE)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: stalemate nudge landed, idle");
             // Stalemate hop landed — go idle; HandleCombatStalemate re-evaluates next tick.
             me->GetMotionMaster()->MoveIdle();
         }
         else if (Data == AIBOT_POINT_OVERPULL_FLEE)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: overpull flee hop landed, idle");
             // Retreat hop landed — go idle; HandleOverpullRetreat re-evaluates next tick.
             me->GetMotionMaster()->MoveIdle();
         }
         else if (Data == AIBOT_POINT_TASK_DEST)
         {
+            // [SUI] Fix B: ignore the arrival callback when it is really an interrupt. StopMoving()
+            // finalizes the abandoned spline synchronously and the base Finalize fires this as a
+            // phantom arrival at the stale dest; a genuine spline completion has the latch down.
+            if (m_suiSuppressArrival)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: arrival suppressed (interrupt, not a real arrival)");
+                return;
+            }
+            CB_HIT(me->GetGUIDLow(), "cpp-task: task dest point reached");
             // [SUI] While a human drives this bot directly, the journey must not
             // chain under them: TryBegin's stop finalizes the old spline, Finalize
             // fires this callback, and the next chunk would re-open a movespline
@@ -592,12 +665,16 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // Commanded-from-the-free-view stays exempt — waypoint chains are
             // supposed to chain there, and the parked client sends no movement.
             if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: possessed, journey chain suppressed");
                 return;
+            }
 
             // More chunks remaining in the current (possibly partial) leg?
             if (!m_pathWaypoints.empty() &&
                 m_pathIndex < (uint32)m_pathWaypoints.size() - 1)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: starting next path chunk");
                 StartNextPathChunk();
                 return;
             }
@@ -609,9 +686,11 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // StopMoving()/MotionMaster::Clear() is not).
             if (m_currentTask.type == TASK_MOVE_TO)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: move leg exhausted, continuation check");
                 float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
                 if (dist > 3.0f)
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-task: short of dest", dist);
                     // [FINDING_017] Progress gate on the continuation. A new task dest
                     // re-arms the tracker; three consecutive continuations that gain
                     // <5yd toward the SAME dest mean the leg cannot advance (degenerate
@@ -630,19 +709,27 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
                     if ((anchorDx * anchorDx + anchorDy * anchorDy) >
                         (AIBOT_CONT_SAME_DEST_EPSILON * AIBOT_CONT_SAME_DEST_EPSILON))
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: new dest, progress tracker re-armed");
                         m_contDestX = m_currentTask.x;
                         m_contDestY = m_currentTask.y;
                         m_contLastDist = -1.0f;
                         m_contNoProgress = 0;
                     }
                     if (m_contLastDist >= 0.0f && (m_contLastDist - dist) < 5.0f)
+                    {
+                        CB_HITV(me->GetGUIDLow(), "cpp-task: continuation gained little ground", m_contNoProgress);
                         ++m_contNoProgress;
+                    }
                     else
+                    {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: continuation progressing, counter reset");
                         m_contNoProgress = 0;
+                    }
                     m_contLastDist = dist;
 
                     if (m_contNoProgress >= 3)
                     {
+                        CB_HITV(me->GetGUIDLow(), "cpp-task: no progress, MOVE_FAILED no_path", m_contNoProgress);
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                             "[AIBOT-PATH] %s: leg exhausted %.0fyd from dest, no progress x%u — MOVE_FAILED no_path",
                             me->GetName(), dist, m_contNoProgress);
@@ -676,6 +763,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // would mean objective-done with zero kills). Bare MOVE_TO emits "arrived".
             if (m_currentTask.type == TASK_MOVE_TO && m_currentTask.creatureEntry != 0)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: deep coord reached, grind in place");
                 ConvertMoveToGrindInPlace();
                 return;
             }
@@ -684,6 +772,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // Stamp the exact arrival coord into the event so C# refreshes ctx.Pos NOW
             // instead of waiting up to one 5s STATE cycle — otherwise a just-arrived bot
             // still reads stale-far and the planner re-issues MOVE_TO instead of interacting.
+            CB_HIT(me->GetGUIDLow(), "cpp-task: arrived at dest, TASK_COMPLETE");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s arrived at task destination", me->GetName());
             char arrBuf[96];
             snprintf(arrBuf, sizeof(arrBuf), "MOVE_TO arrived|x=%.1f|y=%.1f|z=%.1f",
@@ -697,10 +786,14 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             // the same rule the PARTIAL-leg continuation above follows.
             if (!m_suiWaypoints.empty())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: chaining next queued waypoint");
                 std::array<float, 3> next = m_suiWaypoints.front();
                 m_suiWaypoints.pop_front();
                 if (m_suiPatrolLoop)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: patrol loop, waypoint recycled");
                     m_suiWaypoints.push_back(next);   // patrol: the route cycles
+                }
                 m_currentTask.type = TASK_MOVE_TO;
                 m_currentTask.x = next[0];
                 m_currentTask.y = next[1];
@@ -709,6 +802,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
             }
             else if (m_suiFormationFacing > -100.f)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: formation slot reached, taking facing");
                 // [SUI] Formation slot reached: take the ordered facing. The
                 // stamp survives exactly one arrival; every new order clears it
                 // through SuiClearWaypoints.
@@ -718,6 +812,7 @@ void AiBotAI::MovementInform(uint32 MovementType, uint32 Data)
         }
         else if (Data == AIBOT_POINT_GRIND_PATROL)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: grind patrol point reached, idle");
             me->GetMotionMaster()->MoveIdle();
             // Arrived at patrol point within grind area — will pick next target or patrol again
         }
@@ -762,12 +857,16 @@ void AiBotAI::RefreshDoctrine()
     DoctrineKind const kind = ResolveDoctrine(*this);
     if (!m_doctrine || kind != m_doctrineKind)
     {
+        CB_HITV(me ? me->GetGUIDLow() : 0, "cpp-main: doctrine changed, swapping", (int)kind);
         // [SUI] A Solo-era brain errand does not survive joining a human's party:
         // the planner stands down on pparty, but its last MOVE_TO kept walking the
         // bot to a dead objective — and a live TASK_MOVE_TO also gates
         // DoPartyFollow, so the new member marched away instead of forming up.
         if (kind == DoctrineKind::PlayerParty && m_doctrineKind == DoctrineKind::Solo)
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: joining player party, abandoning solo errand");
             SuiAbandonJourney();
+        }
         char const* from = m_doctrine ? m_doctrine->Name() : "(none)";
         m_doctrine = MakeDoctrine(kind);
         m_doctrineKind = kind;
@@ -789,11 +888,17 @@ void AiBotAI::RefreshDoctrine()
 Player* AiBotAI::FindPartyBoss() const
 {
     if (!me || !me->IsInWorld())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: no boss, bot not in world");
         return nullptr;
+    }
 
     Group* pGroup = me->GetGroup();
     if (!pGroup)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: no boss, not grouped");
         return nullptr;
+    }
 
     // [SUI] A group member currently DRIVEN by a real player outranks every other
     // candidate — the pack follows the character the human is actually playing,
@@ -803,7 +908,10 @@ Player* AiBotAI::FindPartyBoss() const
     {
         Player* pMember = itr->getSource();
         if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: possessed member outranks, boss resolved");
             return pMember;
+        }
     }
 
     Player* firstReal = nullptr;
@@ -811,14 +919,26 @@ Player* AiBotAI::FindPartyBoss() const
     {
         Player* pMember = itr->getSource();
         if (!pMember || pMember == me)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: boss scan member skipped, null or self");
             continue;
+        }
         WorldSession* pSess = pMember->GetSession();
         if (!pSess || pSess->GetBot())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: boss scan member is bot session");
             continue;   // a bot session — not a boss
+        }
         if (pMember->GetObjectGuid() == pGroup->GetLeaderGuid())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: real leader is boss");
             return pMember;   // the leader is real — unambiguous
+        }
         if (!firstReal)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: first real member remembered");
             firstReal = pMember;
+        }
     }
     return firstReal;   // leader is a bot but a human is present — escort the human
 }
@@ -833,11 +953,17 @@ Player* AiBotAI::FindPartyBoss() const
 Player* AiBotAI::FindEscortBoss() const
 {
     if (!me || !me->IsInWorld())
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: no escort boss, bot not in world");
         return nullptr;
+    }
 
     Group* pGroup = me->GetGroup();
     if (!pGroup)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: no escort boss, not grouped");
         return nullptr;
+    }
 
     // [SUI] Mirror FindPartyBoss's pre-pass: the group member the human actually
     // DRIVES outranks every real-session candidate. This function feeds the STATE
@@ -849,7 +975,10 @@ Player* AiBotAI::FindEscortBoss() const
     {
         Player* pMember = itr->getSource();
         if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: possessed member outranks, escort boss resolved");
             return pMember;
+        }
     }
 
     std::vector<Player*> reals;
@@ -857,30 +986,43 @@ Player* AiBotAI::FindEscortBoss() const
     {
         Player* pMember = itr->getSource();
         if (!pMember || pMember == me)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: escort scan member skipped, null or self");
             continue;
+        }
         WorldSession* pSess = pMember->GetSession();
         if (!pSess || pSess->GetBot())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: escort scan member is bot session");
             continue;   // a bot session — not a human
+        }
         reals.push_back(pMember);
     }
 
     if (reals.empty())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: no real players, no escort boss");
         return nullptr;
+    }
 
     // [FOLLOW-CMD] Explicit assignment wins: "{bot} follow {player}" stored a lowercased
     // name; if that human is HERE, escort him. Not present (offline / left / typo) → fall
     // through to the auto split below, so a stale override can never strand the bot.
     if (!m_escortOverrideName.empty())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: follow override present, matching");
         for (Player* pReal : reals)
         {
             char const* n = pReal->GetName();
             size_t i = 0;
             for (; n[i] && i < m_escortOverrideName.size(); ++i)
                 if ((char)tolower((unsigned char)n[i]) != m_escortOverrideName[i])
-                    break;
+                    break;   // cb:fold hot per-char name compare detail
             if (!n[i] && i == m_escortOverrideName.size())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: follow override matched, boss chosen");
                 return pReal;   // full-length case-insensitive match
+            }
         }
     }
 
@@ -912,31 +1054,45 @@ void AiBotAI::DoPartyFollow()
     // chain) never formation-follows — it stands where it was left. Combat assist
     // and the player-party stand-down stay live; only the follow leg is severed.
     if (m_suiUnlinked)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: unlinked, holding position");
         return;
+    }
 
     // A toon the human is commanding from the sky stands where it was sent. Formation-following
     // would drag it back to the party the moment its ordered leg finished, which is the opposite
     // of driving it: you moved it there on purpose.
     if (SuiPossess::IsCommandedFromFreeView(me))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: commanded from free view, no follow");
         return;
+    }
 
     Player* pBoss = FindEscortBoss();
     if (!pBoss || !pBoss->IsInWorld() || !pBoss->IsAlive())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: no live boss, no follow");
         return;
+    }
 
     if (pBoss->GetMapId() != me->GetMapId())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: boss on other map, instance-follow path");
         // [PLAYERPARTY] Instance-follow (2026-07-08): the boss crossed a map boundary
         // (dungeon portal — or a boat/taxi, which we deliberately wait out).
         if (pBoss->HasUnitState(UNIT_STATE_TAXI_FLIGHT) || pBoss->GetTransport())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: boss in transit, waiting");
             m_bossOffMapMs = 0;   // in transit — he'll land; don't chase a moving platform
             return;
         }
 
         m_bossOffMapMs += AIBOT_UPDATE_INTERVAL;
         if (m_bossOffMapMs < AIBOT_PARTY_INSTANCE_DWELL_MS)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: off-map dwell accruing", m_bossOffMapMs);
             return;
+        }
 
         m_bossOffMapMs = 0;
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -955,6 +1111,7 @@ void AiBotAI::DoPartyFollow()
 
     if (dist > AIBOT_PARTY_CATCHUP_TELEPORT)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-main: left behind, catch-up teleport", dist);
         float bx = pBoss->GetPositionX();
         float by = pBoss->GetPositionY();
         float bz = pBoss->GetPositionZ();
@@ -969,6 +1126,7 @@ void AiBotAI::DoPartyFollow()
     if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE &&
         dist > AIBOT_PARTY_FOLLOW_DIST + 1.0f)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: issuing follow behind boss");
         // Deterministic per-bot spread behind the boss: 8 slots around the rear arc.
         float const angle = M_PI_F + (float(me->GetGUIDLow() % 8) - 3.5f) * (M_PI_F / 8.0f);
         me->GetMotionMaster()->MoveFollow(pBoss, AIBOT_PARTY_FOLLOW_DIST, angle);
@@ -1010,42 +1168,57 @@ void AiBotAI::UpdateBridgeTick()
     // (Tesfff, 2026-08-10). Doctrine + explicit CMSG_SUI_ORDER injections are
     // the whole control surface for an unattended real character.
     if (m_ownedDummyEntry)
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: enrolled real character, brain suppressed");
         return;
+    }
 
     if (!m_bridgeConnected)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: bridge disconnected");
         if (m_bridgeReconnectTimer <= AIBOT_UPDATE_INTERVAL)
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: reconnect timer elapsed, connecting");
             m_bridgeReconnectTimer = 0;
             BridgeConnect();
         }
         else
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: reconnect timer ticking");
             m_bridgeReconnectTimer -= AIBOT_UPDATE_INTERVAL;
         }
     }
 
     if (m_bridgeConnected)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: bridge tick, connected");
         if (!m_bridgeHelloSent && m_initialized)
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: sending HELLO to brain");
             BridgeSendHello();
+        }
 
         BridgeRecv();
 
         if (m_bridgeHelloSent)
         {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: hello sent, state cadence");
             if (m_bridgeStateTimer <= AIBOT_UPDATE_INTERVAL)
             {
+                CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: state interval elapsed, sending STATE");
                 m_bridgeStateTimer = BRIDGE_STATE_INTERVAL;
                 BridgeSendState();
             }
             else
             {
+                CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: state timer ticking");
                 m_bridgeStateTimer -= AIBOT_UPDATE_INTERVAL;
             }
         }
 
         BridgeFlush();   // Session 36: drain bytes deferred by a prior partial/blocked write
+
+        CircuitFlush();  // [CIRCUIT] ship this second's buffered probes (no-op unless armed)
     }
 }
 
@@ -1057,18 +1230,24 @@ void AiBotAI::UpdateBridgeTick()
 void AiBotAI::SetPossessed(bool on)
 {
     if (m_possessed == on)
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: possession unchanged, no-op");
         return;
+    }
     m_possessed = on;
     if (on)
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: possession begin, freezing");
         if (me)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: stopping movement for possession");
             StopMoving();
             me->GetMotionMaster()->MoveIdle();
         }
     }
     else
     {
+        CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: possession end, resume on fresh tick");
         m_updateTimer.Reset(1000);
     }
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[AIBOT] %s possession %s",
@@ -1089,14 +1268,19 @@ void AiBotAI::UpdateTravelStuckWatchdog()
     bool traveling = m_currentTask.type != TASK_IDLE && !me->IsInCombat();
     if (traveling)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: watchdog checking travel progress");
         float ddx = m_currentTask.x - me->GetPositionX();
         float ddy = m_currentTask.y - me->GetPositionY();
         float arrive = m_currentTask.radius > AIBOT_TRAVEL_STUCK_RADIUS ? m_currentTask.radius : AIBOT_TRAVEL_STUCK_RADIUS;
         if (ddx * ddx + ddy * ddy < arrive * arrive)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: within arrive radius, not stuck");
             traveling = false;   // at/near the dest -- not travel-stuck
+        }
     }
     if (!traveling)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: not traveling, watchdog reset");
         m_travelRefX = me->GetPositionX(); m_travelRefY = me->GetPositionY(); m_travelRefMs = now;
         return;
     }
@@ -1105,6 +1289,7 @@ void AiBotAI::UpdateTravelStuckWatchdog()
     float my = me->GetPositionY() - m_travelRefY;
     if (mx * mx + my * my > AIBOT_TRAVEL_STUCK_RADIUS * AIBOT_TRAVEL_STUCK_RADIUS)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: advancing, watchdog reset");
         m_travelRefX = me->GetPositionX(); m_travelRefY = me->GetPositionY(); m_travelRefMs = now;
         return;   // advancing normally
     }
@@ -1112,15 +1297,20 @@ void AiBotAI::UpdateTravelStuckWatchdog()
     uint32 const threshold = AIBOT_TRAVEL_STUCK_MS + (me->GetGUIDLow() % 30) * 1000;
     uint32 const stuckMs = WorldTimer::getMSTimeDiff(m_travelRefMs, now);
     if (stuckMs < threshold)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-main: wedged, stuck dwell accruing", stuckMs);
         return;
+    }
 
     float nx, ny, nz;
     if (FindNearestNavmeshPointNear(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
                                     nx, ny, nz, AIBOT_TRAVEL_UNSTUCK_SEARCH))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: navmesh snap candidate found");
         float sdx = nx - me->GetPositionX(), sdy = ny - me->GetPositionY();
         if (sdx * sdx + sdy * sdy > 1.0f)   // a real relocation, not a no-op snap onto our own poly
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: travel stuck, snap to navmesh, drop leg");
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-UNSTUCK] %s: travel-stuck %ums at (%.1f,%.1f,%.1f) -> snap %.1fyd to navmesh (%.1f,%.1f,%.1f), drop leg",
                 me->GetName(), stuckMs, me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
@@ -1132,6 +1322,7 @@ void AiBotAI::UpdateTravelStuckWatchdog()
         }
     }
 
+    CB_HIT(me->GetGUIDLow(), "cpp-main: travel stuck, isolated dest, drop leg");
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-UNSTUCK] %s: travel-stuck %ums at (%.1f,%.1f,%.1f) but no navmesh within %.0fyd -> drop leg (isolated dest)",
         me->GetName(), stuckMs, me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
@@ -1150,11 +1341,15 @@ void AiBotAI::UpdateTravelStuckWatchdog()
 bool AiBotAI::HandleHearthCast()
 {
     if (!m_hearthActive)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: no hearth active");
         return false;
+    }
 
     // Interruptible by design — pulled into combat or killed cancels the escape.
     if (!me->IsAlive() || me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: hearth aborted by combat or death");
         me->InterruptSpell(CURRENT_GENERIC_SPELL);
         me->SetHomebindInMemory(
             WorldLocation(m_hearthSavedHomeMap, m_hearthSavedHomeX, m_hearthSavedHomeY, m_hearthSavedHomeZ, 0.0f),
@@ -1170,7 +1365,10 @@ bool AiBotAI::HandleHearthCast()
 
     // Still channeling → own the tick (stationary; do not let normal AI issue a move that breaks it).
     if (me->GetCurrentSpell(CURRENT_GENERIC_SPELL) != nullptr)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: hearth still casting, owning tick");
         return true;
+    }
 
     // Cast is gone. Either it completed (spell teleported us to the town via the overridden homebind)
     // or it was interrupted before completion. Restore the real homebind either way.
@@ -1185,11 +1383,13 @@ bool AiBotAI::HandleHearthCast()
 
     if (crossMapPort || arrivedSameMap)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: hearth port confirmed, re-anchoring spawn");
         // Re-anchor the "spawn" fallback to the town we hearthed to (mirrors the old PORT_HOME).
         m_spawnMapId = (uint32)m_hearthMap;
         m_spawnX = m_hearthX; m_spawnY = m_hearthY; m_spawnZ = m_hearthZ; m_spawnO = me->GetOrientation();
         if ((int)me->GetMapId() != m_hearthMap)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: cross-map hearth, landing validation pending");
             // Cross-continent worldport is async — validate the landing on the arrival tick (same
             // guarantee as the fallback instant cross-map port).
             m_pendingWalkableLanding = true;
@@ -1198,6 +1398,7 @@ bool AiBotAI::HandleHearthCast()
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: same-map hearth, walkable teleport");
             TeleportToWalkable(m_hearthX, m_hearthY, m_hearthZ, me->GetOrientation(), "hearth-home");
             m_spawnX = me->GetPositionX(); m_spawnY = me->GetPositionY(); m_spawnZ = me->GetPositionZ();
         }
@@ -1207,6 +1408,7 @@ bool AiBotAI::HandleHearthCast()
         return true;
     }
 
+    CB_HITV(me->GetGUIDLow(), "cpp-main: hearth lost early, escape aborted", m_hearthElapsedMs);
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT] %s HEARTH interrupted @ %u ms — escape aborted (brain re-issues)",
         me->GetName(), m_hearthElapsedMs);
@@ -1218,6 +1420,11 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // Handle pending teleports from base class
     PlayerBotAI::UpdateAI(diff);
 
+    // [SUI] Fix A: drain at most one coalesced RTS move per tick (latest dest wins). Runs ahead of
+    // the 1 Hz behaviour gate so an ordered move stays responsive, and before the possess
+    // early-returns so a free-view-commanded body still gets its move.
+    ConsumePendingSuiRtsMove();
+
     // [ROTATION/SPEC] Combat sub-tick: external slates and validated built-in
     // spec policies evaluate at 4 Hz
     // AHEAD of the 1s behaviour gate — the 1 Hz loop can't weave a GCD, and its wand
@@ -1227,7 +1434,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // one branch and retain the original cadence.
     m_rotationSubTick.Update(diff);
     if (m_rotationSubTick.Passed())
-    {
+    {   // cb:fold hot 4 Hz sub-tick cadence, cast decisions probed inside
         m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
         if (!m_possessed
             && HasFastCombatPolicy() && me && me->IsInWorld() && !me->IsBeingTeleported()
@@ -1235,14 +1442,21 @@ void AiBotAI::UpdateAI(uint32 const diff)
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
             && !me->IsNonMeleeSpellCasted(false, false, true))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: combat sub-tick cast window open");
             if (!m_rotation.empty())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: external rotation slate cast");
                 UpdateRotationSlate(); // absolute external override
+            }
             // Built-in policies yield while the movement spine owns a pull or
             // escape hop.  Casting here can stop the isolated tag-and-drag or a
             // stalemate/overpull retreat before its 1 Hz handler advances it.
             // External LOAD_ROTATION remains the absolute override above.
             else if (!m_pullActive && !m_stalemateHoldMs && !m_overpullFleeHoldMs)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: built-in spec cast attempt");
                 UpdateSpecCombatAI();
+            }
         }
     }
 
@@ -1252,12 +1466,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // only walks and wards.
     m_raidPlanSubTick.Update(diff);
     if (m_raidPlanSubTick.Passed())
-    {
+    {   // cb:fold hot 2 Hz sub-tick cadence, act tick probed inside
         m_raidPlanSubTick.Reset(500);
         if (!m_possessed && m_hasRaidPlan && me && me->IsInWorld() && !me->IsBeingTeleported()
             && me->IsAlive()
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: raid plan act tick");
             UpdateRaidPlanTick();
+        }
     }
 
     // [TRACE] Movement trace sub-tick (2026-07-20) — the SYMPTOM half of the fly
@@ -1269,16 +1486,22 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // per bot per 250ms and emits nothing. Pairs with the dispatch-time [AIBOT-TRACE] WP/PATH
     // lines from GroundPathPoints — cause and symptom land on one timeline in Server.log.
     if (!m_possessed)
-        UpdateMovementTrace(diff);
+        UpdateMovementTrace(diff);   // cb:fold hot per-update trace sub-tick, self-throttled inside
 
     m_updateTimer.Update(diff);
     if (m_updateTimer.Passed())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: behavior tick begins");
         m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL);
+    }
     else
-        return;
+        return;   // cb:fold hot per-update behavior gate
 
     if (!me->IsInWorld() || me->IsBeingTeleported())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: not in world or teleporting, tick skipped");
         return;
+    }
 
     // Finish walkability validation for a cross-continent PORT_HOME after PlayerBotAI above
     // completes the asynchronous worldport. The original far teleport uses a real hostile-spawn
@@ -1286,6 +1509,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // disconnected navmesh pixel before autonomous quest/grind selection resumes.
     if (m_pendingWalkableLanding && me->GetMapId() == m_pendingWalkableMap)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: cross-map landing, validating walkable");
         float const requestedX = m_pendingWalkableX;
         float const requestedY = m_pendingWalkableY;
         m_pendingWalkableLanding = false;
@@ -1313,6 +1537,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // for this bot so it holds the ground you sent it to instead of walking back to the party.
     if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: possessed, autonomy suspended, bridge only");
         UpdateBridgeTick();
         return;
     }
@@ -1322,9 +1547,13 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // to normal AI if the cast just aborted (interrupt / combat / death). See HandleHearthCast.
     if (m_hearthActive)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: hearth active, driving cast");
         UpdateBridgeTick();
         if (HandleHearthCast())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: hearth owns tick");
             return;
+        }
     }
 
     // [FINDING_019] Backstop: un-stick a bot physically wedged in geometry while traveling. Runs on
@@ -1333,22 +1562,37 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
     // Decrement wander/patrol timer
     if (m_wanderTimer > AIBOT_UPDATE_INTERVAL)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: wander timer ticking");
         m_wanderTimer -= AIBOT_UPDATE_INTERVAL;
+    }
     else
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: wander timer at zero");
         m_wanderTimer = 0;
+    }
 
     // §4 approach-scan throttle
     if (m_approachScanTimer > AIBOT_UPDATE_INTERVAL)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: approach scan timer ticking");
         m_approachScanTimer -= AIBOT_UPDATE_INTERVAL;
+    }
     else
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: approach scan timer at zero");
         m_approachScanTimer = 0;
+    }
 
     // [ADDED] Combat-stalemate ignore set: tick down per-guid cooldowns
     for (auto it = m_combatIgnore.begin(); it != m_combatIgnore.end(); )
     {
         if (it->second <= AIBOT_UPDATE_INTERVAL)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: tapped-ignore expired");
             it = m_combatIgnore.erase(it);
-        else { it->second -= AIBOT_UPDATE_INTERVAL; ++it; }
+        }
+        else { CB_HIT(me->GetGUIDLow(), "cpp-main: tapped-ignore cooldown ticking"); it->second -= AIBOT_UPDATE_INTERVAL; ++it; }
     }
 
     // [DOCTRINE] Resolve which engagement doctrine governs this tick (Solo / TeamAuto / Directed)
@@ -1361,6 +1605,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // One-time log on first successful update tick
     if (!m_loggedFirstUpdate)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: first update tick, enabling save");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s (guid %u) UpdateAI active - class %u, level %u, zone %u, map %u",
             me->GetName(), me->GetGUIDLow(), me->GetClass(), me->GetLevel(),
             me->GetZoneId(), me->GetMapId());
@@ -1373,6 +1618,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Initialization (once, on first update after login) ---
     if (!m_initialized)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: initializing bot on first tick");
         uint32 learnedTalentPoints = 0;
         uint32 learnedClassSpells = 0;
         uint32 learnedArmorSpells = 0;
@@ -1380,30 +1626,43 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // Attached real characters deliberately bypass all fabricated-bot mutations.
         if (!m_ownedDummyEntry)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: fabricated bot, running spawn repairs");
             AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
             learnedTalentPoints = repair.learnedPoints;
             if (repair.role != ROLE_INVALID)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: role taken from talent repair");
                 m_role = repair.role;
+            }
 
             // Quest/fundamental abilities unlock trainer chains, so repair the
             // curated class set after talents but before refreshing trainer and
             // item spells.  Attached real characters never enter this block.
             learnedClassSpells = LearnBotClassQuestSpells();
             if (m_freshSpawn || learnedTalentPoints || learnedClassSpells)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: refreshing trainer and item spells");
                 LearnTrainerAndItemSpells();
+            }
             learnedArmorSpells = LearnArmorProficiencies();
 
             if (learnedClassSpells || learnedArmorSpells)
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,   // cb:fold logging-only spell-count report
                     "[AIBOT] %s learned lifecycle spells: class=%u armor=%u",
                     me->GetName(), learnedClassSpells, learnedArmorSpells);
         }
 
         if (m_freshSpawn)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: fresh spawn auto-equip");
             AutoEquipGear(PLAYER_BOT_AUTO_EQUIP_STARTING_GEAR);
+        }
 
         if (m_role == ROLE_INVALID)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: auto-assigning role");
             AutoAssignRole();
+        }
 
         ResetSpellData();
         PopulateSpellData();
@@ -1416,6 +1675,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
         if (urand(0, 1))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: random helm-cloak hide toggle");
             me->ToggleFlag(PLAYER_FLAGS, PLAYER_FLAGS_HIDE_HELM);
             me->ToggleFlag(PLAYER_FLAGS, PLAYER_FLAGS_HIDE_CLOAK);
         }
@@ -1428,9 +1688,11 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // Channel names are zone-dependent: "General - Elwynn Forest", "Trade - Stormwind City", etc.
         if (me->GetSession())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: joining zone chat channels");
             const AreaEntry* zoneEntry = AreaEntry::GetById(newzone);
             if (zoneEntry && zoneEntry->Name)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: zone resolved, joining General and Trade");
                 std::string zoneName = zoneEntry->Name;
 
                 WorldPackets::Channel::JoinChannel joinGeneral;
@@ -1448,13 +1710,17 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: zone name unresolved, skipping channels");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s could not resolve zone name for zone %u, skipping channel join",
                     me->GetName(), newzone);
             }
         }
 
         if (m_freshSpawn || learnedTalentPoints || learnedClassSpells || learnedArmorSpells)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: init save to DB");
             me->SaveToDB();
+        }
         m_initialized = true;
         m_lastKnownLevel = me->GetLevel();
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s initialized - class %u, level %u, role %u",
@@ -1465,8 +1731,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Death handling: ghost at corpse, wait for C# RESURRECT (or self-rez at a graveyard) ---
     if (me->IsDead())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: dead tick");
         if (!m_wasDead)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: death detected, ghosting at corpse");
             m_wasDead = true;
 
             float deathX = me->GetPositionX();
@@ -1479,13 +1747,19 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 me->GetName(), deathX, deathY, deathZ, deathMap);
 
             if (me->GetMotionMaster()->GetCurrentMovementGeneratorType())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: stopping movement on death");
                 StopMoving();
+            }
 
             m_currentTask.Clear();
 
             // Clean up any existing corpse from a previous death
-            if (Corpse* oldCorpse = me->GetCorpse())
+            if (Corpse* oldCorpse = me->GetCorpse())   // cb:fold decl-in-condition artifact, body probed
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: clearing previous corpse");
                 me->SpawnCorpseBones();
+            }
 
             // Ghost form — bot becomes translucent spirit, corpse drops
             me->BuildPlayerRepop();
@@ -1503,17 +1777,25 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // [GRAVE-SELFREZ] Graveyard self-rez — the firing half of the zone-0 escape.
         if (m_pendingGraveyardRez)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: graveyard self-rez pending");
             if (SuiHero::BlocksResurrection(me))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: hero blocks resurrection, rez canceled");
                 m_pendingGraveyardRez = false;
                 m_graveRezWaitMs = 0;
                 return;
             }
 
             if (m_graveRezWaitMs > AIBOT_UPDATE_INTERVAL)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: grave rez wait ticking");
                 m_graveRezWaitMs -= AIBOT_UPDATE_INTERVAL;
+            }
             else
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: grave rez wait at zero");
                 m_graveRezWaitMs = 0;
+            }
 
             float distToGrave = me->GetDistance2d(m_graveRezX, m_graveRezY);
             bool landed   = (me->GetMapId() == m_graveRezMap) && (distToGrave < 25.0f);
@@ -1521,6 +1803,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (landed || timedOut)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: graveyard reached or timeout, self-rez", distToGrave);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s graveyard self-rez %s at (%.1f, %.1f) (dist=%.1f)",
                     me->GetName(), landed ? "confirmed" : "TIMEOUT",
@@ -1545,9 +1828,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
         return;
     }
     else
-    {
+    {   // cb:fold alive fall-through, revival probed inside
         if (m_wasDead)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: revived, resummon pet");
             m_wasDead = false;
             SummonPetIfNeeded();
             return;
@@ -1557,19 +1841,28 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // [OVERPULL] Peak melee attackers this combat — stamped on the DEATH event above.
     if (me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: in combat, tracking attacker peak");
         uint32 atk = (uint32)me->GetAttackers().size();
         if (atk > m_lastAttackerCount)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: attacker peak raised", atk);
             m_lastAttackerCount = atk;
+        }
     }
     else
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: out of combat, attacker peak reset");
         m_lastAttackerCount = 0;
+    }
 
 
     // --- TASK_TAXI: in-flight — skip ALL behavior until we land ---
     if (m_currentTask.type == TASK_TAXI)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-task: taxi task tick");
         if (me->GetTaxi().empty() && !me->HasUnitState(UNIT_STATE_TAXI_FLIGHT))
         {
+            CB_HITV(me->GetGUIDLow(), "cpp-task: flight complete, task cleared", m_currentTask.taxiDestNode);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT] %s: flight complete (arrived at node %u)",
                 me->GetName(), m_currentTask.taxiDestNode);
@@ -1579,6 +1872,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         }
         else
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: still flying, behavior suspended");
             return; // still flying — don't wander, fight, eat, buff, etc.
         }
     }
@@ -1586,19 +1880,24 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Level-up detection ---
     if (m_lastKnownLevel > 0 && me->GetLevel() > m_lastKnownLevel)
     {
+        CB_HITV(me->GetGUIDLow(), "cpp-main: level-up detected", me->GetLevel());
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s leveled up: %u -> %u",
             me->GetName(), m_lastKnownLevel, me->GetLevel());
         if (!m_ownedDummyEntry)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: level-up repairs for fabricated bot");
             AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
             if (repair.role != ROLE_INVALID)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: role from level-up repair");
                 m_role = repair.role;
+            }
 
             uint32 const learnedClassSpells = LearnBotClassQuestSpells();
             LearnTrainerAndItemSpells();
             uint32 const learnedArmorSpells = LearnArmorProficiencies();
             if (learnedClassSpells || learnedArmorSpells)
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,   // cb:fold logging-only spell-count report
                     "[AIBOT] %s learned level-up lifecycle spells: class=%u armor=%u",
                     me->GetName(), learnedClassSpells, learnedArmorSpells);
         }
@@ -1612,6 +1911,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         PopulateSpellData();
         if (!m_ownedDummyEntry)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: level-up reagents and skills refresh");
             AddAllSpellReagents();
             me->UpdateSkillsToMaxSkillsForLevel();
             me->SaveToDB();
@@ -1621,12 +1921,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Auto-loot timer ---
     if (m_lootTimer > 0)
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: loot timer ticking");
         m_lootTimer -= (int32)AIBOT_UPDATE_INTERVAL;
         if (m_lootTimer <= 0)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: loot timer elapsed");
             m_lootTimer = 0;
             if (!m_lootTargetGuid.IsEmpty())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: firing auto-loot");
                 DoAutoLoot(m_lootTargetGuid);
                 m_lootTargetGuid.Clear();
             }
@@ -1636,6 +1939,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- CC break ---
     if (me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: crowd controlled, breaking");
         BreakCrowdControlEffects();
         return;
     }
@@ -1643,15 +1947,26 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Auto-repeat spell handling (Hunter Auto Shot / caster wands) ---
     if (me->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: autorepeat spell active");
         bool const fastPolicy = HasFastCombatPolicy();
         if (!me->GetVictim())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: no victim, stopping autorepeat");
             me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL, true);
+        }
         else if (me->GetClass() == CLASS_HUNTER)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: hunter autorepeat check");
             if (me->GetCombatDistance(me->GetVictim()) < 8.0f)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: victim in melee, stopping auto shot");
                 me->InterruptSpell(CURRENT_AUTOREPEAT_SPELL, true);
+            }
             else if (!fastPolicy)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: legacy hunter combat AI");
                 UpdateInCombatAI_Hunter();
+            }
         }
 
         // Preserve the inherited behavior exactly for legacy/fallback bots.
@@ -1660,25 +1975,38 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // movement/retreat spine.  The guard below skips autorepeat but still
         // blocks real casts and channels.
         if (!fastPolicy)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: legacy autorepeat, tick ends");
             return;
+        }
     }
 
     if (me->IsNonMeleeSpellCasted(false, false, true))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: casting, tick ends");
         return;
+    }
 
     if (me->GetTargetGuid() == me->GetObjectGuid())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: clearing self-target");
         me->ClearTarget();
+    }
 
     Unit* pVictim = me->GetVictim();
 
     // Prevent chasing stealthed target
     if (pVictim && !pVictim->IsVisibleForOrDetect(me, me, false))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: victim stealthed, dropping chase");
         me->AttackStop();
         me->ClearTarget();
         me->StopMoving();
         if (pVictim = SelectAttackTarget(pVictim))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: reacquired after stealth drop");
             AttackStart(pVictim);
+        }
         return;
     }
 
@@ -1692,6 +2020,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // afterward instead of chaining into the next pull half-dead.
     if (!me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: OOC eat-drink evaluation");
         bool hasActiveTask = (m_currentTask.type == TASK_MOVE_TO ||
                               m_currentTask.type == TASK_GRIND);
         bool const manaUser = (me->GetPowerType() == POWER_MANA);
@@ -1699,61 +2028,95 @@ void AiBotAI::UpdateAI(uint32 const diff)
         float const mp = manaUser ? me->GetPowerPercent(POWER_MANA) : 100.0f;
 
         if (hp < AIBOT_EAT_ENTER_HP || (manaUser && mp < AIBOT_EAT_ENTER_MANA))
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: eat latch set, below floor", hp);
             m_eatRecoveryLatch = true;
+        }
 
         if (m_eatRecoveryLatch && hp >= AIBOT_EAT_EXIT_HP && mp >= AIBOT_EAT_EXIT_MANA)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: eat latch released, recovered");
             m_eatRecoveryLatch = false;
+        }
 
         if (!hasActiveTask || m_eatRecoveryLatch)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: eat gate open");
             if (DrinkAndEat())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: eating or drinking, tick ends");
                 return;
+            }
         }
     }
 
     if (me->GetStandState() != UNIT_STAND_STATE_STAND)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: standing up");
         me->SetStandState(UNIT_STAND_STATE_STAND);
+    }
 
     // [SUI] Combat cancels a commanded sheath; otherwise the ORDER_SHEATH
     // override holds and the auto-arm below must not fight it every tick.
     if (m_suiSheathOverride >= 0 && me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: combat cancels sheath override");
         m_suiSheathOverride = -1;
+    }
     if (me->GetSheath() == SHEATH_STATE_UNARMED && !me->IsMounted() &&
         m_suiSheathOverride < 0)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: auto-arming melee sheath");
         me->SetSheath(SHEATH_STATE_MELEE);
+    }
 
     // --- Out of combat behavior ---
     if (!me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: out of combat behavior");
         // [PULL] Out of combat = no pull in flight. Clear any stale pull state so it can never
         // linger across an OOC gap into an unrelated defense fight. BeginPull (below, in the
         // TASK_GRIND engage) re-sets it later THIS tick when we actually pull, then returns.
         m_pullActive = false;
 
         if (CheckForUnreachableTarget())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: unreachable target handled, tick ends");
             return;
+        }
 
         UpdateOutOfCombatAI();
 
         if (m_isBuffing)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: buffing, tick ends");
             return;
+        }
 
         // Can enter combat from UpdateOutOfCombatAI().
         if (me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: OOC AI entered combat, tick ends");
             return;
+        }
 
         if (me->IsNonMeleeSpellCasted())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: casting after OOC AI, tick ends");
             return;
+        }
 
 
         // --- Kill detection (must run before combat/OOC branching) ---
         if (!pVictim && m_lastVictimEntry != 0)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: victim gone, kill check");
             // Victim pointer cleared = mob died or despawned. Fire kill event.
             // --- Tapped check: only process kills we actually tagged ---
             Creature* pKillCreature = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
             if (pKillCreature && pKillCreature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !pKillCreature->IsTappedBy(me))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: kill tapped by another, no credit");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s: mob (entry=%u guid=%u) tapped by another — skipping kill credit",
                     me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
@@ -1762,6 +2125,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: kill credited", m_lastVictimEntry);
             SendKillEvent(m_lastVictimEntry, m_lastVictimGuidLow);
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT] %s: kill detected (entry=%u guid=%u)",
@@ -1771,6 +2135,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
             Creature* victim = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
             if (victim && victim->IsDead())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: queueing auto-loot");
                 m_lootTargetGuid = victim->GetObjectGuid();
                 m_lootTimer = urand(1000, 2500);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -1779,6 +2144,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: dead creature not found for loot");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-LOOT] %s: could not find dead creature for loot (entry=%u guid=%u)",
                     me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
@@ -1786,6 +2152,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (m_currentTask.type == TASK_GRIND)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping");
                 // wolf-meat fix (2026-06-30): MatchesObjectiveEntry checks the primary
                 // dispatched creatureEntry OR any tied item-drop alternate, not exact
                 // equality alone — so a kill on a tied local sibling (e.g. Timber Wolf
@@ -1795,6 +2162,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                                 m_currentTask.MatchesObjectiveEntry(m_lastVictimEntry));
                 if (matches)
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted", m_currentTask.killCount);
                     m_currentTask.killCount++;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
@@ -1802,6 +2170,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     if (m_currentTask.killGoal > 0 &&
                         m_currentTask.killCount >= m_currentTask.killGoal)
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, TASK_COMPLETE");
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                             "[AIBOT] %s: GRIND task complete (%d/%d kills)",
                             me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
@@ -1816,6 +2185,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         }
         else if (pVictim && pVictim->IsCreature())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: caching victim for kill detection");
             m_lastVictimEntry = static_cast<Creature*>(pVictim)->GetEntry();
             m_lastVictimGuidLow = pVictim->GetGUIDLow();
         }
@@ -1831,8 +2201,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // and AFTER the [EAT-HYST] block so a companion still sits to eat between fights.
         if (m_doctrineKind == DoctrineKind::PlayerParty)
         {
-            if (Unit* pEscortTarget = m_doctrine->AcquireTarget(*this))
+            CB_HIT(me->GetGUIDLow(), "cpp-main: escort mode tick");
+            if (Unit* pEscortTarget = m_doctrine->AcquireTarget(*this))   // cb:fold decl-in-condition artifact, body probed
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: party focus acquired, engaging");
                 // A live party focus OWNS this tick. AttackStart() returns false once we are
                 // ALREADY attacking this victim (Unit::Attack no-ops on the same target), so a
                 // false return is success ("already engaged"), NOT "nothing to fight". We must
@@ -1863,9 +2235,9 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // and only reachable in PlayerParty doctrine, so it is bounded to the human party
             // rather than the whole fleet.
             if (m_suiFollowDiagTimer > AIBOT_UPDATE_INTERVAL)
-                m_suiFollowDiagTimer -= AIBOT_UPDATE_INTERVAL;
+                m_suiFollowDiagTimer -= AIBOT_UPDATE_INTERVAL;   // cb:fold logging-only follow diagnostic cadence
             else
-            {
+            {   // cb:fold logging-only follow diagnostic
                 m_suiFollowDiagTimer = 5000;
                 Player* pDiagBoss = FindEscortBoss();
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -1878,6 +2250,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (m_currentTask.type != TASK_MOVE_TO)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: escort follow, no errand leg");
                 DoPartyFollow();
                 return;
             }
@@ -1887,6 +2260,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // --- TASK_GRIND: proactive pull or patrol ---
         if (m_currentTask.type == TASK_GRIND)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: grind dispatch");
             // [PULLGATE] Fight-initiation floor (solo, 2026-07-05). Never START a fight
             // under-resourced: below the floor, latch recovery and stand down — and do NOT
             // patrol (DoGrindPatrol random-hops INTO the field, i.e. body-pulling at low
@@ -1898,8 +2272,9 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // own recovery (GroupDefend / guard-heal / the chain 40/40 gate).
             if (m_doctrineKind == DoctrineKind::Solo && !PullReady())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: pull gate closed, recovering first");
                 if (!m_eatRecoveryLatch)
-                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,   // cb:fold logging-only pull-gate report
                         "[AIBOT-PULLGATE] %s: refusing new pull at hp=%.0f%% mp=%.0f%% — recovering to %.0f/%.0f",
                         me->GetName(), me->GetHealthPercent(),
                         me->GetPowerType() == POWER_MANA ? me->GetPowerPercent(POWER_MANA) : 100.0f,
@@ -1920,8 +2295,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 ? CountNearbyBots(me, AIBOT_SPREAD_RADIUS) : 0;
             if (nearbyBots >= AIBOT_SPREAD_BOT_CAP)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-task: spread cap hit, patrolling out", nearbyBots);
                 if (!m_spreadDeferred)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: spread defer episode begins");
                     m_spreadDeferred = true;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-SPREAD] %s: %u other bots grinding within %.0fyd (cap %u) — patrolling out to spread",
@@ -1940,10 +2317,12 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // GRIND_BLOCKED|no_target. Solo returns its priority scan; the anchor / filler-detour /
             // dwell-expired follower all fall through to a real pull. (The whole group-fight decision
             // — resolver-first, the B3 dwell + its counter, sticky — now lives in AiBotDoctrineTeam.)
-            if (Unit* pGrindTarget = m_doctrine->AcquireTarget(*this))
+            if (Unit* pGrindTarget = m_doctrine->AcquireTarget(*this))   // cb:fold decl-in-condition artifact, body probed
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: grind target acquired");
                 if (m_doctrine->HoldPull(*this, pGrindTarget))
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-task: pull held, overpull cap", m_grindFreezeStreak);
                     ++m_grindFreezeStreak;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-OVERPULL] %s: holding (%u/%u) — target %s in %u-deep cluster (solo cap %u) [will self-unstick]",
@@ -1953,6 +2332,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
                     if (m_grindFreezeStreak >= AIBOT_GRIND_FREEZE_DWELL)
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: freeze escape, self-unstick pull");
                         m_grindFreezeStreak = 0;
 
                         // Self-unstick: the objective grind USED to hand back GRIND_BLOCKED|overpull_dwell
@@ -1986,6 +2366,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // patrol and DO NOT count a freeze — the doctrine is choosing to wait, not stuck.
             if (m_doctrine->HoldingForTeam())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: holding for anchor, patrolling");
                 DoGrindPatrol();
                 return;
             }
@@ -1995,8 +2376,10 @@ void AiBotAI::UpdateAI(uint32 const diff)
             // no mobs is GrindPlanner's no-kills→reselect job, and a detour rides its own WAIT deadline.
             if (m_currentTask.creatureEntry != 0)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: objective grind, no valid target");
                 if (++m_grindFreezeStreak >= AIBOT_GRIND_FREEZE_DWELL)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: no target dwell expired, GRIND_BLOCKED");
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-OVERPULL] %s: freeze-escape — no valid target %u ticks, signaling GRIND_BLOCKED",
                         me->GetName(), m_grindFreezeStreak);
@@ -2017,12 +2400,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
        // --- TASK_MOVE_TO: resume movement after interruption ---
         if (m_currentTask.type == TASK_MOVE_TO)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-task: move task tick");
             // ── §4 approach scan ──
             if (m_currentTask.creatureEntry != 0 && m_approachScanTimer == 0)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: approach scan firing");
                 m_approachScanTimer = urand(2000, 3000);
-                if (Unit* pMob = ScanApproachTarget())
+                if (Unit* pMob = ScanApproachTarget())   // cb:fold decl-in-condition artifact, body probed
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-task: approach scan hit, grind handoff", m_currentTask.creatureEntry);
                     // [PULLGATE] (solo, 2026-07-05) Arriving at the field under-resourced:
                     // the scan just proved live mobs are AHEAD, so stop HERE — still outside
                     // the camp — latch recovery, and eat before the engage. The MOVE_TO
@@ -2030,8 +2416,9 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     // the scan re-fires at full HP, and the engage proceeds as normal.
                     if (m_doctrineKind == DoctrineKind::Solo && !PullReady())
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: field ahead but weak, stop and recover");
                         if (!m_eatRecoveryLatch)
-                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,   // cb:fold logging-only pull-gate report
                                 "[AIBOT-PULLGATE] %s: field ahead (%s, %.0fyd) but hp=%.0f%% mp=%.0f%% — stopping to recover first",
                                 me->GetName(), pMob->GetName(), me->GetDistance(pMob),
                                 me->GetHealthPercent(),
@@ -2055,33 +2442,48 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     if (m_combatDirective.IsActive() &&
                         m_combatDirective.anchorGuidLow != me->GetGUIDLow())
                     {
-                        if (Unit* pAssist = m_doctrine->MaintainTarget(*this, nullptr))
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: follower at scan hit, deferring to anchor");
+                        if (Unit* pAssist = m_doctrine->MaintainTarget(*this, nullptr))   // cb:fold decl-in-condition artifact, body probed
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-task: assisting anchor victim");
                             pEngage = pAssist;
+                        }
                         else
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-task: anchor not fighting, holding");
                             return;   // follower, anchor not fighting yet → hold (grind gate next tick)
+                        }
                     }
 
                     // [OVERPULL] Same veto as the grind dispatch: convert to a local grind but
                     // don't dive a dense pack solo. The grind dispatch re-gates next tick.
                     if (!m_doctrine->HoldPull(*this, pEngage))
+                    {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: engaging scan hit");
                         AttackStart(pEngage);
+                    }
                     return;
                 }
             }
 
             // Still actively walking — let the motion generator finish
             if (me->IsMoving())
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: still walking, motion owns leg");
                 return;
+            }
 
             // Not moving. Either we arrived or we got interrupted.
             float dist = me->GetDistance2d(m_currentTask.x, m_currentTask.y);
 
             if (dist > 3.0f)
             {
+                CB_HITV(me->GetGUIDLow(), "cpp-task: not arrived, resuming journey", dist);
                 // Haven't arrived — resume movement.
                 if (!m_pathWaypoints.empty() &&
                     m_pathIndex < (uint32)m_pathWaypoints.size() - 1)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: resuming chunked path");
                     // Resume the current leg's remaining chunks
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT-PATH] %s: resuming chunked path from waypoint %u/%u",
@@ -2090,6 +2492,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 }
                 else
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: leg exhausted, next leg to dest");
                     // Current leg exhausted (or interrupted with no stored path) —
                     // compute the next leg toward the true dest and walk it.
                     MoveToDestination(m_currentTask.x, m_currentTask.y, m_currentTask.z);
@@ -2097,12 +2500,14 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: close enough to dest");
                 // Close enough to the destination.
                 // §4: an enriched objective MOVE_TO arrived at the deep coord with no
                 // scan hit — grind here in place rather than emit a false "arrived"
                 // TASK_COMPLETE (merged step: that would mean objective-done, zero kills).
                 if (m_currentTask.creatureEntry != 0)
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: objective auto-arrival, grind in place");
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT] %s: objective MOVE_TO auto-arrived (dist=%.1f) — GRIND in place",
                         me->GetName(), dist);
@@ -2110,6 +2515,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 }
                 else
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: auto-arrived at dest, TASK_COMPLETE");
                     // Stamp the exact arrival coord so C# refreshes ctx.Pos immediately
                     // (no 5s STATE-cycle stale read driving a needless MOVE_TO re-issue).
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -2135,19 +2541,29 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // fight settles, so only it (+ tight neighbours) engage. Runs ahead of the stalemate/overpull
     // handlers and owns the tick while active. (FINDING_005)
     if (HandlePullRetreat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: pull retreat owns tick");
         return;
+    }
 
     // [ADDED] Combat stalemate breaker — runs only while in combat.
     if (HandleCombatStalemate())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: stalemate breaker owns tick");
         return;
+    }
 
     // [OVERPULL] Overpull retreat — bail out of a fight where more than the cap are on us.
     if (HandleOverpullRetreat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: overpull retreat owns tick");
         return;
+    }
 
     // Cache victim info before combat system clears it
     if (pVictim && pVictim->IsCreature())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: caching victim in combat");
         m_lastVictimEntry = static_cast<Creature*>(pVictim)->GetEntry();
         m_lastVictimGuidLow = pVictim->GetGUIDLow();
     }
@@ -2155,16 +2571,22 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // --- Tap-respect: drop a mob the server says belongs to a non-group player ---
     if (pVictim && pVictim->IsCreature() && !m_combatDirective.IsActive())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: tap-respect check");
         Creature* pVicCre = static_cast<Creature*>(pVictim);
         if (pVicCre->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) &&
             !pVicCre->IsTappedBy(me))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: victim tapped by another");
             // Is the tapper in my group? If so it's a focus-fire assist, not a steal.
             bool tapperInMyGroup = false;
-            if (Group* pGroup = me->GetGroup())
+            if (Group* pGroup = me->GetGroup())   // cb:fold decl-in-condition artifact, body probed
             {
-                if (Player* pTapper = pVicCre->GetLootRecipient())
+                CB_HIT(me->GetGUIDLow(), "cpp-main: checking tapper group membership");
+                if (Player* pTapper = pVicCre->GetLootRecipient())   // cb:fold decl-in-condition artifact, body probed
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: tapper membership resolved");
                     tapperInMyGroup = pGroup->IsMember(pTapper->GetObjectGuid());
+                }
             }
 
             // [PARTY-TAP-EXEMPT] (2026-07-16) The human's fight is authoritative — even on a
@@ -2178,42 +2600,70 @@ void AiBotAI::UpdateAI(uint32 const diff)
             bool partyOwnsThisFight = false;
             if (!tapperInMyGroup)
             {
-                if (Group* pGroup = me->GetGroup())
+                CB_HIT(me->GetGUIDLow(), "cpp-main: tapper outside group, exemption check");
+                if (Group* pGroup = me->GetGroup())   // cb:fold decl-in-condition artifact, body probed
                 {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: scanning group for human on this mob");
                     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
                     {
                         Player* pMember = itr->getSource();
                         if (!pMember || pMember == me || !pMember->IsInWorld())
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-main: tap scan member skipped, null or self");
                             continue;
+                        }
                         WorldSession* pSess = pMember->GetSession();
                         if (!pSess || pSess->GetBot())
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-main: tap scan member is bot session");
                             continue;   // only a HUMAN's choice grants the exemption
+                        }
                         if (pMember->GetVictim() == pVicCre)
                         {
+                            CB_HIT(me->GetGUIDLow(), "cpp-main: human fighting this mob, exemption granted");
                             partyOwnsThisFight = true;
                             break;
                         }
                     }
                 }
                 if (!partyOwnsThisFight)
-                    if (Unit* pMobVictim = pVicCre->GetVictim())
-                        if (Player* pMobVictimOwner = pMobVictim->GetCharmerOrOwnerPlayerOrPlayerItself())
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: checking mob victim ownership");
+                    if (Unit* pMobVictim = pVicCre->GetVictim())   // cb:fold decl-in-condition artifact, body probed
+                    {
+                        CB_HIT(me->GetGUIDLow(), "cpp-main: mob has victim, resolving owner");
+                        if (Player* pMobVictimOwner = pMobVictim->GetCharmerOrOwnerPlayerOrPlayerItself())   // cb:fold decl-in-condition artifact, body probed
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-main: mob victim owner resolved");
                             if (pMobVictimOwner == me ||
                                 (me->GetGroup() && me->GetGroup()->IsMember(pMobVictimOwner->GetObjectGuid())))
+                            {
+                                CB_HIT(me->GetGUIDLow(), "cpp-main: mob attacking my party, exemption granted");
                                 partyOwnsThisFight = true;
+                            }
+                        }
+                    }
+                }
                 if (partyOwnsThisFight)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: exemption granted, veto healed");
                     m_combatIgnore.erase(pVicCre->GetGUIDLow());   // heal any earlier wrong veto
+                }
             }
 
             if (!tapperInMyGroup && !partyOwnsThisFight)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: disengaging tapped mob, short-ignore");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s: victim %u (guid=%u) tapped by another — disengaging (not mine)",
                     me->GetName(), pVicCre->GetEntry(), pVicCre->GetGUIDLow());
 
                 me->AttackStop();
                 if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: stopping chase on disengage");
                     StopMoving();
+                }
                 me->ClearTarget();
 
                 // Short-ignore so Select*Target / SelectGrindTarget don't instantly re-acquire
@@ -2228,18 +2678,24 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (!pVictim || !IsValidHostileTarget(pVictim) ||
         !pVictim->IsWithinDist(me, VISIBILITY_DISTANCE_SMALL))
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: victim invalid or lost, reselect path");
         bool victimDied = (pVictim && pVictim->IsDead() && pVictim->IsCreature());
         if (!victimDied && !pVictim && m_lastVictimEntry != 0 && !me->IsInCombat())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: inferring victim death");
             victimDied = true;
+        }
 
         if (victimDied)
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: combat victim died");
             uint32 killedEntry = pVictim ? static_cast<Creature*>(pVictim)->GetEntry() : m_lastVictimEntry;
             uint32 killedGuid = pVictim ? pVictim->GetGUIDLow() : m_lastVictimGuidLow;
             // --- Tapped check: only process kills we actually tagged ---
             Creature* pKillCreature2 = pVictim ? static_cast<Creature*>(pVictim) : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
             if (pKillCreature2 && pKillCreature2->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !pKillCreature2->IsTappedBy(me))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: combat kill tapped, no credit");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s: mob (entry=%u guid=%u) tapped by another — skipping kill credit (combat path)",
                     me->GetName(), killedEntry, killedGuid);
@@ -2248,12 +2704,14 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
+            CB_HITV(me->GetGUIDLow(), "cpp-main: combat kill credited", killedEntry);
             SendKillEvent(killedEntry, killedGuid);
 
             // Queue auto-loot with humanization delay
             Creature* deadCreature = pVictim ? static_cast<Creature*>(pVictim) : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
             if (deadCreature && deadCreature->IsDead())
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: queueing loot, combat path");
                 m_lootTargetGuid = deadCreature->GetObjectGuid();
                 m_lootTimer = urand(1000, 2500);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -2263,12 +2721,14 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
             if (m_currentTask.type == TASK_GRIND)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping, combat path");
                 // wolf-meat fix (2026-06-30): same MatchesObjectiveEntry widening as the
                 // OOC kill-detect path above — primary or any tied alternate counts.
                 bool matches = (m_currentTask.creatureEntry == 0 ||
                                 m_currentTask.MatchesObjectiveEntry(killedEntry));
                 if (matches)
                 {
+                    CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted, combat path", m_currentTask.killCount);
                     m_currentTask.killCount++;
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                         "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
@@ -2276,6 +2736,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
                     if (m_currentTask.killGoal > 0 &&
                         m_currentTask.killCount >= m_currentTask.killGoal)
                     {
+                        CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, combat path");
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                             "[AIBOT] %s: GRIND task complete (%d/%d kills)",
                             me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
@@ -2297,16 +2758,19 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // "not hitting me → drop" bail for a mob the anchor is tanking — those two, plus the SMALL
         // drop, are what produced the A/B/A/B flap. Solo / defer → nullptr → the legacy solo pick
         // + drop below run byte-for-byte. (Kill-credit above already ran regardless.)
-        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))
+        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))   // cb:fold decl-in-condition artifact, body probed
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: doctrine focus on reselect, committing");
             AttackStart(pFocus);
             return;
         }
 
-        if (Unit* pNewVictim = SelectAttackTarget(pVictim))
+        if (Unit* pNewVictim = SelectAttackTarget(pVictim))   // cb:fold decl-in-condition artifact, body probed
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: solo reselect found target");
             if (pVictim != pNewVictim)
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: switching to new victim");
                 AttackStart(pNewVictim);
                 return;
             }
@@ -2315,14 +2779,19 @@ void AiBotAI::UpdateAI(uint32 const diff)
         if (me->GetVictim() &&
            (me != me->GetVictim()->GetVictim()))
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: victim not fighting me, dropping");
             me->AttackStop(false);
             if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() == CHASE_MOTION_TYPE)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: stopping chase, victim dropped");
                 StopMoving();
+            }
             return;
         }
     }
     else
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: victim valid, holding course");
         // [DOCTRINE] Mid-combat convergence via the single target authority. TeamAuto returns the
         // anchor's mob; a follower SWITCHES to it and commits. There is NO VISIBILITY_DISTANCE_SMALL
         // gate here anymore — that gate (narrower than the doctrine's own NORMAL range check) is
@@ -2330,10 +2799,12 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // would reject the very next tick. Committing without it, the ChaseMovementGenerator closes
         // the gap. Solo / defer → nullptr → hold course exactly as before; the anchor gets nullptr
         // from the resolver (self), so it is untouched and the team converges on IT.
-        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))
+        if (Unit* pFocus = m_doctrine->MaintainTarget(*this, pVictim))   // cb:fold decl-in-condition artifact, body probed
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: mid-combat convergence check");
             if (pFocus != pVictim && AttackStart(pFocus))
             {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: converging to anchor victim");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT-DOCTRINE] %s: converge %s -> %s (%s)",
                     me->GetName(), pVictim->GetName(), pFocus->GetName(), m_doctrine->Name());
@@ -2343,6 +2814,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
         if (!me->HasInArc(pVictim, 2 * M_PI_F / 3) && !me->IsMoving())
         {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: turning to face victim");
             me->SetInFront(pVictim);
             me->SendMovementPacket(MSG_MOVE_SET_FACING, false);
         }
@@ -2351,16 +2823,26 @@ void AiBotAI::UpdateAI(uint32 const diff)
            (m_role != ROLE_HEALER) &&
             IsValidHostileTarget(pVictim) &&
             AttackStart(pVictim))
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: melee re-engage, tick ends");
             return;
+        }
     }
 
     // Fast policies already ran ahead of this behaviour tick.  Do not dispatch
     // them again here at 1 Hz (which otherwise creates duplicate same-frame tries).
     if (me->IsInCombat())
     {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: combat AI dispatch");
         if (!HasFastCombatPolicy())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: legacy combat AI tick");
             UpdateInCombatAI();
+        }
         else if (me->GetVictim())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: fast policy, trinkets only");
             UseTrinketEffects();
+        }
     }
 }
