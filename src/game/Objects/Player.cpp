@@ -526,6 +526,7 @@ bool Player::Create(uint32 guidlow, std::string const& name, uint8 race, uint8 c
 
     // original spells
     LearnDefaultSpells();
+    LearnAutoLearnCustomSpells();
 
     // Phasing
     SetWorldMask(WORLD_DEFAULT_CHAR);
@@ -3261,6 +3262,7 @@ void Player::GiveLevel(uint32 level)
     m_playedTime[PLAYED_TIME_LEVEL] = 0;               // Level Played Time reset
     SetLevel(level);
     UpdateSkillsForLevel();
+    LearnAutoLearnCustomSpells();
 
     // save base values (bonuses already included in stored stats
     for (int i = STAT_STRENGTH; i < MAX_STATS; ++i)
@@ -19642,6 +19644,34 @@ void Player::LearnDefaultSpells()
             AddSpell(spell, true, true, true, false);
         else                                                // but send in normal spell in game learn case
             LearnSpell(spell, true);
+    }
+}
+
+// Delivers MSUI Spell Creator content directly, bypassing the trainer system
+// -- built after Holy Strike/Divine Strike's trainer visibility bug turned
+// out to be an unresolved client-side question rather than anything fixable
+// server-side (see [[Retribution Paladin rework]]). Called at character
+// creation (level 1 is just the base case of this same check) and on every
+// level-up, so both a fresh character and one leveling through existing
+// thresholds pick up whatever ranks they now qualify for -- mirroring what a
+// working trainer would have granted, without hardcoding any spell IDs here.
+void Player::LearnAutoLearnCustomSpells()
+{
+    uint32 classMask = GetClassMask();
+    uint32 level = GetLevel();
+
+    for (AutoLearnSpellEntry const& entry : sObjectMgr.GetAutoLearnCustomSpells())
+    {
+        if (!(entry.classMask & classMask))
+            continue;
+
+        if (entry.reqLevel > level)
+            continue;
+
+        if (HasSpell(entry.spellId))
+            continue;
+
+        LearnSpell(entry.spellId, false);
     }
 }
 

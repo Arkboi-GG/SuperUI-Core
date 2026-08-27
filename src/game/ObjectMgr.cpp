@@ -9535,6 +9535,62 @@ void ObjectMgr::LoadSkillLineAbility()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> Loaded %u skill line abilities.", maxSkillLineAbilityId);
 }
 
+// Delivers MSUI Spell Creator content (custom_spell_meta) to players without
+// requiring a trainer visit -- built after the Holy Strike/Divine Strike
+// trainer-visibility investigation stalled on an unresolved client-side
+// question (see [[Retribution Paladin rework]]). A spell is auto-taught if:
+//   - it has a `custom_spell_meta` row (marks it as Spell-Creator-authored),
+//   - it has a `skill_line_ability` row (the SAME row that already drives
+//     spellbook tab placement) -- this is also the opt-out signal: a custom
+//     spell meant to be script-only (e.g. Zealotry, 40013) has no SLA row and
+//     is therefore never a candidate here, matching how it's already
+//     invisible to the trainer path,
+//   - the caller then filters by the player's class_mask and current level
+//     against `reqLevel` (see Player::LearnAutoLearnCustomSpells).
+// Uses `spell_template.baseLevel`, NOT `spellLevel` -- confirmed against live
+// data that `spellLevel` is unreliable (Holy Strike's 8 ranks all read 99,
+// a pre-existing quirk in the real zzOLD source data), while `baseLevel` is
+// correctly populated per rank for every custom spell checked so far.
+// spell_template has one row per (entry, build); this mirrors the exact
+// "highest build <= SUPPORTED_CLIENT_BUILD" selection SpellMgr's own loader
+// uses, since these spells aren't all stored at the same build (Holy Strike/
+// Divine Strike ride at their zzOLD source's build 4222, wrapper spells at
+// 5875).
+// npc_trainer_template/skill_line_ability rows are untouched by this --
+// purely additive, harmless if a trainer path is ever fixed later.
+void ObjectMgr::LoadAutoLearnCustomSpells()
+{
+    m_autoLearnCustomSpells.clear();
+
+    std::unique_ptr<QueryResult> result(WorldDatabase.PQuery(
+        "SELECT csm.entry, sla.class_mask, st.baseLevel "
+        "FROM custom_spell_meta csm "
+        "INNER JOIN skill_line_ability sla ON sla.spell_id = csm.entry AND sla.build = %u "
+        "INNER JOIN spell_template st ON st.entry = csm.entry "
+        "AND st.build = (SELECT MAX(st2.build) FROM spell_template st2 WHERE st2.entry = csm.entry AND st2.build <= %u)",
+        SUPPORTED_CLIENT_BUILD, SUPPORTED_CLIENT_BUILD));
+
+    if (!result)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> Loaded 0 auto-learn custom spells.");
+        return;
+    }
+
+    do
+    {
+        Field* fields = result->Fetch();
+
+        AutoLearnSpellEntry entry;
+        entry.spellId   = fields[0].GetUInt32();
+        entry.classMask = fields[1].GetUInt32();
+        entry.reqLevel  = fields[2].GetUInt32();
+
+        m_autoLearnCustomSpells.push_back(entry);
+    } while (result->NextRow());
+
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, ">> Loaded %u auto-learn custom spells.", (uint32)m_autoLearnCustomSpells.size());
+}
+
 void ObjectMgr::LoadSoundEntries()
 {
     std::unique_ptr<QueryResult> result(WorldDatabase.Query("SELECT * FROM `sound_entries`"));

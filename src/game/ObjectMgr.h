@@ -357,6 +357,15 @@ struct PetCreateSpellEntry
     uint32 spellId[4];
 };
 
+// A custom (MSUI Spell Creator) spell eligible for automatic delivery outside
+// the trainer system -- see ObjectMgr::LoadAutoLearnCustomSpells().
+struct AutoLearnSpellEntry
+{
+    uint32 spellId;
+    uint32 classMask;
+    uint32 reqLevel;
+};
+
 struct GraveYardData
 {
     uint32 safeLocId;
@@ -1401,6 +1410,10 @@ class ObjectMgr
         SkillLineAbilityEntry const* GetSkillLineAbility(uint32 id) const { return id < GetMaxSkillLineAbilityId() ? m_SkillLineAbilities[id].get() : nullptr; }
         uint32 GetMaxSkillLineAbilityId() const { return m_SkillLineAbilities.size(); }
 
+        // Auto-learned custom (MSUI Spell Creator) spells -- see LoadAutoLearnCustomSpells()
+        void LoadAutoLearnCustomSpells();
+        std::vector<AutoLearnSpellEntry> const& GetAutoLearnCustomSpells() const { return m_autoLearnCustomSpells; }
+
         // Changes of faction
         typedef std::map<uint32, uint32> CharacterConversionMap;
         CharacterConversionMap factionchange_reputations;
@@ -1612,6 +1625,7 @@ class ObjectMgr
 
         typedef std::vector<std::unique_ptr<SkillLineAbilityEntry>> SkillLineAbiilityStore;
         SkillLineAbiilityStore m_SkillLineAbilities;
+        std::vector<AutoLearnSpellEntry> m_autoLearnCustomSpells;
 
         CacheNpcTextIdMap m_CacheNpcTextIdMap;
         CacheVendorItemMap m_CacheVendorTemplateItemMap;

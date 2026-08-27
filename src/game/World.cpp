@@ -1426,6 +1426,9 @@ void World::SetInitialWorldSettings()
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading SkillRaceClassInfoMultiMap Data...");
     sSpellMgr.LoadSkillRaceClassInfoMap();
 
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Loading auto-learn custom spells...");
+    sObjectMgr.LoadAutoLearnCustomSpells();
+
     // Clean up and pack instances
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "Cleaning up instances...");
     sMapPersistentStateMgr.CleanupInstances();              // must be called before `creature_respawn`/`gameobject_respawn` tables

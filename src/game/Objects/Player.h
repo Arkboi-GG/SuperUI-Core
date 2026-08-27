@@ -1363,6 +1363,7 @@ class Player final: public Unit
         void RemoveSpell(uint32 spellId, bool disabled = false, bool learn_low_rank = true);
         void ResetSpells();
         void LearnDefaultSpells();
+        void LearnAutoLearnCustomSpells();
         void LearnQuestRewardedSpells();
         void LearnQuestRewardedSpells(Quest const* quest);
         void LearnSpellHighRank(uint32 spellid);
