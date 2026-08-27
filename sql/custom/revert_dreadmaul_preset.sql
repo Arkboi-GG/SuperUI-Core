@@ -137,11 +137,10 @@ UPDATE `item_template` SET `required_level` = 1 WHERE `entry` = 3914;
 --    2 items that file's own comments never mentioned keeping: 13071 for
 --    Warrior, 17713 for Paladin, both real gear pieces).
 --
---    Ambiguous naming, flagged rather than silently guessed: Hunter's set is
---    named "Hunter Marksmanship" to match Custom-DREADMAUL_LOADOUTS_60.sql's
---    own label, but that file's own comment says the itemization is
---    "effectively spec-agnostic for vanilla Hunters" and covers Beast Mastery
---    too -- may want a different/generic name.
+--    Hunter's set is named plainly "Hunter" (not "Hunter Marksmanship") per
+--    user decision -- Custom-DREADMAUL_LOADOUTS_60.sql's own comment says the
+--    itemization is "effectively spec-agnostic for vanilla Hunters" and
+--    covers Beast Mastery too, so a spec-qualified name would be misleading.
 DELETE FROM `item_template` WHERE `entry` BETWEEN 40106 AND 40114;
 INSERT INTO `item_template`
 (entry, patch, class, subclass, name, display_id, quality, flags, buy_count, buy_price, sell_price,
@@ -150,7 +149,7 @@ INSERT INTO `item_template`
 VALUES
 (40106, 10, 15, 0, "Warrior Protection",  9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
 (40107, 10, 15, 0, "Paladin Retribution", 9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
-(40108, 10, 15, 0, "Hunter Marksmanship", 9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
+(40108, 10, 15, 0, "Hunter",              9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
 (40109, 10, 15, 0, "Rogue Combat",        9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
 (40110, 10, 15, 0, "Priest Shadow",       9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
 (40111, 10, 15, 0, "Shaman Elemental",    9632, 3, 4, 1, 0, 0, 0, -1, -1, 60, 0, 1, 1, 1, 0),
@@ -170,7 +169,7 @@ INSERT INTO `item_loot_template` (entry, item, ChanceOrQuestChance, groupid, min
 (40107,12927,100,0,1,1,0,0,10),(40107,13098,100,0,1,1,0,0,10),(40107,13340,100,0,1,1,0,0,10),(40107,13400,100,0,1,1,0,0,10),
 (40107,13959,100,0,1,1,0,0,10),(40107,13965,100,0,1,1,0,0,10),(40107,14616,100,0,1,1,0,0,10),(40107,15062,100,0,1,1,0,0,10),
 (40107,15063,100,0,1,1,0,0,10),(40107,15411,100,0,1,1,0,0,10),(40107,17713,100,0,1,1,0,0,10),
--- 40108 Hunter Marksmanship (includes 1000 Jagged Arrow ammo, matching the original grant quantity)
+-- 40108 Hunter (includes 1000 Jagged Arrow ammo, matching the original grant quantity)
 (40108,11726,100,0,1,1,0,0,10),(40108,11815,100,0,1,1,0,0,10),(40108,12634,100,0,1,1,0,0,10),(40108,12651,100,0,1,1,0,0,10),
 (40108,12927,100,0,1,1,0,0,10),(40108,13098,100,0,1,1,0,0,10),(40108,13211,100,0,1,1,0,0,10),(40108,13340,100,0,1,1,0,0,10),
 (40108,13404,100,0,1,1,0,0,10),(40108,13965,100,0,1,1,0,0,10),(40108,13967,100,0,1,1,0,0,10),(40108,15062,100,0,1,1,0,0,10),
