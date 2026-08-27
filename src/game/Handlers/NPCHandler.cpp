@@ -219,22 +219,49 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
     if (tSpells)
     {
+        // TEMP DIAGNOSTIC (2026-08-27, round 2, Holy Strike/Divine Strike trainer-
+        // visibility bug): re-added after the round-1 trace showed all 13 wrapper
+        // entries INCLUDED, yet the user's client still doesn't show them. Logs
+        // list size + every candidate for templates 28/29. Remove once root-caused.
+        bool debugThisTrainer = ci && (ci->trainer_id == 28 || ci->trainer_id == 29);
+        if (debugThisTrainer)
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "TRAINERDEBUG2: template %u tSpells->spellList.size()=%u maxcount=%u",
+                ci->trainer_id, (uint32)tSpells->spellList.size(), maxcount);
+
         for (const auto& itr : tSpells->spellList)
         {
             TrainerSpell const* tSpell = &itr.second;
 
             uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
 
-            if (!_player->IsSpellFitByClassAndRace(triggerSpell))
+            bool fits = _player->IsSpellFitByClassAndRace(triggerSpell);
+
+            if (debugThisTrainer && (tSpell->spell >= 50000 && tSpell->spell <= 50012))
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "TRAINERDEBUG2: template %u wrapper=%u trigger=%u fits=%d",
+                    ci->trainer_id, tSpell->spell, triggerSpell, fits ? 1 : 0);
+
+            if (!fits)
                 continue;
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
+
+            if (debugThisTrainer && (tSpell->spell >= 50000 && tSpell->spell <= 50012))
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "TRAINERDEBUG2: template %u wrapper=%u trigger=%u INCLUDED state=%d count-before=%u",
+                    ci->trainer_id, tSpell->spell, triggerSpell, (int)state, count);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
 
             ++count;
         }
     }
+
+    if (ci && (ci->trainer_id == 28 || ci->trainer_id == 29))
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+            "TRAINERDEBUG2: template %u FINAL count=%u maxcount=%u packetBytes=%u",
+            ci->trainer_id, count, maxcount, (uint32)data.size());
 
     data << strTitle;
 
