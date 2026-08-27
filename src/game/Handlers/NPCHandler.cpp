@@ -219,16 +219,35 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
     if (tSpells)
     {
+        // TEMP DIAGNOSTIC (2026-08-27, Holy Strike/Divine Strike trainer-visibility
+        // bug): logs every candidate spell considered for templates 28/29 and why
+        // it was included or skipped. Remove once root-caused.
+        bool debugThisTrainer = ci && (ci->trainer_id == 28 || ci->trainer_id == 29);
+
         for (const auto& itr : tSpells->spellList)
         {
             TrainerSpell const* tSpell = &itr.second;
 
-            uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
+            SpellEntry const* wrapperInfo = sSpellMgr.GetSpellEntry(tSpell->spell);
+            uint32 triggerSpell = wrapperInfo ? wrapperInfo->EffectTriggerSpell[0] : 0;
 
-            if (!_player->IsSpellFitByClassAndRace(triggerSpell))
+            bool fits = _player->IsSpellFitByClassAndRace(triggerSpell);
+
+            if (debugThisTrainer)
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "TRAINERDEBUG: template %u wrapper=%u trigger=%u fits=%d reqLevel=%u reqSkill=%u reqSkillValue=%u",
+                    ci->trainer_id, tSpell->spell, triggerSpell, fits ? 1 : 0,
+                    tSpell->reqLevel, tSpell->reqSkill, tSpell->reqSkillValue);
+
+            if (!fits)
                 continue;
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
+
+            if (debugThisTrainer)
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "TRAINERDEBUG: template %u wrapper=%u trigger=%u INCLUDED state=%d",
+                    ci->trainer_id, tSpell->spell, triggerSpell, (int)state);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
 
