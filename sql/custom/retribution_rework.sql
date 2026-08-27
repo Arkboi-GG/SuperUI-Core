@@ -208,6 +208,24 @@ FROM (
 UPDATE `spell_template` SET `attributes` = 262160
     WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
 
+-- Divine Strike gives "Invalid target" on cast (found live, 2026-08-27, after
+-- the attributes fix above got it actually attempting to cast): the AOE
+-- rework only ever set `effectImplicitTargetA1`=22 (TARGET_LOCATION_CASTER_SRC
+-- -- a location, not a unit) and `effectRadiusIndex1`=14, copied from
+-- Whirlwind (15578) -- but never copied Whirlwind's matching
+-- `effectImplicitTargetB1`=15 (TARGET_ENUM_UNITS_ENEMY_AOE_AT_SRC_LOC, the
+-- actual "select enemies in radius of that location" criteria the A-target
+-- pairs with). Left at 0, Divine Strike had a location target with no unit-
+-- selection attached to it -- nothing for the server to ever resolve as a
+-- valid target, hence "Invalid target" on every cast attempt. effect2/3 and
+-- their own implicit targets were NOT the cause -- confirmed live, both are
+-- already 0/0 on every rank and on Whirlwind itself (real damage is entirely
+-- effect1; the zzOLD stun mechanic was apparently also entirely effect1, not
+-- spread across effect2/3). Fixed by copying Whirlwind's `effectImplicitTargetB1`
+-- exactly, on both the zzOLD staging entries and the real clones.
+UPDATE `spell_template` SET `effectImplicitTargetB1` = 15
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
+
 -- Divine Strike's tooltip + both strikes' icon (found live, 2026-08-27): the
 -- Generate() clone never set an icon override, so `GetSchoolIconId(school)` picked
 -- a generic Holy-school fallback (52) for both -- but 679/678/.../10333 (Holy
