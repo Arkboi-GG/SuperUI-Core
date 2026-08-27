@@ -188,3 +188,72 @@ FROM (
     UNION ALL SELECT 9, 40008 UNION ALL SELECT 10, 40009 UNION ALL SELECT 11, 40010 UNION ALL SELECT 12, 40011
     UNION ALL SELECT 13, 40012
 ) ranks;
+
+-- Divine Strike doesn't cast at all (found live, 2026-08-27): `attributes` on both
+-- the zzOLD staging entries (2497-2501) and the real trainer-taught clones
+-- (40008-40012) still carried SPELL_ATTR_ON_NEXT_SWING (0x400, part of 263184) --
+-- inherited unchanged from Holy Strike's attribute set when the stun data was
+-- reworked into an AOE strike, since only the effect/targeting columns were
+-- touched at the time, not attributes. SpellEntry::IsNextMeleeSwingSpell()
+-- (checked via GetCurrentContainer() in Spell.cpp) treats ANY spell with this bit
+-- as a queued "next melee swing" special attack (like Heroic Strike) instead of an
+-- instant spell -- it's filed into CURRENT_MELEE_SPELL and only fires on the
+-- caster's next successful autoattack, never CURRENT_GENERIC_SPELL, so a cast that
+-- isn't followed by a landed melee swing looks like nothing happened at all.
+-- Whirlwind (15578, the spell this AOE targeting was copied from) has attributes
+-- 262160 -- exactly 1024 (0x400) less -- confirming the extra bit was never meant
+-- to be there. Holy Strike is unaffected: it's SUPPOSED to be a next-swing ability
+-- (real tooltip: "additional damage on your next attack"), so its 328708 is correct
+-- and untouched.
+UPDATE `spell_template` SET `attributes` = 262160
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
+
+-- Divine Strike's tooltip + both strikes' icon (found live, 2026-08-27): the
+-- Generate() clone never set an icon override, so `GetSchoolIconId(school)` picked
+-- a generic Holy-school fallback (52) for both -- but 679/678/.../10333 (Holy
+-- Strike's real zzOLD sources) and 2497-2501 (Divine Strike's) are genuine
+-- pre-launch-cut Blizzard content and already shipped with distinct, purpose-made
+-- icons (25 and 42 respectively, confirmed by reading the pristine DBC rows
+-- directly) -- reusing those via `icon_source='source'` beats a generic fallback.
+-- Divine Strike's own description was also never updated after the stun-to-AOE
+-- rework: it still read the original zzOLD stun blurb ("next attack will stun the
+-- enemy for $d"). Both fixes go through `custom_spell_meta` + a client-patch
+-- rebuild (`POST /Patch/RebuildClientPatch`), same channel as the Zealotry fix --
+-- spell_template's own description/icon columns are not what the client reads.
+UPDATE `custom_spell_meta` SET `icon_source` = 'source' WHERE `entry` BETWEEN 40000 AND 40012;
+UPDATE `custom_spell_meta` SET `description` = 'An instant strike that hits all enemies within melee range, dealing weapon damage plus $s1 additional damage. All damage caused is considered holy damage.'
+    WHERE `entry` BETWEEN 40008 AND 40012;
+
+-- Trainer wrapper spells (50000-50012, see the npc_trainer_template fix above)
+-- were only ever inserted into `spell_template` via raw SQL, never through
+-- `custom_spell_meta` -- meaning `RebuildUnifiedPatchFromConfigsAsync` (which
+-- drives every client patch rebuild) had no idea they existed, so the client's
+-- own Spell.dbc never got a row for them at all. A trainer offer the client can't
+-- look up in its own Spell.dbc renders as nothing, which is why they stayed
+-- invisible at Lord Grayson Shadowbreaker even after the wrapper fix + a full
+-- service restart. Sourced from the same pristine zzOLD originals as the real
+-- spells (not from 40000-40012) so the trainer-window icon/description are
+-- correct and never depend on cache staleness from the custom entries.
+INSERT INTO `custom_spell_meta` (`entry`, `source_entry`, `spell_name`, `name_subtext`, `icon_source`) VALUES
+(50000, 679,   'Holy Strike', 'Rank 1', 'source'),
+(50001, 678,   'Holy Strike', 'Rank 2', 'source'),
+(50002, 1866,  'Holy Strike', 'Rank 3', 'source'),
+(50003, 680,   'Holy Strike', 'Rank 4', 'source'),
+(50004, 2495,  'Holy Strike', 'Rank 5', 'source'),
+(50005, 5569,  'Holy Strike', 'Rank 6', 'source'),
+(50006, 10332, 'Holy Strike', 'Rank 7', 'source'),
+(50007, 10333, 'Holy Strike', 'Rank 8', 'source'),
+(50008, 2497,  'Divine Strike', 'Rank 1', 'source'),
+(50009, 2498,  'Divine Strike', 'Rank 2', 'source'),
+(50010, 2499,  'Divine Strike', 'Rank 3', 'source'),
+(50011, 2500,  'Divine Strike', 'Rank 4', 'source'),
+(50012, 2501,  'Divine Strike', 'Rank 5', 'source')
+ON DUPLICATE KEY UPDATE `source_entry` = VALUES(`source_entry`), `spell_name` = VALUES(`spell_name`),
+    `name_subtext` = VALUES(`name_subtext`), `icon_source` = VALUES(`icon_source`);
+UPDATE `custom_spell_meta` SET `description` = 'An instant strike that hits all enemies within melee range, dealing weapon damage plus $s1 additional damage. All damage caused is considered holy damage.'
+    WHERE `entry` BETWEEN 50008 AND 50012;
+
+-- Applying this file alone does NOT deliver the icon/tooltip/wrapper fixes above to
+-- players -- custom_spell_meta is only a staging table (see [[Spell Pages]]).
+-- After running this file, call `POST http://localhost:5000/Patch/RebuildClientPatch`
+-- against the running MangosSuperUI instance to actually rebuild patch-3.MPQ.
