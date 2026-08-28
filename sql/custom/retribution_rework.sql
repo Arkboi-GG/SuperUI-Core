@@ -319,3 +319,49 @@ UPDATE `custom_spell_meta` SET `description` = 'An instant strike that hits all 
 -- spell_template data" category as the original effectImplicitTargetB1 fix.
 UPDATE `spell_template` SET `effect2` = 3, `effectImplicitTargetA2` = 6
     WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
+
+-- Divine Strike: workaround above SUPERSEDED, 2026-08-28 (same night). Live
+-- testing confirmed the "Invalid target" cast itself now worked, but reported
+-- two remaining problems: (1) it still required selecting a target at all,
+-- unlike Whirlwind which just fires; (2) the player had to stand almost on
+-- top of the target to cast. Root cause of both: the workaround above only
+-- ever fixed the SERVER's own target-mask math -- it never fixed the actual
+-- mismatch, which is that the CLIENT's own Spell.dbc copy of Divine Strike
+-- (cloned from a single-target template before the AOE rework) still
+-- declares effectImplicitTargetA[0]=6 (TARGET_UNIT_ENEMY), so the client
+-- still always sends a unit target and still behaves like a single-target,
+-- must-be-close ability from the player's side, workaround or not.
+--
+-- Properly fixed by extending MangosSuperUI's client-patch pipeline (see the
+-- matching MangosSuperUI commit, `fix/divine-strike-client-target-mirror`)
+-- to also mirror effectImplicitTargetA/B and effectRadiusIndex from
+-- spell_template into the client DBC -- the same "server is authoritative,
+-- client mirrors it" mechanism that already mirrors Effect/BasePoints/
+-- DieSides/etc, just never extended to targeting/radius before. Verified via
+-- dev-preview + byte-level check of the live patch-3.MPQ: Divine Strike's
+-- client-side Effect0/TargetA0/TargetB0 now read 58/22/15, matching server
+-- and matching Whirlwind's own real client bytes exactly (TargetA0=22,
+-- TargetB0=15 confirmed directly from 15578's client Spell.dbc row).
+--
+-- With the client now correctly declaring "location + AOE, no unit target
+-- needed," the server-side workaround (effect2=SPELL_EFFECT_DUMMY,
+-- effectImplicitTargetA2=TARGET_UNIT_ENEMY) is no longer needed and is
+-- removed here -- Divine Strike's spell_template rows go back to a single
+-- real effect, exactly like Whirlwind's own inner spell.
+UPDATE `spell_template` SET `effect2` = 0, `effectImplicitTargetA2` = 0
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
+
+-- Divine Strike AOE radius: too big, separately from the targeting bug above.
+-- effectRadiusIndex1=14 (copied from Whirlwind) was assumed to already be a
+-- reasonable melee-cleave radius -- checked against the real SpellRadius.dbc
+-- this server uses instead of trusting that assumption (same lesson as the
+-- mount cast-time bug earlier tonight): index 14's Radius field is 8.0 yards,
+-- confirmed by parsing the live DBC directly, not a remembered/assumed value.
+-- Reduced to index 26 = 4.0 yards -- exactly half of Whirlwind's real radius,
+-- landing solidly in melee-cleave range. Applied to all 5 ranks and the
+-- zzOLD staging source for consistency. Also needs the MangosSuperUI client
+-- patch rebuild above to actually reach players -- radius is one of the
+-- newly-mirrored fields, not something spell_template alone delivers to the
+-- client.
+UPDATE `spell_template` SET `effectRadiusIndex1` = 26
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
