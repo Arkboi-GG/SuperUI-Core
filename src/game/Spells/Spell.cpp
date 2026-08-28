@@ -3350,6 +3350,15 @@ SpellCastResult Spell::prepare(Aura* triggeredByAura, uint32 chance)
         {
             SpellCastResult result = CheckCast(true);
             Unit* pTarget = m_targets.getUnitTarget();
+            // TEMP DIAGNOSTIC (2026-08-28, Divine Strike "Invalid target" bug): logs
+            // the real SpellCastResult code for spells 40008-40012 regardless of log
+            // level/filter config. Remove once root-caused.
+            if (m_spellInfo->Id >= 40008 && m_spellInfo->Id <= 40012)
+                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                    "DIVSTRIKEDEBUG: spell %u strict-CheckCast result=%u target=%u hasUnitTarget=%d hasDest=%d",
+                    m_spellInfo->Id, (uint32)result, pTarget ? pTarget->GetGUIDLow() : 0,
+                    m_targets.getUnitTarget() ? 1 : 0,
+                    (m_targets.m_targetMask & TARGET_FLAG_DEST_LOCATION) ? 1 : 0);
             if (result != SPELL_CAST_OK || (IsAutoRepeat() && m_caster == pTarget))
             {
                 if (!IsAutoRepeat() || !IsAcceptableAutorepeatError(result))
