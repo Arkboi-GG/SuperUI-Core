@@ -24,6 +24,7 @@
 #include "SpellAuras.h"
 #include "Totem.h"
 
+#include <cstdio>
 #include <list>
 
 namespace
@@ -40,6 +41,11 @@ enum SpecSpell : uint32
     // Paladin
     SP_HOLY_SHOCK = 20473, SP_DIVINE_FAVOR = 20216, SP_HOLY_SHIELD = 20925,
     SP_REPENTANCE = 20066,
+    SP_BLESSING_OF_MIGHT = 19740, SP_BLESSING_OF_WISDOM = 19742,
+    SP_BLESSING_OF_LIGHT = 19977, SP_BLESSING_OF_KINGS = 20217,
+    SP_BLESSING_OF_SANCTUARY = 20911, SP_BLESSING_OF_SALVATION = 1038,
+    SP_BLESSING_OF_PROTECTION = 1022, SP_BLESSING_OF_FREEDOM = 1044,
+    SP_BLESSING_OF_SACRIFICE = 6940,
 
     // Hunter
     SP_AUTO_SHOT = 75, SP_MEND_PET = 136, SP_RAPID_FIRE = 3045,
@@ -84,6 +90,63 @@ bool HasSoulLinkAura(Unit const* master)
 {
     return master && (master->HasAura(SP_SOUL_LINK_AURA) ||
                       master->HasAura(SP_SOUL_LINK_AURA_COMPAT));
+}
+
+enum SpecBuffReason : uint8
+{
+    BUFF_PALADIN_TANK = 1,
+    BUFF_PALADIN_MANA = 2,
+    BUFF_PALADIN_PHYSICAL = 3,
+    BUFF_PRIEST_FORTITUDE_SINGLE = 10,
+    BUFF_PRIEST_FORTITUDE_GROUP = 11,
+    BUFF_PRIEST_SPIRIT_SINGLE = 12,
+    BUFF_PRIEST_SPIRIT_GROUP = 13,
+    BUFF_MAGE_INTELLECT_SINGLE = 20,
+    BUFF_MAGE_INTELLECT_GROUP = 21,
+    BUFF_DRUID_WILD_SINGLE = 30,
+    BUFF_DRUID_WILD_GROUP = 31,
+    BUFF_DRUID_THORNS_TANK_FIRST = 32,
+    BUFF_DRUID_INNERVATE_SUPPORT = 33,
+};
+
+CombatBotRoles GetSpecBuffTargetRole(Player* target)
+{
+    if (!target)
+        return ROLE_INVALID;   // cb:fold pure recipient classifier, winner probed before cast
+
+    if (AiBotAI* ai = dynamic_cast<AiBotAI*>(target->AI()))
+        return ai->GetCombatActiveRole();   // cb:fold pure recipient classifier, winner probed before cast
+
+    if (CombatBotBaseAI* ai = dynamic_cast<CombatBotBaseAI*>(target->AI()))
+        return ai->GetRole();   // cb:fold pure recipient classifier, winner probed before cast
+
+    return ROLE_INVALID;
+}
+
+bool IsSpecManaUser(Player const* target)
+{
+    // Max mana is stable while a Druid is shifted; current power type is not.
+    return target && target->GetMaxPower(POWER_MANA) > 0;
+}
+
+void TraceSpecBuffSelection(AiBotAI* ai, Player* target, SpellEntry const* spell,
+                            uint8 reason, bool groupSpell)
+{
+    if (!ai || !target || !spell)
+        return;   // cb:fold defensive probe guard, no decision exists to record
+
+    if (CbCircuit::g_mode)
+    {
+        char note[24];
+        std::snprintf(note, sizeof(note), "%u/%u/%u/%u", target->GetGUIDLow(),
+                      uint32(target->GetClass()), uint32(GetSpecBuffTargetRole(target)),
+                      uint32(reason));
+        CB_HITN(ai->GetBotPlayer()->GetGUIDLow(), "cpp-buff: target/class/role/reason", note);
+        if (groupSpell)
+            CB_HITV(ai->GetBotPlayer()->GetGUIDLow(), "cpp-buff: group spell selected", spell->Id);
+        else
+            CB_HITV(ai->GetBotPlayer()->GetGUIDLow(), "cpp-buff: single spell selected", spell->Id);
+    }
 }
 }
 
@@ -293,13 +356,335 @@ bool AiBotAI::UpdateSpecOutOfCombatAI()
 
 bool AiBotAI::UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec)
 {
-    auto selectSpecBuffTarget = [this](SpellEntry const* spell) -> Player*
+    auto isReachableSpecBuffTarget = [this](Player* target) -> bool
+    {
+        return target && target->IsAlive() && !target->IsGameMaster() &&
+            me->IsValidHelpfulTarget(target) && me->IsWithinLOSInMap(target) &&
+            me->IsWithinDist(target, 30.0f);
+    };
+
+    auto evaluateSpecBuffTarget =
+        [this, &isReachableSpecBuffTarget](Player* target,
+                                           SpellEntry const* singleSpell,
+                                           SpellEntry const* groupSpell,
+                                           bool manaOnly,
+                                           bool& preserveGroupForm) -> bool
+    {
+        preserveGroupForm = false;
+        if (!isReachableSpecBuffTarget(target))
+            return false;   // cb:fold pure recipient filter, winner probed before cast
+        if (manaOnly && !IsSpecManaUser(target))
+            return false;   // cb:fold pure recipient filter, winner probed before cast
+
+        bool const hasSingleForm = singleSpell && HasAuraFromSpellChain(
+            target, sSpellMgr.GetFirstSpellInChain(singleSpell->Id));
+        bool const hasGroupForm = groupSpell && HasAuraFromSpellChain(
+            target, sSpellMgr.GetFirstSpellInChain(groupSpell->Id));
+        if (hasGroupForm)
+        {   // cb:fold form preservation only, selected spell and cast outcome are probed
+            preserveGroupForm = true;
+            return IsValidMaintenanceBuffTarget(target, groupSpell);
+        }
+        if (hasSingleForm)
+            return IsValidMaintenanceBuffTarget(target, singleSpell);   // cb:fold form preservation only, winner is probed
+        if (singleSpell && !IsValidMaintenanceBuffTarget(target, singleSpell))
+            return false;   // cb:fold pure recipient filter, winner probed before cast
+        if (groupSpell && !IsValidMaintenanceBuffTarget(target, groupSpell))
+            return false;   // cb:fold pure recipient filter, winner probed before cast
+        return true;
+    };
+
+    auto specBuffRoleScore = [](Player* target, bool manaOnly) -> int32
+    {
+        CombatBotRoles const role = GetSpecBuffTargetRole(target);
+        if (manaOnly)
+        {   // cb:fold deterministic scoring only, winner is probed before cast
+            if (role == ROLE_HEALER)
+                return 500;   // cb:fold deterministic score only, winner probed before cast
+            if (role == ROLE_RANGE_DPS)
+                return 400;   // cb:fold deterministic score only, winner probed before cast
+            if (role == ROLE_TANK)
+                return 300;   // cb:fold deterministic score only, winner probed before cast
+            if (role == ROLE_MELEE_DPS)
+                return 200;   // cb:fold deterministic score only, winner probed before cast
+            return 100;
+        }
+
+        if (role == ROLE_TANK)
+            return 400;   // cb:fold deterministic score only, winner probed before cast
+        if (role == ROLE_HEALER)
+            return 300;   // cb:fold deterministic score only, winner probed before cast
+        if (role == ROLE_MELEE_DPS)
+            return 200;   // cb:fold deterministic score only, winner probed before cast
+        if (role == ROLE_RANGE_DPS)
+            return 100;   // cb:fold deterministic score only, winner probed before cast
+        return 0;
+    };
+
+    auto selectSpecBuffTarget =
+        [this, &evaluateSpecBuffTarget, &specBuffRoleScore](
+            SpellEntry const* singleSpell, SpellEntry const* groupSpell,
+            bool manaOnly, SpellEntry const*& selectedSpell,
+            bool& selectedGroupSpell) -> Player*
+    {
+        selectedSpell = nullptr;
+        selectedGroupSpell = false;
+        if (!singleSpell && !groupSpell)
+            return nullptr;   // cb:fold no learned spell, no cast decision exists
+
+        Group* party = me->GetGroup();
+        if (!party)
+        {   // cb:fold solo traversal only, winner is probed before cast
+            bool preserveGroupForm = false;
+            if (!evaluateSpecBuffTarget(me, singleSpell, groupSpell, manaOnly,
+                                        preserveGroupForm))
+                return nullptr;   // cb:fold solo recipient already satisfied or ineligible
+            selectedGroupSpell = !singleSpell || preserveGroupForm;
+            selectedSpell = selectedGroupSpell ? groupSpell : singleSpell;
+            return me;   // cb:fold winner probed by TrySpecBuff below
+        }
+
+        uint8 missingBySubgroup[MAX_RAID_SUBGROUPS] = {};
+        for (GroupReference* itr = party->GetFirstMember(); itr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            bool preserveGroupForm = false;
+            if (!evaluateSpecBuffTarget(member, singleSpell, groupSpell, manaOnly,
+                                        preserveGroupForm))
+                continue;   // cb:fold rejected candidates summarized by the eventual winner/no-op
+            uint8 const subgroup = member->GetSubGroup();
+            if (subgroup < MAX_RAID_SUBGROUPS)
+                ++missingBySubgroup[subgroup];   // cb:fold bounded raid subgroup census
+        }
+
+        Player* best = nullptr;
+        int32 bestScore = -1;
+        bool bestUsesGroup = false;
+        for (GroupReference* itr = party->GetFirstMember(); itr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            bool preserveGroupForm = false;
+            if (!evaluateSpecBuffTarget(member, singleSpell, groupSpell, manaOnly,
+                                        preserveGroupForm))
+                continue;   // cb:fold rejected candidates summarized by the eventual winner/no-op
+
+            uint8 const subgroup = member->GetSubGroup();
+            bool const useGroup = !singleSpell || preserveGroupForm ||
+                (groupSpell && subgroup < MAX_RAID_SUBGROUPS &&
+                 missingBySubgroup[subgroup] > 1);
+            int32 score = specBuffRoleScore(member, manaOnly);
+            if (useGroup)
+                score += 1000;   // cb:fold group efficiency score, winner probe records group choice
+            if (score > bestScore)
+            {   // cb:fold deterministic winner bookkeeping, winner is probed before cast
+                best = member;
+                bestScore = score;
+                bestUsesGroup = useGroup;
+            }
+        }
+
+        if (!best)
+            return nullptr;   // cb:fold every reachable recipient already satisfied/ineligible
+        selectedSpell = bestUsesGroup ? groupSpell : singleSpell;
+        selectedGroupSpell = bestUsesGroup;
+        return best;   // cb:fold winner probed by TrySpecBuff below
+    };
+
+    auto trySpecBuff = [this](Player* target, SpellEntry const* spell,
+                              uint8 reason, bool groupSpell) -> bool
+    {
+        if (!target || !spell)
+            return false;   // cb:fold defensive caller guard, no selection exists
+
+        TraceSpecBuffSelection(this, target, spell, reason, groupSpell);
+        if (!CanTryToRefreshAura(target, spell))
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-buff: cast precheck rejected", spell->Id);
+            return false;
+        }
+
+        SpellCastResult const result = DoCastSpell(target, spell);
+        if (result != SPELL_CAST_OK)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-buff: cast failed", uint32(result));
+            return false;
+        }
+
+        CB_HITV(me->GetGUIDLow(), "cpp-buff: cast started", spell->Id);
+        return true;
+    };
+
+    auto selectTankFirstBuffTarget =
+        [this, &evaluateSpecBuffTarget](SpellEntry const* spell) -> Player*
     {
         if (!spell)
-            return nullptr;   // cb:fold rotation rung, outcome probed at cast
-        if (Player* target = SelectBuffTarget(spell))
-            return target;   // cb:fold rotation rung, outcome probed at cast
-        return IsValidBuffTarget(me, spell) ? me : nullptr;
+            return nullptr;   // cb:fold no learned spell, no cast decision exists
+
+        Player* best = nullptr;
+        int32 bestScore = -1;
+        auto consider = [this, spell, &evaluateSpecBuffTarget,
+                         &best, &bestScore](Player* target)
+        {
+            bool preserveGroupForm = false;
+            if (!evaluateSpecBuffTarget(target, spell, nullptr, false,
+                                        preserveGroupForm))
+                return;   // cb:fold pure recipient filter, winner probed before cast
+
+            int32 score = 0;
+            CombatBotRoles const role = GetSpecBuffTargetRole(target);
+            if (role == ROLE_TANK)
+                score += 1000;   // cb:fold deterministic tank score
+            if (target->GetShapeshiftForm() == FORM_BEAR ||
+                target->GetShapeshiftForm() == FORM_DIREBEAR ||
+                target->HasAura(25780))
+                score += 500;   // cb:fold observable tank-state score
+            if (!target->GetAttackers().empty())
+                score += 300;   // cb:fold observable aggro score
+            if (IsTankClass(target->GetClass()))
+                score += 100;   // cb:fold human/non-profile fallback score
+            if (role == ROLE_MELEE_DPS)
+                score += 25;   // cb:fold melee fallback score
+            if (target == me)
+                ++score;   // cb:fold stable final tie-breaker
+
+            if (score > bestScore)
+            {   // cb:fold deterministic winner bookkeeping, winner is probed before cast
+                best = target;
+                bestScore = score;
+            }
+        };
+
+        consider(me);
+        if (Group* party = me->GetGroup())
+            for (GroupReference* itr = party->GetFirstMember(); itr; itr = itr->next())   // cb:fold deterministic census, winner is probed
+                if (Player* member = itr->getSource())
+                    if (member != me)   // cb:fold deterministic census, winner is probed
+                        consider(member);   // cb:fold deterministic group census, winner probed below
+        return best;
+    };
+
+    auto selectPaladinBlessingTarget =
+        [this, &isReachableSpecBuffTarget](SpellEntry const*& selectedSpell,
+                                           uint8& selectedReason) -> Player*
+    {
+        selectedSpell = nullptr;
+        selectedReason = 0;
+        SpellEntry const* might = GetHighestKnownRank(SP_BLESSING_OF_MIGHT);
+        SpellEntry const* wisdom = GetHighestKnownRank(SP_BLESSING_OF_WISDOM);
+        SpellEntry const* light = GetHighestKnownRank(SP_BLESSING_OF_LIGHT);
+        SpellEntry const* kings = GetHighestKnownRank(SP_BLESSING_OF_KINGS);
+        SpellEntry const* sanctuary = GetHighestKnownRank(SP_BLESSING_OF_SANCTUARY);
+        SpellEntry const* salvation = GetHighestKnownRank(SP_BLESSING_OF_SALVATION);
+
+        Player* best = nullptr;
+        int32 bestScore = -1;
+        auto consider = [this, &isReachableSpecBuffTarget, might, wisdom, light,
+                         kings, sanctuary, salvation, &selectedSpell, &selectedReason,
+                         &best, &bestScore](Player* target)
+        {
+            if (!isReachableSpecBuffTarget(target))
+                return;   // cb:fold pure recipient filter, winner probed before cast
+
+            CombatBotRoles const role = GetSpecBuffTargetRole(target);
+            bool const manaUser = IsSpecManaUser(target);
+            SpellEntry const* candidates[6] = {};
+            uint8 reason = 0;
+            int32 score = 0;
+
+            if (role == ROLE_TANK)
+            {   // cb:fold deterministic recipient policy, reason is probed before cast
+                candidates[0] = sanctuary;
+                candidates[1] = kings;
+                candidates[2] = light;
+                candidates[3] = might;
+                candidates[4] = wisdom;
+                reason = BUFF_PALADIN_TANK;
+                score = 3000;
+            }
+            else if (role == ROLE_MELEE_DPS || !manaUser)
+            {   // cb:fold deterministic recipient policy, reason is probed before cast
+                candidates[0] = might;
+                candidates[1] = kings;
+                candidates[2] = salvation;
+                candidates[3] = sanctuary;
+                candidates[4] = wisdom;
+                reason = BUFF_PALADIN_PHYSICAL;
+                score = 1000;
+            }
+            else
+            {   // cb:fold deterministic recipient policy, reason is probed before cast
+                candidates[0] = wisdom;
+                candidates[1] = kings;
+                candidates[2] = salvation;
+                candidates[3] = might;
+                reason = BUFF_PALADIN_MANA;
+                score = role == ROLE_HEALER ? 2500 : 2000;
+            }
+
+            uint32 ownBlessingChain = 0;
+            for (auto const& aura : target->GetSpellAuraHolderMap())
+            {
+                SpellAuraHolder const* holder = aura.second;
+                if (!holder || holder->GetCasterGuid() != me->GetObjectGuid())
+                    continue;   // cb:fold only this Paladin's assignment controls diversification
+
+                uint32 const chain = sSpellMgr.GetFirstSpellInChain(aura.first);
+                if (chain == SP_BLESSING_OF_PROTECTION ||
+                    chain == SP_BLESSING_OF_FREEDOM ||
+                    chain == SP_BLESSING_OF_SACRIFICE)
+                    return;   // cb:fold never replace this Paladin's active utility blessing
+                if (chain == SP_BLESSING_OF_MIGHT ||
+                    chain == SP_BLESSING_OF_WISDOM ||
+                    chain == SP_BLESSING_OF_LIGHT ||
+                    chain == SP_BLESSING_OF_KINGS ||
+                    chain == SP_BLESSING_OF_SANCTUARY ||
+                    chain == SP_BLESSING_OF_SALVATION)
+                    ownBlessingChain = chain;   // cb:fold at most one normal blessing per caster/target
+            }
+
+            SpellEntry const* desired = nullptr;
+            if (ownBlessingChain)
+            {   // cb:fold stable owner-assignment path, selected family is probed
+                for (SpellEntry const* candidate : candidates)
+                    if (candidate && sSpellMgr.GetFirstSpellInChain(candidate->Id) == ownBlessingChain)
+                    {   // cb:fold bounded family match, refresh winner is probed
+                        if (IsValidMaintenanceBuffTarget(target, candidate))
+                            desired = candidate;   // cb:fold stable owner refresh/upgrade
+                        break;
+                    }
+                if (!desired)
+                    return;   // cb:fold this Paladin's current assignment is still healthy
+            }
+            else
+            {   // cb:fold unassigned-recipient path, selected family is probed
+                for (SpellEntry const* candidate : candidates)
+                    if (candidate && IsValidMaintenanceBuffTarget(target, candidate))
+                    {   // cb:fold bounded priority election, winner is probed
+                        desired = candidate;
+                        break;
+                    }
+                if (!desired)
+                    return;   // cb:fold every useful family is already supplied/unavailable
+            }
+
+            if (target == me)
+                ++score;   // cb:fold stable final tie-breaker
+            if (score > bestScore)
+            {   // cb:fold deterministic winner bookkeeping, winner is probed before cast
+                best = target;
+                bestScore = score;
+                selectedSpell = desired;
+                selectedReason = reason;
+            }
+        };
+
+        consider(me);
+        if (Group* party = me->GetGroup())
+            for (GroupReference* itr = party->GetFirstMember(); itr; itr = itr->next())   // cb:fold deterministic census, winner is probed
+                if (Player* member = itr->getSource())
+                    if (member != me)   // cb:fold deterministic census, winner is probed
+                        consider(member);   // cb:fold deterministic group census, winner probed below
+        return best;
     };
 
     switch (playerClass)
@@ -341,14 +726,17 @@ bool AiBotAI::UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec)
             return false;
         }
 
-        case CLASS_PALADIN:   // cb:fold rotation rung, outcome probed at cast
+        case CLASS_PALADIN:   // cb:fold class dispatch, decision and cast outcome are probed below
+        {
             if (TrySpecSpell(me, m_spells.paladin.pAura)) return true;   // cb:fold rotation rung, outcome probed at cast
-            if (m_spells.paladin.pBlessingBuff)
-                if (Player* target = selectSpecBuffTarget(m_spells.paladin.pBlessingBuff))   // cb:fold rotation rung, outcome probed at cast
-                    if (TrySpecSpell(target, m_spells.paladin.pBlessingBuff)) return true;   // cb:fold rotation rung, outcome probed at cast
+            SpellEntry const* blessing = nullptr;
+            uint8 blessingReason = 0;
+            if (Player* target = selectPaladinBlessingTarget(blessing, blessingReason))
+                if (trySpecBuff(target, blessing, blessingReason, false)) return true;   // cb:fold selection and cast outcome are probed
             if (spec == 1 && TrySpecAura(me, 25780)) return true; // Righteous Fury   // cb:fold rotation rung, outcome probed at cast
             if (spec == 0 && FindAndHealInjuredAlly(100.0f, 100.0f)) return true;   // cb:fold rotation rung, outcome probed at cast
             return false;
+        }
 
         case CLASS_HUNTER:   // cb:fold rotation rung, outcome probed at cast
             SummonPetIfNeeded();
@@ -391,18 +779,33 @@ bool AiBotAI::UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec)
             }
             return false;
 
-        case CLASS_PRIEST:   // cb:fold rotation rung, outcome probed at cast
+        case CLASS_PRIEST:   // cb:fold class dispatch, decision and cast outcome are probed below
+        {
             if (TrySpecAura(me, 588)) return true; // Inner Fire   // cb:fold rotation rung, outcome probed at cast
-            if (SpellEntry const* fort = m_spells.priest.pPrayerofFortitude ?
-                m_spells.priest.pPrayerofFortitude : m_spells.priest.pPowerWordFortitude)
-                if (Player* target = selectSpecBuffTarget(fort))   // cb:fold rotation rung, outcome probed at cast
-                    if (TrySpecSpell(target, fort)) return true;   // cb:fold rotation rung, outcome probed at cast
-            if (spec == 0 && m_spells.priest.pDivineSpirit)
-                if (Player* target = selectSpecBuffTarget(m_spells.priest.pDivineSpirit))   // cb:fold rotation rung, outcome probed at cast
-                    if (TrySpecSpell(target, m_spells.priest.pDivineSpirit)) return true;   // cb:fold rotation rung, outcome probed at cast
+            SpellEntry const* buffSpell = nullptr;
+            bool groupSpell = false;
+            if (Player* target = selectSpecBuffTarget(
+                    m_spells.priest.pPowerWordFortitude,
+                    m_spells.priest.pPrayerofFortitude,
+                    false, buffSpell, groupSpell))
+            {   // cb:fold selector winner is probed by trySpecBuff
+                uint8 const reason = groupSpell ? BUFF_PRIEST_FORTITUDE_GROUP :
+                    BUFF_PRIEST_FORTITUDE_SINGLE;
+                if (trySpecBuff(target, buffSpell, reason, groupSpell)) return true;   // cb:fold selection and cast outcome are probed
+            }
+            if (Player* target = selectSpecBuffTarget(
+                    m_spells.priest.pDivineSpirit,
+                    m_spells.priest.pPrayerofSpirit,
+                    true, buffSpell, groupSpell))
+            {   // cb:fold selector winner is probed by trySpecBuff
+                uint8 const reason = groupSpell ? BUFF_PRIEST_SPIRIT_GROUP :
+                    BUFF_PRIEST_SPIRIT_SINGLE;
+                if (trySpecBuff(target, buffSpell, reason, groupSpell)) return true;   // cb:fold selection and cast outcome are probed
+            }
             if (spec == 2 && TrySpecAura(me, SP_SHADOWFORM)) return true;   // cb:fold rotation rung, outcome probed at cast
             if (spec != 2 && FindAndHealInjuredAlly(100.0f, 100.0f)) return true;   // cb:fold rotation rung, outcome probed at cast
             return false;
+        }
 
         case CLASS_SHAMAN:   // cb:fold rotation rung, outcome probed at cast
             if (TrySpecAura(me, 324)) return true; // Lightning Shield   // cb:fold rotation rung, outcome probed at cast
@@ -415,18 +818,23 @@ bool AiBotAI::UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec)
                 TrySpecSpell(me, m_spells.shaman.pGhostWolf)) return true;   // cb:fold rotation rung, outcome probed at cast
             return false;
 
-        case CLASS_MAGE:   // cb:fold rotation rung, outcome probed at cast
-            if (m_spells.mage.pArcaneBrilliance)
+        case CLASS_MAGE:   // cb:fold class dispatch, decision and cast outcome are probed below
+        {
+            SpellEntry const* buffSpell = nullptr;
+            bool groupSpell = false;
+            if (Player* target = selectSpecBuffTarget(
+                    m_spells.mage.pArcaneIntellect,
+                    m_spells.mage.pArcaneBrilliance,
+                    true, buffSpell, groupSpell))
             {   // cb:fold rotation rung, outcome probed at cast
-                if (Player* target = selectSpecBuffTarget(m_spells.mage.pArcaneBrilliance))
-                    if (TrySpecSpell(target, m_spells.mage.pArcaneBrilliance)) return true;   // cb:fold rotation rung, outcome probed at cast
+                uint8 const reason = groupSpell ? BUFF_MAGE_INTELLECT_GROUP :
+                    BUFF_MAGE_INTELLECT_SINGLE;
+                if (trySpecBuff(target, buffSpell, reason, groupSpell)) return true;   // cb:fold selection and cast outcome are probed
             }
-            else if (m_spells.mage.pArcaneIntellect)
-                if (Player* target = selectSpecBuffTarget(m_spells.mage.pArcaneIntellect))   // cb:fold rotation rung, outcome probed at cast
-                    if (TrySpecSpell(target, m_spells.mage.pArcaneIntellect)) return true;   // cb:fold rotation rung, outcome probed at cast
             if (TrySpecSpell(me, m_spells.mage.pIceArmor)) return true;   // cb:fold rotation rung, outcome probed at cast
             if (spec == 2 && TrySpecAura(me, SP_ICE_BARRIER)) return true;   // cb:fold rotation rung, outcome probed at cast
             return false;
+        }
 
         case CLASS_WARLOCK:   // cb:fold rotation rung, outcome probed at cast
             if (TrySpecSpell(me, m_spells.warlock.pDemonArmor)) return true;   // cb:fold rotation rung, outcome probed at cast
@@ -447,17 +855,44 @@ bool AiBotAI::UpdateSpecOutOfCombat(uint8 playerClass, uint8 spec)
                 return true;
             };
 
-            SpellEntry const* wild = m_spells.druid.pGiftoftheWild ?
-                m_spells.druid.pGiftoftheWild : m_spells.druid.pMarkoftheWild;
-            if (wild)
-                if (Player* target = selectSpecBuffTarget(wild))   // cb:fold rotation rung, outcome probed at cast
-                {   // cb:fold rotation rung, outcome probed at cast
-                    if (leaveFormForCast(target, wild)) return true;   // cb:fold rotation rung, outcome probed at cast
-                    if (TrySpecSpell(target, wild)) return true;   // cb:fold rotation rung, outcome probed at cast
-                }
+            auto leaveFormForBuff = [this](Unit* target, SpellEntry const* spell) -> bool
+            {
+                if (!CanTryToRefreshAuraAfterLeavingForm(target, spell))
+                    return false;   // cb:fold rotation rung, outcome probed at selection/cast
+                me->RemoveSpellsCausingAura(SPELL_AURA_MOD_SHAPESHIFT);
+                return true;
+            };
 
-            if (leaveFormForCast(me, m_spells.druid.pThorns)) return true;   // cb:fold rotation rung, outcome probed at cast
-            if (TrySpecSpell(me, m_spells.druid.pThorns)) return true;   // cb:fold rotation rung, outcome probed at cast
+            SpellEntry const* wild = nullptr;
+            bool groupWild = false;
+            if (Player* target = selectSpecBuffTarget(
+                    m_spells.druid.pMarkoftheWild,
+                    m_spells.druid.pGiftoftheWild,
+                    false, wild, groupWild))
+            {   // cb:fold selector winner is probed by form/cast paths below
+                uint8 const reason = groupWild ? BUFF_DRUID_WILD_GROUP :
+                    BUFF_DRUID_WILD_SINGLE;
+                if (leaveFormForBuff(target, wild))
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-buff: left form, cast deferred", wild->Id);
+                    TraceSpecBuffSelection(this, target, wild, reason, groupWild);
+                    return true;
+                }
+                if (trySpecBuff(target, wild, reason, groupWild)) return true;   // cb:fold selection and cast outcome are probed
+            }
+
+            if (Player* target = selectTankFirstBuffTarget(m_spells.druid.pThorns))
+            {   // cb:fold selector winner is probed by form/cast paths below
+                if (leaveFormForBuff(target, m_spells.druid.pThorns))
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-buff: left form, cast deferred", m_spells.druid.pThorns->Id);
+                    TraceSpecBuffSelection(this, target, m_spells.druid.pThorns,
+                                           BUFF_DRUID_THORNS_TANK_FIRST, false);
+                    return true;
+                }
+                if (trySpecBuff(target, m_spells.druid.pThorns,
+                                BUFF_DRUID_THORNS_TANK_FIRST, false)) return true;   // cb:fold selection and cast outcome are probed
+            }
             if (leaveFormForCast(me, GetHighestKnownRank(16689))) return true;   // cb:fold rotation rung, outcome probed at cast
             if (TrySpecAura(me, 16689)) return true; // Nature's Grasp   // cb:fold rotation rung, outcome probed at cast
             if (spec == 2)
@@ -1118,6 +1553,90 @@ bool AiBotAI::UpdateSpecCombatDruid(uint8 spec)
 
     Unit* victim = me->GetVictim();
 
+    auto selectInnervateTarget = [this]() -> Player*
+    {
+        SpellEntry const* spell = m_spells.druid.pInnervate;
+        if (!spell)
+            return nullptr;   // cb:fold no learned spell, no support decision exists
+
+        Player* best = nullptr;
+        int32 bestScore = -1;
+        auto consider = [this, spell, &best, &bestScore](Player* target)
+        {
+            if (!target || !target->IsAlive() || target->IsGameMaster() ||
+                !me->IsValidHelpfulTarget(target) ||
+                !me->IsWithinLOSInMap(target) || !me->IsWithinDist(target, 30.0f) ||
+                !IsValidBuffTarget(target, spell))
+                return;   // cb:fold pure recipient filter, winner probed before cast
+
+            uint32 const maxMana = target->GetMaxPower(POWER_MANA);
+            if (!maxMana)
+                return;   // cb:fold zero-mana recipient cannot benefit
+            uint32 const manaPct = uint32(
+                (uint64(target->GetPower(POWER_MANA)) * 100u) / maxMana);
+            if (manaPct >= 35)
+                return;   // cb:fold support threshold not crossed
+
+            int32 score = 100 - int32(manaPct);
+            CombatBotRoles const role = GetSpecBuffTargetRole(target);
+            if (role == ROLE_HEALER)
+                score += 300;   // cb:fold healer-first support score
+            else if (role == ROLE_RANGE_DPS)
+                score += 50;   // cb:fold caster fallback score
+            else if (role == ROLE_MELEE_DPS)
+                score += 10;   // cb:fold mana-melee fallback score
+            else if (IsHealerClass(target->GetClass()))
+                score += 150;   // cb:fold human/non-profile healer fallback
+            if (target == me)
+                ++score;   // cb:fold stable final tie-breaker
+
+            if (score > bestScore)
+            {   // cb:fold deterministic winner bookkeeping, winner is probed before cast
+                best = target;
+                bestScore = score;
+            }
+        };
+
+        consider(me);
+        if (Group* party = me->GetGroup())
+            for (GroupReference* itr = party->GetFirstMember(); itr; itr = itr->next())   // cb:fold deterministic census, winner is probed
+                if (Player* member = itr->getSource())
+                    if (member != me)   // cb:fold deterministic census, winner is probed
+                        consider(member);   // cb:fold deterministic group census, winner probed below
+        return best;
+    };
+
+    auto trySupportInnervate = [this, &selectInnervateTarget]() -> bool
+    {
+        Player* target = selectInnervateTarget();
+        SpellEntry const* spell = m_spells.druid.pInnervate;
+        if (!target || !spell)
+            return false;   // cb:fold no eligible depleted mana recipient
+
+        TraceSpecBuffSelection(this, target, spell,
+                               BUFF_DRUID_INNERVATE_SUPPORT, false);
+        if (CanTryToRefreshAuraAfterLeavingForm(target, spell))
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-buff: left form, cast deferred", spell->Id);
+            me->RemoveSpellsCausingAura(SPELL_AURA_MOD_SHAPESHIFT);
+            return true;
+        }
+        if (!CanTryToRefreshAura(target, spell))
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-buff: cast precheck rejected", spell->Id);
+            return false;
+        }
+
+        SpellCastResult const result = DoCastSpell(target, spell);
+        if (result != SPELL_CAST_OK)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-buff: cast failed", uint32(result));
+            return false;
+        }
+        CB_HITV(me->GetGUIDLow(), "cpp-buff: cast started", spell->Id);
+        return true;
+    };
+
     if (spec == 2) // Restoration
     {   // cb:fold rotation rung, outcome probed at cast
         if (me->GetShapeshiftForm() != FORM_NONE)
@@ -1136,7 +1655,7 @@ bool AiBotAI::UpdateSpecCombatDruid(uint8 spec)
                 TrySpecSpell(heal, SP_SWIFTMEND)) return true;   // cb:fold rotation rung, outcome probed at cast
             if (HealInjuredTarget(heal)) return true;   // cb:fold rotation rung, outcome probed at cast
         }
-        if (me->GetPowerPercent(POWER_MANA) < 35.0f && TrySpecSpell(me, m_spells.druid.pInnervate)) return true;   // cb:fold rotation rung, outcome probed at cast
+        if (trySupportInnervate()) return true;   // cb:fold target selection and cast/defer outcome are probed
         if (m_spells.druid.pRemoveCurse)
             if (Unit* friendUnit = SelectDispelTarget(m_spells.druid.pRemoveCurse))   // cb:fold rotation rung, outcome probed at cast
                 if (TrySpecSpell(friendUnit, m_spells.druid.pRemoveCurse)) return true;   // cb:fold rotation rung, outcome probed at cast
@@ -1151,6 +1670,7 @@ bool AiBotAI::UpdateSpecCombatDruid(uint8 spec)
 
     if (spec == 0) // Balance
     {   // cb:fold rotation rung, outcome probed at cast
+        if (trySupportInnervate()) return true;   // cb:fold target selection and cast/defer outcome are probed
         if (TrySpecAura(me, 24858)) return true;   // cb:fold rotation rung, outcome probed at cast
         if (victim->GetHealthPercent() > 45.0f && TrySpecAura(victim, 5570)) return true;   // cb:fold rotation rung, outcome probed at cast
         if (victim->GetHealthPercent() > 35.0f && TrySpecAura(victim, 8921)) return true;   // cb:fold rotation rung, outcome probed at cast
@@ -1179,6 +1699,7 @@ bool AiBotAI::UpdateSpecCombatDruid(uint8 spec)
         return false;
     }
 
+    if (trySupportInnervate()) return true;   // cb:fold target selection and cast/defer outcome are probed
     if (me->GetShapeshiftForm() != FORM_CAT)
         return TrySpecSpell(me, m_spells.druid.pCatForm);   // cb:fold rotation rung, outcome probed at cast
 

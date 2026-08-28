@@ -917,6 +917,37 @@ void AiBotAI::RefreshDoctrine()
         char const* from = m_doctrine ? m_doctrine->Name() : "(none)";
         m_doctrine = MakeDoctrine(kind);
         m_doctrineKind = kind;
+
+        // The doctrine instances own their own tactical memo, but the shared combat
+        // mechanisms below keep their continuation state on AiBotAI.  An opt-out must
+        // therefore clear the old doctrine's in-flight counters/holds here; otherwise a
+        // disabled mechanism can still suppress the 4 Hz rotation or resume where it left
+        // off if this bot later changes posture again.
+        if (!m_doctrine->UseStalemateBreaker())
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: doctrine disables stalemate breaker, state reset");
+            m_stalemateMs = 0;
+            m_stalemateHoldMs = 0;
+            m_stalemateNudges = 0;
+            m_stalemateDisengages = 0;
+            m_lastHealth = 0;
+            m_lastVictimHealth = 0;
+            m_stalemateVictim.Clear();
+        }
+        if (!m_doctrine->UseOverpullRetreat())
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: doctrine disables overpull retreat, state reset");
+            m_overpullFleeHoldMs = 0;
+            m_overpullFlees = 0;
+        }
+        if (!m_doctrine->UseTapRespect() && !m_combatIgnore.empty())
+        {
+            CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: doctrine disables tap respect, stale ignores cleared");
+            // m_combatIgnore is shared by tap/stalemate/overpull.  A doctrine swap is a
+            // clean authority boundary: discard entries created under the old policy and
+            // let any still-enabled safety mechanism repopulate its own entries.
+            m_combatIgnore.clear();
+        }
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-DOCTRINE] %s: %s -> %s%s",
             me ? me->GetName() : "?", from, m_doctrine ? m_doctrine->Name() : "?",
@@ -1174,9 +1205,15 @@ void AiBotAI::DoPartyFollow()
         dist > AIBOT_PARTY_FOLLOW_DIST + 1.0f)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: issuing follow behind boss");
-        // Deterministic per-bot spread behind the boss: 8 slots around the rear arc.
+        // Deterministic per-bot spread behind the boss: 8 slots around the rear
+        // arc, PLUS a per-bot RANK stagger on the follow distance. One shared
+        // radius put same-arc neighbours shoulder-in-shoulder for the whole
+        // journey — most of the visual stacking WHILE MOVING (owner 2026-08-28).
+        // guid/8 decorrelates the rank from the guid%8 arc slot.
         float const angle = M_PI_F + (float(me->GetGUIDLow() % 8) - 3.5f) * (M_PI_F / 8.0f);
-        me->GetMotionMaster()->MoveFollow(pBoss, AIBOT_PARTY_FOLLOW_DIST, angle);
+        float const followDist =
+            AIBOT_PARTY_FOLLOW_DIST + float((me->GetGUIDLow() / 8) % 3) * 1.25f;
+        me->GetMotionMaster()->MoveFollow(pBoss, followDist, angle);
     }
 }
 
@@ -1483,7 +1520,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (m_rotationSubTick.Passed())
     {   // cb:fold hot 4 Hz sub-tick cadence, cast decisions probed inside
         m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
-        if (!m_possessed
+        if (!m_possessed && !m_recoveryResetHoldMs
             && HasFastCombatPolicy() && me && me->IsInWorld() && !me->IsBeingTeleported()
             && me->IsAlive() && me->IsInCombat()
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
@@ -1515,7 +1552,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (m_raidPlanSubTick.Passed())
     {   // cb:fold hot 2 Hz sub-tick cadence, act tick probed inside
         m_raidPlanSubTick.Reset(500);
-        if (!m_possessed && m_hasRaidPlan && me && me->IsInWorld() && !me->IsBeingTeleported()
+        if (!m_possessed && !m_recoveryResetHoldMs && m_hasRaidPlan && me && me->IsInWorld() && !me->IsBeingTeleported()
             && me->IsAlive()
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL))
         {
@@ -1603,6 +1640,20 @@ void AiBotAI::UpdateAI(uint32 const diff)
         }
     }
 
+    // Protocol-v6 combat-still reset hold. Keep the bridge alive (including
+    // fresh STATE) but suspend every autonomous mover/target selector while C#
+    // validates the reset result. This branch owns later hold ticks; the second
+    // check below catches the command on the exact tick that adopts it.
+    if (m_recoveryResetHoldMs)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-combat-reset: recovery hold owns tick", m_recoveryResetHoldMs);
+        UpdateBridgeTick();
+        m_recoveryResetHoldMs = m_recoveryResetHoldMs > AIBOT_UPDATE_INTERVAL
+            ? m_recoveryResetHoldMs - AIBOT_UPDATE_INTERVAL
+            : 0;
+        return;
+    }
+
     // [FINDING_019] Backstop: un-stick a bot physically wedged in geometry while traveling. Runs on
     // the 1s behaviour tick, ahead of the task/doctrine machinery (which can not see the wedge).
     UpdateTravelStuckWatchdog();
@@ -1618,6 +1669,12 @@ void AiBotAI::UpdateAI(uint32 const diff)
         CB_HIT(me->GetGUIDLow(), "cpp-main: wander timer at zero");
         m_wanderTimer = 0;
     }
+
+    // [SUI] party-spacing sidestep throttle rides the same clock.
+    if (m_unstackTimer > AIBOT_UPDATE_INTERVAL)
+        m_unstackTimer -= AIBOT_UPDATE_INTERVAL;
+    else
+        m_unstackTimer = 0;
 
     // §4 approach-scan throttle
     if (m_approachScanTimer > AIBOT_UPDATE_INTERVAL)
@@ -1648,6 +1705,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
 
     // --- Bridge: connect + recv + periodic state ---
     UpdateBridgeTick();
+
+    if (m_recoveryResetHoldMs)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-combat-reset: newly-adopted recovery hold owns tick", m_recoveryResetHoldMs);
+        m_recoveryResetHoldMs = m_recoveryResetHoldMs > AIBOT_UPDATE_INTERVAL
+            ? m_recoveryResetHoldMs - AIBOT_UPDATE_INTERVAL
+            : 0;
+        return;
+    }
 
     // One-time log on first successful update tick
     if (!m_loggedFirstUpdate)
@@ -2664,6 +2730,16 @@ void AiBotAI::UpdateAI(uint32 const diff)
             return;
         }
 
+        // [SUI] Party spacing before any idle stroll: a bot standing inside a
+        // fellow party member steps clear first. Runs for RTS-held and
+        // conscripted bots too (a group ordered to one point is exactly when
+        // they pile up), which is why it sits ABOVE DoRandomWander's bails.
+        if (DoPartyUnstack())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: party unstack owns tick");
+            return;
+        }
+
         // --- Default idle wander ---
         DoRandomWander();
         return;
@@ -2678,15 +2754,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
         return;
     }
 
-    // [ADDED] Combat stalemate breaker — runs only while in combat.
-    if (HandleCombatStalemate())
+    // [ADDED] Combat stalemate breaker — shared machinery, explicitly owned by doctrine.
+    if (m_doctrine->UseStalemateBreaker() && HandleCombatStalemate())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: stalemate breaker owns tick");
         return;
     }
 
-    // [OVERPULL] Overpull retreat — bail out of a fight where more than the cap are on us.
-    if (HandleOverpullRetreat())
+    // [OVERPULL] Retreat only when this doctrine permits abandoning the current fight.
+    if (m_doctrine->UseOverpullRetreat() && HandleOverpullRetreat())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: overpull retreat owns tick");
         return;
@@ -2700,8 +2776,8 @@ void AiBotAI::UpdateAI(uint32 const diff)
         m_lastVictimGuidLow = pVictim->GetGUIDLow();
     }
 
-    // --- Tap-respect: drop a mob the server says belongs to a non-group player ---
-    if (pVictim && pVictim->IsCreature() && !m_combatDirective.IsActive())
+    // --- Tap-respect: doctrine decides whether foreign ownership may veto this fight. ---
+    if (m_doctrine->UseTapRespect() && pVictim && pVictim->IsCreature())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: tap-respect check");
         Creature* pVicCre = static_cast<Creature*>(pVictim);

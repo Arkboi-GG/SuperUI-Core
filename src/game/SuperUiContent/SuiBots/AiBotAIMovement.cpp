@@ -30,6 +30,7 @@
 #include "Movement/AiBotMovementGenerators.h"
 #include "Movement/AiBotPathSmoothing.h"
 #include "AiBotCircuit.h" // [CIRCUIT] probe macros + fold contract (CIRCUIT_BOARD.md)
+#include "SuiPossess.h"   // [SUI] a possessed bot never auto-sidesteps
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -214,6 +215,108 @@ void AiBotAI::DoRandomWander()
     float x, y, z;
     me->GetRandomPoint(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), 15.0f, x, y, z);
     MovePointRun(AIBOT_POINT_WANDER, x, y, z);
+}
+
+// ============================================================
+// [SUI] Party spacing (owner 2026-08-28)
+// ============================================================
+// A party bot must not STAND inside a fellow group member (or inside the
+// owner). Not collision — a deliberate, rate-limited sidestep: whenever an
+// idle bot finds a group member closer than the spacing radius on its own
+// floor, it steps to open ground just outside it. Runs for RTS-held and
+// conscripted bots too — a group ordered to one clicked point is exactly when
+// the pile-up happens — and the step is small enough that "stand where told"
+// stays honest. The step routes through MovePointRun, so the wall-clip guard
+// and pathfinding apply; an unwalkable sidestep is refused and retried on the
+// next crowded tick, never shortcut through geometry.
+
+bool AiBotAI::DoPartyUnstack()
+{
+    if (!me || !me->IsInWorld() || me->IsMoving() || me->IsInCombat() || me->IsDead())
+        return false;
+    if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != IDLE_MOTION_TYPE)
+        return false;
+    if (me->IsNonMeleeSpellCasted(false))
+        return false;
+    if (SuiPossess::IsSuiPossessed(me))
+        return false;   // the player's hands are on this body
+    if (m_unstackTimer > 0)
+        return false;   // cb:fold spacing throttle pending
+
+    Group* group = me->GetGroup();
+    if (!group)
+        return false;
+
+    float const spacing = 1.6f;
+    float const spacingSq = spacing * spacing;
+    float pushX = 0.f, pushY = 0.f;
+    int crowded = 0;
+    bool realPartyGroup = false;
+
+    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* member = itr->getSource();
+        if (!member || member == me || !member->IsInWorld() ||
+            member->GetMapId() != me->GetMapId() || member->IsDead())
+            continue;
+        if (member->GetSession() && !member->GetSession()->GetBot())
+            realPartyGroup = true;   // this is the owner's CRPG party, not a bot pack
+
+        float dx = me->GetPositionX() - member->GetPositionX();
+        float dy = me->GetPositionY() - member->GetPositionY();
+        float dz = me->GetPositionZ() - member->GetPositionZ();
+        if (dz * dz > 9.0f)
+            continue;   // a floor apart is not stacking
+        float distSq = dx * dx + dy * dy;
+        if (distSq > spacingSq)
+            continue;   // cb:fold neighbour outside spacing radius
+
+        ++crowded;
+        float dist = sqrtf(distSq);
+        if (dist > 0.05f)
+        {
+            // Closer neighbours push harder; direction is away from each.
+            float w = (spacing - dist) / (dist * spacing);
+            pushX += dx * w;
+            pushY += dy * w;
+        }
+    }
+
+    if (!crowded || !realPartyGroup)
+        return false;
+
+    // Re-check soon whichever way the step goes, but never thrash: the timer is
+    // consumed by the ATTEMPT, so a refused (unwalkable) sidestep waits too.
+    m_unstackTimer = urand(1200, 2200);
+
+    float dirX, dirY;
+    float len = sqrtf(pushX * pushX + pushY * pushY);
+    if (len > 0.01f)
+    {
+        dirX = pushX / len;
+        dirY = pushY / len;
+    }
+    else
+    {
+        // Dead centre of the pile (or exactly co-located): a deterministic
+        // per-bot angle so two bots on the same spot pick different exits.
+        float angle = (float)(me->GetGUIDLow() % 12) * (M_PI_F / 6.0f);
+        dirX = cosf(angle);
+        dirY = sinf(angle);
+    }
+
+    float step = spacing + 0.6f;
+    float tx = me->GetPositionX() + dirX * step;
+    float ty = me->GetPositionY() + dirY * step;
+    float tz = me->GetPositionZ();
+    me->UpdateGroundPositionZ(tx, ty, tz);
+    if (!MovePointRun(AIBOT_POINT_WANDER, tx, ty, tz, false))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-move: unstack sidestep refused (no path)");
+        return false;
+    }
+    CB_HITV(me->GetGUIDLow(), "cpp-move: unstack sidestep issued", (uint32)crowded);
+    return true;
 }
 
 bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,

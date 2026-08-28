@@ -22,6 +22,7 @@
 #include "SuiPossess.h"      // [SUI] free-view command waiver on the possessed drop
 #include "AiBotCircuit.h" // [CIRCUIT] probe macros + batch flush (CIRCUIT_BOARD.md)
 #include "Player.h"
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <cctype>   // tolower — [FOLLOW-CMD] lowercases the stored escort-override name
@@ -215,17 +216,17 @@ void AiBotAI::BridgeSendHello()
     char const* specProfile = botEntry
         ? AiBotTalents::GetProfileName(me->GetClass(), botEntry->specTab)
         : "unassigned";
-    char json[768];
+    char json[1024];
     snprintf(json, sizeof(json),
         "{\"type\":\"HELLO\",\"payload\":{"
-        "\"guid\":%u,\"bridgeProtocol\":%u,\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
+        "\"guid\":%u,\"bridgeProtocol\":%u,\"circuitEpoch\":\"%s\",\"name\":\"%s\",\"race\":%u,\"classId\":%u,"
         "\"level\":%u,\"specTab\":%u,\"specProfile\":\"%s\",\"activeRole\":%u,"
         "\"talentProfileState\":\"%s\",\"rotationSource\":\"%s\","
         "\"rotationProfile\":\"%s\",\"rotationInstructionCount\":%u,"
         "\"rotationCastableCount\":%u,\"combatConfigRevision\":%u,"
         "\"mapId\":%u,\"zoneId\":%u,"
         "\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-        me->GetGUIDLow(), uint32(BRIDGE_PROTOCOL_VERSION), me->GetName(), me->GetRace(), me->GetClass(),
+        me->GetGUIDLow(), uint32(BRIDGE_PROTOCOL_VERSION), CbCircuit::Epoch(), me->GetName(), me->GetRace(), me->GetClass(),
         me->GetLevel(), botEntry ? uint32(botEntry->specTab) : 255u,
         specProfile, uint32(m_role), GetTalentProfileStateName(),
         GetEffectiveRotationSource(), GetEffectiveRotationProfile(),
@@ -312,11 +313,8 @@ char const* AiBotAI::GetEffectiveRotationProfile() const
 // The held-task echo fields (taskKind/taskActivity/taskCreature/taskDest*/taskKills) and
 // every other STATE field are byte-for-byte unchanged.
 //
-// FOLLOW-ON (optional, not required for the fix): QUERY_QUEST_STATUS /
-// BridgeHandleQueryQuestStatus / SendBridgeEvent("QUEST_STATUS_ALL") are now dead on the
-// solo path. They can be left in place as harmless dead code (the C# solo path no longer
-// sends QUERY and no longer has a QUEST_STATUS_ALL handler), or removed later. Leaving the
-// C++ handler in keeps the group path functional if grouping is ever flipped on.
+// QUERY_QUEST_STATUS / QUEST_STATUS_ALL are retired on every path. Group planning waits for
+// the next authoritative STATE heartbeat instead of reviving the contradictory pull handler.
 // ============================================================
 void AiBotAI::BridgeSendState()
 {
@@ -810,6 +808,8 @@ void AiBotAI::BridgeProcessLine(const char* line)
         BridgeHandleSetTask(line); // cb:fold dispatch, carried by dispatch probe
     else if (strcmp(msgType, "COMBAT_DIRECTIVE") == 0) // cb:fold dispatch, carried by dispatch probe
         BridgeHandleCombatDirective(line); // cb:fold dispatch, carried by dispatch probe
+    else if (strcmp(msgType, "RESET_COMBAT_STUCK") == 0) // cb:fold dispatch, carried by dispatch probe
+        BridgeHandleResetCombatStuck(line); // cb:fold dispatch, carried by dispatch probe
      else if (strcmp(msgType, "TAKE_FLIGHT") == 0) // cb:fold dispatch, carried by dispatch probe
         BridgeHandleTakeFlight(line); // cb:fold dispatch, carried by dispatch probe
     else if (strcmp(msgType, "SELL_ITEMS") == 0) // cb:fold dispatch, carried by dispatch probe
@@ -836,8 +836,6 @@ void AiBotAI::BridgeProcessLine(const char* line)
         BridgeHandleApplyCombatLoadout(line); // cb:fold dispatch, carried by dispatch probe
     else if (strcmp(msgType, "LOAD_RAID_PLAN") == 0) // cb:fold dispatch, carried by dispatch probe
         BridgeHandleLoadRaidPlan(line); // cb:fold dispatch, carried by dispatch probe
-    else if (strcmp(msgType, "QUERY_QUEST_STATUS") == 0) // cb:fold dispatch, carried by dispatch probe
-        BridgeHandleQueryQuestStatus(line); // cb:fold dispatch, carried by dispatch probe
     else if (strcmp(msgType, "CIRCUIT_TRACE") == 0) // cb:fold dispatch, carried by dispatch probe
         BridgeHandleCircuitTrace(line); // cb:fold dispatch, carried by dispatch probe
     else if (strcmp(msgType, "PING") == 0) // cb:fold dispatch, carried by dispatch probe
@@ -848,6 +846,166 @@ void AiBotAI::BridgeProcessLine(const char* line)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: unknown command '%s'", me->GetName(), msgType);
     }
     m_bridgeDispatchCbt = previousDispatchCbt;
+}
+
+// ============================================================
+// Protocol v6: RESET_COMBAT_STUCK
+//
+// This is not a general "leave combat" command. C# sends it only after a
+// continuous, fresh-STATE proof that the bot has remained inside a tiny anchor
+// while in combat, without a real kill, for the full stuck window. Revalidate
+// that proof here before touching core combat state. The operation preserves
+// the planner task/directive, emits an exact-cbt terminal result, immediately
+// ships STATE, and parks autonomous reacquisition for five seconds so C# can
+// require fresh out-of-combat truth before its existing safe escape runs.
+// ============================================================
+void AiBotAI::BridgeHandleResetCombatStuck(const char* json)
+{
+    auto fail = [this](const char* reason)
+    {
+        char data[128];
+        snprintf(data, sizeof(data), "reason=%s", reason);
+        BridgeSendEvent("COMBAT_RESET_FAIL", data);
+        BridgeSendState();
+    };
+
+    // A socket cannot exist without its AiBotAI actor in normal operation, but
+    // do not dereference a torn-down actor merely to manufacture a failure line.
+    if (!me)
+        return; // cb:fold actor teardown race; C# bounded WAIT owns the outcome
+
+    if (m_bridgeDispatchCbt == 0)
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-combat-reset: rejected, missing cbt");
+        fail("missing_cbt");
+        return;
+    }
+    if (!me->IsInWorld() || !me->IsAlive() || me->IsBeingTeleported() ||
+        me->HasUnitState(UNIT_STATE_TAXI_FLIGHT) || me->GetTransport() || m_hearthActive)
+    {
+        CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-combat-reset: rejected, actor unavailable");
+        fail("actor_unavailable");
+        return;
+    }
+    if (me->GetGroup())
+    {
+        // Combat-still recovery is intentionally solo-only. Stopping combat for
+        // one member of either a player-led or bot-only party would violate the
+        // group's shared combat/movement owner and could split the formation.
+        CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: rejected, grouped actor");
+        fail("grouped");
+        return;
+    }
+
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json; // cb:fold payload fallback detail
+
+    float anchorX = 0.0f, anchorY = 0.0f, anchorZ = 0.0f, radius = 0.0f;
+    int anchorMap = -1, stillSeconds = 0, wedgeStreak = 0;
+    bool const complete =
+        JsonExtractFloat(payload, "anchor_x", anchorX) &&
+        JsonExtractFloat(payload, "anchor_y", anchorY) &&
+        JsonExtractFloat(payload, "anchor_z", anchorZ) &&
+        JsonExtractFloat(payload, "radius", radius) &&
+        JsonExtractInt(payload, "anchor_map", anchorMap) &&
+        JsonExtractInt(payload, "still_seconds", stillSeconds) &&
+        JsonExtractInt(payload, "wedge_streak", wedgeStreak);
+
+    if (!complete || !std::isfinite(anchorX) || !std::isfinite(anchorY) ||
+        !std::isfinite(anchorZ) || !std::isfinite(radius) ||
+        radius < 1.0f || radius > 10.0f || stillSeconds < AIBOT_COMBAT_RESET_MIN_STILL_SEC ||
+        stillSeconds > 86400 || wedgeStreak < 6)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: rejected, invalid proof payload");
+        fail("bad_proof");
+        return;
+    }
+    if (anchorMap != (int)me->GetMapId())
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-combat-reset: rejected, anchor map changed", anchorMap);
+        fail("map_changed");
+        return;
+    }
+
+    float const dx = me->GetPositionX() - anchorX;
+    float const dy = me->GetPositionY() - anchorY;
+    float const dz = std::fabs(me->GetPositionZ() - anchorZ);
+    if (dx * dx + dy * dy > radius * radius || dz > 10.0f)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-combat-reset: rejected, bot moved outside proof anchor", std::sqrt(dx * dx + dy * dy));
+        fail("moved");
+        return;
+    }
+
+    if (me->IsInCombat())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: validated latch, clearing core combat state");
+
+        uint32 const resetVictimGuid = me->GetVictim()
+            ? me->GetVictim()->GetGUIDLow()
+            : m_lastVictimGuidLow;
+        if (resetVictimGuid)
+            m_combatIgnore[resetVictimGuid] = AIBOT_STALEMATE_IGNORE_MS; // cb:fold bounded reacquire quarantine
+
+        // Tear down only tactical/motion continuation state. The strategic task
+        // and combat directive deliberately survive; the C# owner will either
+        // port after fresh OOC proof or let the same task resume after the hold.
+        m_suppressTaskDestInform = true;
+        CancelPendingNpcInteraction("combat_stuck_reset");
+        // Stop controlled combat too. ACKing only the owner while a pet,
+        // guardian, or charm remains engaged lets that dependent immediately
+        // relatch the owner before the fresh post-reset STATE reaches C#.
+        me->CombatStopWithPets(true);
+        me->GetHostileRefManager().deleteReferences();
+        me->ClearTarget();
+        StopMoving();
+        ClearStoredPath();
+
+        m_stalemateMs = 0;
+        m_stalemateHoldMs = 0;
+        m_stalemateNudges = 0;
+        m_stalemateDisengages = 0;
+        m_lastHealth = 0;
+        m_lastVictimHealth = 0;
+        m_stalemateVictim.Clear();
+
+        m_overpullFleeHoldMs = 0;
+        m_overpullFlees = 0;
+        m_lastAttackerCount = 0;
+
+        m_pullActive = false;
+        m_pullTagged = false;
+        m_pullTargetGuid.Clear();
+        m_pullRetreatHoldMs = 0;
+        m_pullElapsedMs = 0;
+
+        // AttackStop/CombatStop intentionally made the old victim disappear;
+        // clear kill inference so the next OOC tick cannot mint a false KILL.
+        m_lastVictimEntry = 0;
+        m_lastVictimGuidLow = 0;
+        m_recoveryResetHoldMs = AIBOT_COMBAT_RESET_HOLD_MS;
+    }
+    else
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: latch already clear, idempotent ACK");
+    }
+
+    if (me->IsInCombat() || !me->GetTargetGuid().IsEmpty() || me->IsMoving())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: postcondition failed, no ACK");
+        fail("postcondition");
+        return;
+    }
+
+    m_recoveryResetHoldMs = AIBOT_COMBAT_RESET_HOLD_MS;
+    char ack[192];
+    snprintf(ack, sizeof(ack),
+        "result=cleared|map=%u|x=%.1f|y=%.1f|still_seconds=%d|wedge_streak=%d",
+        me->GetMapId(),
+        me->GetPositionX(), me->GetPositionY(), stillSeconds, wedgeStreak);
+    CB_HIT(me->GetGUIDLow(), "cpp-combat-reset: correlated ACK + fresh STATE queued");
+    BridgeSendEvent("COMBAT_RESET_ACK", ack);
+    BridgeSendState();
 }
 
 // ============================================================
@@ -2230,110 +2388,56 @@ void AiBotAI::BridgeHandleTrain(const char* json)
     BridgeSendEvent("TRAIN_ACK", buf);
 }
 
-// ============================================================
-// SESSION 29: QUERY_QUEST_STATUS bridge command
-//
-// C# sends QUERY_QUEST_STATUS when entering Questing domain.
-// C++ responds with QUEST_STATUS_ALL event containing every
-// active quest in the player's log with status + progress.
-//
-// This is the authoritative source — straight from the C++
-// QuestStatusMap in memory. No DB timing gaps.
-//
-// PLACEMENT: Add this method after BridgeHandleTrain in AiBotAI.cpp
-// DISPATCH:  Add to BridgeProcessLine (see bottom of this file)
-// ============================================================
-
-void AiBotAI::BridgeHandleQueryQuestStatus(const char* json)
-{
-    // Iterate the player's quest status map — same map used by
-    // BridgeHandleSellItems for quest item protection.
-    const auto& questMap = me->GetQuestStatusMap();
-
-    // Build a compact pipe-delimited payload:
-    //   questId:status:mob1,mob2,mob3,mob4:item1,item2,item3,item4|questId:...
-    //
-    // status: 1=INCOMPLETE, 3=COMPLETE (VMaNGOS QUEST_STATUS enum)
-    // Only include non-rewarded quests (active log entries).
-
-    std::string payload;
-    int count = 0;
-
-    for (const auto& pair : questMap)
-    {
-        uint32 questId = pair.first;
-        const auto& qData = pair.second;
-
-        // Skip rewarded (turned-in) quests — we only want active log entries
-        if (qData.m_rewarded)
-            continue; // cb:fold quest blob detail, carried by QUEST_STATUS_ALL payload
-
-        // Skip QUEST_STATUS_NONE (0) and QUEST_STATUS_UNAVAILABLE (2)
-        if (qData.m_status != QUEST_STATUS_INCOMPLETE &&
-            qData.m_status != QUEST_STATUS_COMPLETE)
-            continue; // cb:fold quest blob detail
-
-        if (!payload.empty())
-            payload += "|"; // cb:fold quest blob detail
-
-        char entry[128];
-        snprintf(entry, sizeof(entry), "%u:%u:%u,%u,%u,%u:%u,%u,%u,%u",
-            questId,
-            (uint32)qData.m_status,
-            qData.m_creatureOrGOcount[0], qData.m_creatureOrGOcount[1],
-            qData.m_creatureOrGOcount[2], qData.m_creatureOrGOcount[3],
-            qData.m_itemcount[0], qData.m_itemcount[1],
-            qData.m_itemcount[2], qData.m_itemcount[3]);
-
-        payload += entry;
-        count++;
-    }
-
-    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-        "[AIBOT-BRIDGE] %s: QUERY_QUEST_STATUS — %d active quests in log",
-        me->GetName(), count);
-
-    BridgeSendEvent("QUEST_STATUS_ALL", payload.c_str());
-}
-
-
 void AiBotAI::BridgeHandleAttackTarget(const char* json)
 {
     int guidLow = 0;
+    int entry = 0;
     const char* payload = strstr(json, "\"payload\"");
     if (!payload) payload = json; // cb:fold payload fallback detail
-    JsonExtractInt(payload, "guid", guidLow);
+    bool const haveGuid = JsonExtractInt(payload, "guid", guidLow);
+    bool const haveEntry = JsonExtractInt(payload, "entry", entry);
 
-    if (guidLow <= 0)
+    if (!haveGuid || !haveEntry || guidLow <= 0 || entry <= 0)
     {
-        CB_HIT(me->GetGUIDLow(), "cpp-bridge: ATTACK_TARGET missing guid");
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET missing guid", me->GetName());
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: ATTACK_TARGET bad creature identity, terminal fail");
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: ATTACK_TARGET bad payload (entry=%d guid=%d)",
+            me->GetName(), entry, guidLow);
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData),
+            "reason=bad_payload|entry=%d|guid=%d", entry, guidLow);
+        BridgeSendEvent("ATTACK_TARGET_FAIL", eventData);
         return;
     }
 
-    // A creature ObjectGuid here is (HIGHGUID_UNIT, entry, counter) and Map::GetCreature
-    // matches on the whole thing — the two-argument form below leaves entry 0, so it never
-    // resolved anything and the "fallback" the old comment promised was never written. Every
-    // caller that gets this right (the kill/victim paths in AiBotAIMain) passes the entry, so
-    // senders now do too; the entry-less attempt is kept for any producer still omitting it.
-    int entry = 0;
-    JsonExtractInt(payload, "entry", entry);
-
-    Creature* pCreature = entry > 0
-        ? me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(entry), uint32(guidLow)))
-        : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
+    // Creature identity is (HIGHGUID_UNIT, entry, counter). Map::GetCreature compares the complete
+    // ObjectGuid, so accepting only guidLow creates an identity that cannot resolve reliably.
+    Creature* pCreature = me->GetMap()->GetCreature(
+        ObjectGuid(HIGHGUID_UNIT, uint32(entry), uint32(guidLow)));
 
     if (!pCreature)
     {
-        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not found on map", guidLow);
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature guid %d (entry %d) not found on map", me->GetName(), guidLow, entry);
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not found, terminal fail", guidLow);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: ATTACK_TARGET creature entry %d guid %d not found on map",
+            me->GetName(), entry, guidLow);
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData),
+            "reason=not_found|entry=%d|guid=%d", entry, guidLow);
+        BridgeSendEvent("ATTACK_TARGET_FAIL", eventData);
         return;
     }
 
     if (!IsValidHostileTarget(pCreature))
     {
-        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not valid hostile", guidLow);
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: ATTACK_TARGET guid %d not valid hostile target", me->GetName(), guidLow);
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: attack target not hostile, terminal fail", guidLow);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: ATTACK_TARGET entry %d guid %d is not a valid hostile target",
+            me->GetName(), entry, guidLow);
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData),
+            "reason=not_hostile|entry=%d|guid=%d", entry, guidLow);
+        BridgeSendEvent("ATTACK_TARGET_FAIL", eventData);
         return;
     }
 
@@ -2354,24 +2458,40 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
 void AiBotAI::BridgeHandleInteractNpc(const char* json)
 {
     int guidLow = 0;
+    int entry = 0;
     const char* payload = strstr(json, "\"payload\"");
     if (!payload) payload = json; // cb:fold payload fallback detail
-    JsonExtractInt(payload, "guid", guidLow);
+    bool const haveGuid = JsonExtractInt(payload, "guid", guidLow);
+    bool const haveEntry = JsonExtractInt(payload, "entry", entry);
 
-    if (guidLow <= 0)
+    if (!haveGuid || !haveEntry || guidLow <= 0 || entry <= 0)
     {
-        CB_HIT(me->GetGUIDLow(), "cpp-bridge: INTERACT_NPC missing guid");
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC missing guid", me->GetName());
+        CB_HIT(me->GetGUIDLow(), "cpp-bridge: INTERACT_NPC bad creature identity, terminal fail");
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: INTERACT_NPC bad payload (entry=%d guid=%d)",
+            me->GetName(), entry, guidLow);
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData),
+            "reason=bad_payload|entry=%d|guid=%d", entry, guidLow);
+        BridgeSendEvent("NPC_INTERACT_FAIL", eventData);
         return;
     }
 
+    // INTERACT_NPC uses the same complete creature identity as ATTACK_TARGET. Never guess an
+    // entry-less unit ObjectGuid from a low counter; it can select nothing and used to fail silently.
     Creature* pCreature = me->GetMap()->GetCreature(
-        ObjectGuid(HIGHGUID_UNIT, uint32(guidLow)));
+        ObjectGuid(HIGHGUID_UNIT, uint32(entry), uint32(guidLow)));
 
     if (!pCreature)
     {
-        CB_HITV(me->GetGUIDLow(), "cpp-bridge: interact npc not found", guidLow);
-        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: INTERACT_NPC creature guid %d not found", me->GetName(), guidLow);
+        CB_HITV(me->GetGUIDLow(), "cpp-bridge: interact npc not found, terminal fail", guidLow);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-BRIDGE] %s: INTERACT_NPC creature entry %d guid %d not found",
+            me->GetName(), entry, guidLow);
+        char eventData[128];
+        snprintf(eventData, sizeof(eventData),
+            "reason=not_found|entry=%d|guid=%d", entry, guidLow);
+        BridgeSendEvent("NPC_INTERACT_FAIL", eventData);
         return;
     }
 
@@ -3544,9 +3664,26 @@ void AiBotAI::BridgeHandleQuestCast(const char* json)
  
 void AiBotAI::BridgeHandleFormGroup(const char* json)
 {
+    if (m_bridgeDispatchCbt == 0)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: FORM_GROUP missing command cbt");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=missing_cbt");
+        return;
+    }
+
     const char* payload = strstr(json, "\"payload\"");
     if (!payload) payload = json; // cb:fold payload fallback detail
- 
+
+    int leaderGuid = 0;
+    if (!JsonExtractInt(payload, "leader_guid", leaderGuid)
+        || leaderGuid <= 0
+        || uint32(leaderGuid) != me->GetGUIDLow())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: FORM_GROUP leader identity mismatch");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=leader_mismatch");
+        return;
+    }
+
     // Parse member_guids array: "member_guids":[5,8,12]
     const char* arrStart = strstr(payload, "\"member_guids\"");
     if (!arrStart)
@@ -3554,15 +3691,15 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         CB_HIT(me->GetGUIDLow(), "cpp-group: missing member_guids, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: FORM_GROUP missing member_guids", me->GetName());
-        BridgeSendEvent("FORM_GROUP_FAIL", "missing member_guids");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=missing_member_guids");
         return;
     }
- 
+
     arrStart = strchr(arrStart, '[');
     if (!arrStart)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-group: malformed member_guids open, FORM_GROUP_FAIL");
-        BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=missing_array_open");
         return;
     }
     arrStart++; // skip '['
@@ -3571,10 +3708,10 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
     if (!arrEnd)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-group: malformed member_guids close, FORM_GROUP_FAIL");
-        BridgeSendEvent("FORM_GROUP_FAIL", "malformed member_guids");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=missing_array_close");
         return;
     }
- 
+
     // Extract GUIDs from comma-separated list
     std::vector<uint32> memberGuids;
     const char* p = arrStart;
@@ -3583,20 +3720,59 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         while (p < arrEnd && (*p == ' ' || *p == ',')) p++;
         if (p >= arrEnd) break; // cb:fold guid list parse detail
         uint32 guid = (uint32)atoi(p);
-        if (guid > 0)
-            memberGuids.push_back(guid); // cb:fold guid list parse detail
+        if (guid == 0)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-group: malformed member guid, FORM_GROUP_FAIL");
+            BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=invalid_member_guid");
+            return;
+        }
+        memberGuids.push_back(guid);
         while (p < arrEnd && *p != ',') p++;
     }
- 
-    if (memberGuids.empty())
+
+    if (memberGuids.empty() || memberGuids.size() > 4)
     {
-        CB_HIT(me->GetGUIDLow(), "cpp-group: no valid member guids, FORM_GROUP_FAIL");
+        CB_HITV(me->GetGUIDLow(), "cpp-group: invalid requested group size, FORM_GROUP_FAIL", memberGuids.size() + 1);
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-            "[AIBOT-GROUP] %s: FORM_GROUP no valid member GUIDs", me->GetName());
-        BridgeSendEvent("FORM_GROUP_FAIL", "no valid guids");
+            "[AIBOT-GROUP] %s: FORM_GROUP invalid size %u",
+            me->GetName(), uint32(memberGuids.size() + 1));
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=invalid_group_size");
         return;
     }
- 
+
+    for (size_t i = 0; i < memberGuids.size(); ++i)
+    {
+        if (memberGuids[i] == me->GetGUIDLow())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-group: leader repeated as follower, FORM_GROUP_FAIL");
+            BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=leader_in_members");
+            return;
+        }
+        for (size_t j = 0; j < i; ++j)
+        {
+            if (memberGuids[j] == memberGuids[i])
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-group: duplicate requested member, FORM_GROUP_FAIL", memberGuids[i]);
+                BridgeSendEvent("FORM_GROUP_FAIL", "reason=bad_payload|detail=duplicate_member");
+                return;
+            }
+        }
+    }
+
+    std::vector<uint32> requestedGuids;
+    requestedGuids.push_back(me->GetGUIDLow());
+    requestedGuids.insert(requestedGuids.end(), memberGuids.begin(), memberGuids.end());
+    std::string memberList;
+    char guidText[16];
+    for (size_t i = 0; i < requestedGuids.size(); ++i)
+    {
+        snprintf(guidText, sizeof(guidText), i == 0 ? "%u" : ",%u", requestedGuids[i]);
+        memberList += guidText; // cb:fold exact ACK payload construction
+    }
+    char successData[192];
+    snprintf(successData, sizeof(successData), "leader_guid=%u|member_guids=%s",
+        me->GetGUIDLow(), memberList.c_str());
+
     // [PLAYERPARTY] Never let the god-bot yank this bot out of a REAL player's party
     // (2026-07-07). A stale C# coordinator decision must not disband a human's escort
     // mid-quest — the human outranks the coordinator, always. C# also stands down off the
@@ -3607,19 +3783,94 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: FORM_GROUP refused — this bot is in a REAL player's party",
             me->GetName());
-        BridgeSendEvent("FORM_GROUP_FAIL", "in_player_party");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=in_player_party");
         return;
     }
 
-    // If already in a group, leave it first
-    if (Group* oldGroup = me->GetGroup()) // cb:fold decl-if condition artifact, body probed
+    // An exact replay is the reconciliation path for an ACK lost after the core committed.
+    // It is idempotently successful; a different existing topology remains fail-closed.
+    if (Group* existingGroup = me->GetGroup()) // cb:fold decl-if condition artifact, body probed
     {
-        CB_HIT(me->GetGUIDLow(), "cpp-group: leaving previous group first");
+        std::vector<uint32> liveGuids;
+        bool liveMembersAreBots = true;
+        for (const auto& memberSlot : existingGroup->GetMemberSlots())
+        {
+            liveGuids.push_back(memberSlot.guid.GetCounter()); // cb:fold persistent exact-set enumeration
+            Player* liveMember = sObjectMgr.GetPlayer(memberSlot.guid);
+            if (!liveMember || !liveMember->GetSession() || !liveMember->GetSession()->GetBot())
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-group: existing topology has offline/non-bot member, replay refused",
+                    memberSlot.guid.GetCounter());
+                liveMembersAreBots = false;
+            }
+        }
+
+        bool topologyMatches = liveMembersAreBots
+            && existingGroup->GetLeaderGuid() == me->GetObjectGuid()
+            && liveGuids.size() == requestedGuids.size();
+        for (uint32 requestedGuid : requestedGuids)
+        {
+            bool found = false;
+            for (uint32 liveGuid : liveGuids)
+                if (liveGuid == requestedGuid)
+                { // cb:fold bounded set comparison
+                    found = true;
+                    break;
+                }
+            if (!found)
+                topologyMatches = false; // cb:fold exact-set accumulation, final decision probed below
+        }
+
+        if (topologyMatches)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: exact FORM_GROUP replay acknowledged", requestedGuids.size());
+            BridgeSendEvent("FORM_GROUP_ACK", successData);
+            return;
+        }
+
+        CB_HIT(me->GetGUIDLow(), "cpp-group: different existing topology, FORM_GROUP_FAIL");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-            "[AIBOT-GROUP] %s: already in a group, leaving first", me->GetName());
-        oldGroup->RemoveMember(me->GetObjectGuid(), 0);
+            "[AIBOT-GROUP] %s: FORM_GROUP refused — leader already has a different group", me->GetName());
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=leader_already_grouped");
+        return;
     }
- 
+
+    // Preflight every requested follower before creating or mutating a Group. That makes every
+    // validation failure side-effect free and prevents the old partial-success ACK.
+    std::vector<Player*> members;
+    for (uint32 memberGuid : memberGuids)
+    {
+        Player* pMember = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, memberGuid));
+        if (!pMember)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: requested member not online, FORM_GROUP_FAIL", memberGuid);
+            char eventData[96];
+            snprintf(eventData, sizeof(eventData),
+                "reason=member_not_found|member_guid=%u", memberGuid);
+            BridgeSendEvent("FORM_GROUP_FAIL", eventData);
+            return;
+        }
+        if (!pMember->GetSession() || !pMember->GetSession()->GetBot())
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: requested member is not a bot, FORM_GROUP_FAIL", memberGuid);
+            char eventData[96];
+            snprintf(eventData, sizeof(eventData),
+                "reason=member_not_bot|member_guid=%u", memberGuid);
+            BridgeSendEvent("FORM_GROUP_FAIL", eventData);
+            return;
+        }
+        if (pMember->GetGroup())
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: requested member already grouped, FORM_GROUP_FAIL", memberGuid);
+            char eventData[96];
+            snprintf(eventData, sizeof(eventData),
+                "reason=member_already_grouped|member_guid=%u", memberGuid);
+            BridgeSendEvent("FORM_GROUP_FAIL", eventData);
+            return;
+        }
+        members.push_back(pMember);
+    }
+
     // Create a new Group with this bot as leader
     Group* group = new Group;
     if (!group->Create(me->GetObjectGuid(), me->GetName()))
@@ -3628,89 +3879,52 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
             "[AIBOT-GROUP] %s: Group::Create failed", me->GetName());
         delete group;
-        BridgeSendEvent("FORM_GROUP_FAIL", "create_failed");
+        BridgeSendEvent("FORM_GROUP_FAIL", "reason=create_failed");
         return;
     }
- 
+
+    // Group::Create initializes membership but does not publish the object to the core's
+    // authoritative group registry. Mirror the canonical VMaNGOS lifecycle before adding
+    // followers; every rollback below unregisters and deletes this same owned object.
+    sObjectMgr.AddGroup(group);
+
     // NEED_BEFORE_GREED: only eligible players see the roll window.
     // StartLootRoll checks CanUseItem — priests won't roll on plate, etc.
     group->SetLootMethod(NEED_BEFORE_GREED);
- 
-    uint32 added = 0;
-    for (uint32 memberGuid : memberGuids)
-    {
-        Player* pMember = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, memberGuid));
-        if (!pMember)
-        {
-            CB_HITV(me->GetGUIDLow(), "cpp-group: member not found online, skipped", memberGuid);
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT-GROUP] %s: FORM_GROUP member GUID %u not found online",
-                me->GetName(), memberGuid);
-            continue;
-        }
- 
-        // [PLAYERPARTY] Skip a member currently escorting a REAL player — pulling him out
-        // of the human's party to form a bot group is exactly the yank the leader guard
-        // above refuses for ourselves (2026-07-07).
-        bool memberInPlayerParty = false;
-        if (Group* memberOldGroup = pMember->GetGroup()) // cb:fold decl-if condition artifact
-        {   // cb:fold member party scan, decision probed below
-            for (GroupReference* mItr = memberOldGroup->GetFirstMember(); mItr != nullptr; mItr = mItr->next())
-                if (Player* pOther = mItr->getSource()) // cb:fold decl-if condition artifact
-                    if (pOther->GetSession() && !pOther->GetSession()->GetBot()) // cb:fold member party scan
-                    {   // cb:fold member party scan
-                        memberInPlayerParty = true;
-                        break;
-                    }
-        }
-        if (memberInPlayerParty)
-        {
-            CB_HITV(me->GetGUIDLow(), "cpp-group: member escorting real player, skipped", memberGuid);
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT-GROUP] %s: FORM_GROUP skipping %s (GUID %u) — escorting a REAL player",
-                me->GetName(), pMember->GetName(), memberGuid);
-            continue;
-        }
 
-        // If member is already in a group, remove them first
-        if (Group* memberOldGroup = pMember->GetGroup()) // cb:fold decl-if condition artifact
-        {
-            CB_HITV(me->GetGUIDLow(), "cpp-group: member pulled from old bot group", memberGuid);
-            memberOldGroup->RemoveMember(pMember->GetObjectGuid(), 0);
-        }
- 
+    // All preflighted players were ungrouped. If the core nevertheless rejects one AddMember,
+    // disband the newly-created group immediately; no pre-existing topology was destroyed.
+    for (size_t i = 0; i < members.size(); ++i)
+    {
+        Player* pMember = members[i];
+        uint32 const memberGuid = memberGuids[i];
         if (!group->AddMember(pMember->GetObjectGuid(), pMember->GetName()))
         {
-            CB_HITV(me->GetGUIDLow(), "cpp-group: AddMember failed, skipped", memberGuid);
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            CB_HITV(me->GetGUIDLow(), "cpp-group: AddMember failed, rolling back group", memberGuid);
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
                 "[AIBOT-GROUP] %s: FORM_GROUP AddMember failed for %s (GUID %u)",
                 me->GetName(), pMember->GetName(), memberGuid);
-            continue;
+            group->Disband();
+            sObjectMgr.RemoveGroup(group);
+            delete group;
+            char eventData[96];
+            snprintf(eventData, sizeof(eventData),
+                "reason=add_member_failed|member_guid=%u", memberGuid);
+            BridgeSendEvent("FORM_GROUP_FAIL", eventData);
+            return;
         }
- 
-        added++;
+
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: added %s (GUID %u) to group",
             me->GetName(), pMember->GetName(), memberGuid);
     }
- 
-    if (added == 0)
-    {
-        CB_HIT(me->GetGUIDLow(), "cpp-group: no members added, disbanding, FORM_GROUP_FAIL");
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-            "[AIBOT-GROUP] %s: FORM_GROUP no members added, disbanding", me->GetName());
-        group->Disband();
-        BridgeSendEvent("FORM_GROUP_FAIL", "no_members_added");
-        return;
-    }
- 
-    char eventData[128];
-    snprintf(eventData, sizeof(eventData), "members=%u|leader=%u", added + 1, me->GetGUIDLow());
-    BridgeSendEvent("FORM_GROUP_ACK", eventData);
- 
+
+    CB_HITV(me->GetGUIDLow(), "cpp-group: exact requested group formed", memberGuids.size() + 1);
+    BridgeSendEvent("FORM_GROUP_ACK", successData);
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-GROUP] %s: group formed — %u members, loot=NEED_BEFORE_GREED",
-        me->GetName(), added + 1);
+        me->GetName(), uint32(memberGuids.size() + 1));
 }
 
 // ============================================================
@@ -3721,13 +3935,100 @@ void AiBotAI::BridgeHandleFormGroup(const char* json)
  
 void AiBotAI::BridgeHandleDisbandGroup(const char* json)
 {
+    if (m_bridgeDispatchCbt == 0)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP missing command cbt");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=missing_cbt");
+        return;
+    }
+
+    const char* payload = strstr(json, "\"payload\"");
+    if (!payload) payload = json; // cb:fold payload fallback detail
+
+    int leaderGuid = 0;
+    bool const haveLeader = JsonExtractInt(payload, "leader_guid", leaderGuid);
+    const char* arrStart = strstr(payload, "\"member_guids\"");
+    if (!haveLeader || leaderGuid <= 0 || !arrStart)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP missing expected topology");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=missing_expected_topology");
+        return;
+    }
+
+    arrStart = strchr(arrStart, '[');
+    const char* arrEnd = arrStart ? strchr(arrStart + 1, ']') : nullptr;
+    if (!arrStart || !arrEnd)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP malformed expected member array");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=malformed_member_guids");
+        return;
+    }
+    ++arrStart;
+
+    std::vector<uint32> expectedGuids;
+    const char* p = arrStart;
+    while (p < arrEnd)
+    {
+        while (p < arrEnd && (*p == ' ' || *p == ',')) p++;
+        if (p >= arrEnd) break; // cb:fold expected guid list parse detail
+        uint32 guid = (uint32)atoi(p);
+        if (guid == 0)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP invalid expected member guid");
+            BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=invalid_member_guid");
+            return;
+        }
+        expectedGuids.push_back(guid);
+        while (p < arrEnd && *p != ',') p++;
+    }
+
+    if (uint32(leaderGuid) != me->GetGUIDLow() || expectedGuids.size() < 2 || expectedGuids.size() > 5)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP invalid expected leader or size");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=invalid_expected_topology");
+        return;
+    }
+
+    bool expectedHasLeader = false;
+    for (size_t i = 0; i < expectedGuids.size(); ++i)
+    {
+        if (expectedGuids[i] == me->GetGUIDLow())
+            expectedHasLeader = true; // cb:fold bounded expected-set validation
+        for (size_t j = 0; j < i; ++j)
+        {
+            if (expectedGuids[j] == expectedGuids[i])
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP duplicate expected member", expectedGuids[i]);
+                BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=duplicate_member");
+                return;
+            }
+        }
+    }
+    if (!expectedHasLeader)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP expected set omits leader");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=bad_payload|detail=leader_not_in_members");
+        return;
+    }
+
+    std::string expectedList;
+    char guidText[16];
+    for (size_t i = 0; i < expectedGuids.size(); ++i)
+    {
+        snprintf(guidText, sizeof(guidText), i == 0 ? "%u" : ",%u", expectedGuids[i]);
+        expectedList += guidText; // cb:fold exact ACK payload construction
+    }
+    char successData[224];
+    snprintf(successData, sizeof(successData),
+        "leader_guid=%u|member_guids=%s", me->GetGUIDLow(), expectedList.c_str());
+
     Group* group = me->GetGroup();
     if (!group)
     {
-        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP but not grouped");
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP topology already absent");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: DISBAND_GROUP but not in a group", me->GetName());
-        BridgeSendEvent("GROUP_DISBANDED", "was_not_grouped");
+        BridgeSendEvent("GROUP_DISBANDED", successData);
         return;
     }
 
@@ -3739,15 +4040,55 @@ void AiBotAI::BridgeHandleDisbandGroup(const char* json)
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-GROUP] %s: DISBAND_GROUP refused — this is a REAL player's party",
             me->GetName());
-        BridgeSendEvent("GROUP_DISBAND_FAIL", "in_player_party");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=in_player_party");
         return;
     }
- 
+
+    std::vector<uint32> liveGuids;
+    bool liveMembersAreBots = true;
+    for (const auto& memberSlot : group->GetMemberSlots())
+    {
+        liveGuids.push_back(memberSlot.guid.GetCounter()); // cb:fold persistent exact-set enumeration
+        Player* liveMember = sObjectMgr.GetPlayer(memberSlot.guid);
+        if (!liveMember || !liveMember->GetSession() || !liveMember->GetSession()->GetBot())
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP offline/non-bot member, refusing",
+                memberSlot.guid.GetCounter());
+            liveMembersAreBots = false;
+        }
+    }
+
+    bool topologyMatches = liveMembersAreBots && liveGuids.size() == expectedGuids.size();
+    for (uint32 expectedGuid : expectedGuids)
+    {
+        bool found = false;
+        for (uint32 liveGuid : liveGuids)
+            if (liveGuid == expectedGuid)
+            { // cb:fold bounded set comparison
+                found = true;
+                break;
+            }
+        if (!found)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP expected member absent", expectedGuid);
+            topologyMatches = false;
+        }
+    }
+    if (!topologyMatches)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-group: DISBAND_GROUP live topology mismatch, refusing");
+        BridgeSendEvent("GROUP_DISBAND_FAIL", "reason=topology_mismatch");
+        return;
+    }
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
         "[AIBOT-GROUP] %s: disbanding group", me->GetName());
- 
+
     group->Disband();
-    BridgeSendEvent("GROUP_DISBANDED", "");
+    sObjectMgr.RemoveGroup(group);
+    delete group;
+    CB_HITV(me->GetGUIDLow(), "cpp-group: exact expected group disbanded", expectedGuids.size());
+    BridgeSendEvent("GROUP_DISBANDED", successData);
 }
 
 void AiBotAI::BridgeHandleResurrect(const char* json)

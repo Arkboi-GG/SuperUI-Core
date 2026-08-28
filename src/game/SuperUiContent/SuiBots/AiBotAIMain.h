@@ -82,7 +82,7 @@
 #define BRIDGE_RECONNECT_MAX  30000      // ms max reconnect delay
 #define BRIDGE_RECV_BUF_SIZE  4096       // inbound buffer
 #define BRIDGE_SEND_BUF_MAX   65536      // outbound queue cap (bytes) — drop oldest past this
-#define BRIDGE_PROTOCOL_VERSION 4        // v4: terminal EVENTs echo top-level cbt for exact WAIT ownership
+#define BRIDGE_PROTOCOL_VERSION 6        // v6: restart-safe circuit epochs + bounded combat-latch reset
 
 // Movement point IDs
 #define AIBOT_POINT_WANDER          100
@@ -94,6 +94,8 @@
 #define AIBOT_POINT_PULL_RETREAT    106  // proactive pull: drag a freshly-tagged mob back to open ground
 #define AIBOT_POINT_INTERACT_NPC    107  // bridge-owned NPC approach; never aliases a task arrival
 #define AIBOT_MOVE_POINT_REFUSED_INTERVAL 10000 // ms; autonomous NOPATH telemetry is rate-limited per bot
+#define AIBOT_COMBAT_RESET_HOLD_MS 5000  // ms; keep task autonomy parked while ACK + fresh OOC STATE ship
+#define AIBOT_COMBAT_RESET_MIN_STILL_SEC 120 // must match the C# fresh-STATE physical-still proof window
 #define AIBOT_ARRIVE_JITTER_MIN 0.2f     // never path to the EXACT dest coord (it can land on a bad poly / seam edge → off-mesh).
 #define AIBOT_ARRIVE_JITTER_MAX 2.0f     //   instead resolve to a validated point this far out, random angle — fans bots out + dodges the bad poly.
 #define AIBOT_ARRIVE_JITTER_TRIES 16     // ring samples to try before giving up and using the exact coord (lets a real no_path surface).
@@ -704,6 +706,11 @@ public:
     // --- Phase 1 idle wander ---
     void DoRandomWander();
 
+    // [SUI] Party spacing (owner 2026-08-28): an idle party bot standing inside
+    // a fellow group member deliberately sidesteps to open ground. Returns true
+    // when it issued the sidestep and owns the tick.
+    bool DoPartyUnstack();
+
     // --- Auto-loot after kill ---
     void DoAutoLoot(ObjectGuid creatureGuid);
     void TryAutoEquipBags();
@@ -713,6 +720,7 @@ public:
     // --- TASK_GRIND: area grind behavior ---
     void BridgeHandleSetTask(const char* json);
     void BridgeHandleCombatDirective(const char* json);   // [TEAMPLAY] group focus-fire stamp
+    void BridgeHandleResetCombatStuck(const char* json);  // protocol-v6 bounded combat-latch teardown
     void DoGrindPatrol();
    Unit* SelectGrindTarget(Unit* pExcept = nullptr) const;
 
@@ -794,7 +802,6 @@ public:
     void BridgeHandleSellItems(const char* json);
     void BridgeHandleResurrect(const char* json);
     void BridgeHandleTrain(const char* json);
-    void BridgeHandleQueryQuestStatus(const char* json);
     void BridgeHandleUseGameObject(const char* json);
     void BridgeHandleQuestCast(const char* json);   // [CLASS-QUEST] cast a quest spell on a target creature
     void BridgeHandleFormGroup(const char* json);
@@ -878,6 +885,7 @@ public:
     // PlayerBotMgr) absorbing the base class's requestRemoval writes.
     std::unique_ptr<PlayerBotEntry> m_ownedDummyEntry;
     uint32 m_wanderTimer = 0;
+    uint32 m_unstackTimer = 0;         // [SUI] party-spacing sidestep throttle
     uint32 m_suiFollowDiagTimer = 0;   // [SUI-DIAG] throttle for the party-follow decision log
     uint32 m_lastKnownLevel = 0;
     uint32 m_trackedQuestId = 0;
@@ -947,6 +955,11 @@ public:
     uint32 m_lastVictimHealth  = 0;   // victim hp last tick (detect damage dealt)
     ObjectGuid m_stalemateVictim;     // anchored stalemate target guid
     std::map<uint32, uint32> m_combatIgnore;  // victim guidLow -> ms remaining ignored
+
+    // Protocol-v6 combat-still handshake. The reset preserves the planner task,
+    // but parks autonomous reacquisition long enough for its correlated ACK and
+    // a post-reset STATE to reach C# before the task can pull again.
+    uint32 m_recoveryResetHoldMs = 0;
 
     // --- Overpull retreat state ---
     uint32 m_overpullFleeHoldMs = 0;   // mid-retreat hold (suppress re-chase while the hop runs)

@@ -145,6 +145,12 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
     }
 
     pActor->CastItemUseSpell(pItem, const_cast<SpellCastTargets&>(packet.targets));
+
+    // A possessed bot has no session to stream its own inventory, so re-push the commander a fresh
+    // snapshot after the use consumes/decrements the item -- else the panel shows it un-consumed
+    // (matches the swap/split/equip handlers). Instant consumables decrement synchronously here.
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleOpenItemOpcode(WorldPackets::Spell::OpenItem const& packet)

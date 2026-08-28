@@ -878,5 +878,12 @@ enum OpcodesList
     // the ambiguity the P5 note above exists to avoid.
     CMSG_SUI_PARTY_LEAD                    = 862,      // 0x035E
     SMSG_SUI_PARTY_LEAD_RESULT             = 863,      // 0x035F
-    NUM_MSG_TYPES                          = 864
+    // PLAN_20 Model B (commander-view questing): for one questgiver, the quests it
+    // offers/ends and, per party member, an eligibility verdict + reason — so the
+    // free-view quest window can draw a per-member card without anyone possessing
+    // or the main standing at the NPC. The client is never told a giver's quests
+    // otherwise, which is why this is a wire and not a client derivation.
+    CMSG_SUI_GIVER_QUESTS                  = 864,      // 0x0360
+    SMSG_SUI_GIVER_QUESTS                  = 865,      // 0x0361
+    NUM_MSG_TYPES                          = 866
 };

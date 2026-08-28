@@ -950,6 +950,7 @@ Handlers BuildOpcodeList()
     DEFINE_HANDLER(CMSG_SUI_PARTY_QUEST,              STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiPartyQuestOpcode);
     DEFINE_HANDLER(CMSG_SUI_GIVER_STATUS,             STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiGiverStatusOpcode);
     DEFINE_HANDLER(CMSG_SUI_PARTY_LEAD,               STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiPartyLeadOpcode);
+    DEFINE_HANDLER(CMSG_SUI_GIVER_QUESTS,             STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiGiverQuestsOpcode);
     INVALID_PACKET(SMSG_SUI_CONTROL_ROSTER,           UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_CONTROL_ACK,              UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_PROXY,                    UnhandleReason::SendByServer);
@@ -964,6 +965,7 @@ Handlers BuildOpcodeList()
     INVALID_PACKET(SMSG_SUI_PARTY_QUEST_RESULT,       UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_GIVER_STATUS,             UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_PARTY_LEAD_RESULT,        UnhandleReason::SendByServer);
+    INVALID_PACKET(SMSG_SUI_GIVER_QUESTS,             UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_PREPARE,            STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalPrepareOpcode);
     INVALID_PACKET(SMSG_SUI_PORTAL_DESCRIPTOR,         UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_READY,              STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalReadyOpcode);
