@@ -365,3 +365,38 @@ UPDATE `spell_template` SET `effect2` = 0, `effectImplicitTargetA2` = 0
 -- client.
 UPDATE `spell_template` SET `effectRadiusIndex1` = 26
     WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
+
+-- Divine Strike: plays NO cast/attack animation at all, 2026-08-28 -- the
+-- mechanics (AOE damage, targeting, radius) all work correctly by this
+-- point in the night, but the client shows nothing visually on cast.
+--
+-- Not a spellVisual1=0 problem (the documented "patch pipeline skips
+-- spellVisual1==0" gotcha didn't apply -- Divine Strike's spellVisual1 was
+-- already non-zero, 55, inherited from the zzOLD source). The actual
+-- problem: `spellVisual1=55` (zzOLD Divine Strike's real vanilla visual)
+-- only has an IMPACT-stage kit -- no CAST-stage kit at all. Confirmed by
+-- parsing the live SpellVisual.dbc/SpellVisualKit.dbc directly: visual 55's
+-- row has exactly one non-zero kit reference (the impact slot), same shape
+-- as Whirlwind's own visual (227) -- both are old Blizzard entries that
+-- rely on a separate windup "state" effect for their cast-stage look rather
+-- than a normal SpellVisualKit cast entry, which explains the
+-- "Spells\Whirlwind_State_Base.m2 NOT FOUND" warning that's been in every
+-- rebuild log all night for Divine Strike specifically (that model was
+-- never extracted onto this server) -- with no cast-stage kit AND that
+-- separate state model missing, there was nothing left to render at cast
+-- time at all, only (maybe) on impact.
+--
+-- Compared against Holy Strike's real vanilla source (679/678/etc,
+-- spellVisual1=39, confirmed working with a proper swing animation
+-- already) -- 39 has BOTH a cast-stage and an impact-stage kit populated.
+-- Fixed by pointing Divine Strike's spellVisual1 at 39 too (same visual
+-- Holy Strike already uses successfully) instead of hunting for a
+-- Whirlwind-specific asset that isn't available on this server. Verified
+-- after rebuild: Divine Strike's cloned visual chain now shows "Kits:2"
+-- (was "Kits:1"), the client-side clone correctly picks up both cast and
+-- impact stages, and 'Spells\Strike_Impact_Chest.m2' -- the same file Holy
+-- Strike already uses -- is found and embedded with zero missing-file
+-- warnings, for all 5 ranks. Applied to the zzOLD staging source and all 5
+-- real ranks for consistency.
+UPDATE `spell_template` SET `spellVisual1` = 39
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
