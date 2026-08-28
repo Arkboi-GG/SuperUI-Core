@@ -275,3 +275,47 @@ UPDATE `custom_spell_meta` SET `description` = 'An instant strike that hits all 
 -- players -- custom_spell_meta is only a staging table (see [[Spell Pages]]).
 -- After running this file, call `POST http://localhost:5000/Patch/RebuildClientPatch`
 -- against the running MangosSuperUI instance to actually rebuild patch-3.MPQ.
+
+-- Divine Strike 'Invalid target' -- REAL root cause found 2026-08-28, after the
+-- effectImplicitTargetB1=15 fix above (commit 903f99936) still didn't resolve it
+-- live. Traced via temporary diagnostic logging (commit 1324a3cb3) at the strict
+-- CheckCast() call in Spell::prepare(): every real cast attempt returned
+-- SpellCastResult 10 = SPELL_FAILED_BAD_TARGETS ("Invalid target"), with a real
+-- unit target present (hasUnitTarget=1) and no destination location (hasDest=0).
+--
+-- Root cause: Spell::ValidateExplicitTargetMask() -- an anti-cheat check that only
+-- runs for client-initiated "strict" casts (m_isClientStarted), exactly why
+-- Whirlwind's own inner sub-spell (15578) never hits it: that spell is always
+-- server-triggered, never client-started. It compares what the CLIENT declares in
+-- its cast packet against AllowedTargetMask, which the server computes purely from
+-- effectImplicitTargetA/B (SpellMgr::GetAllowedTargetMask). Divine Strike's
+-- effect1 uses effectImplicitTargetA1=22 (TARGET_LOCATION_CASTER_SRC) + B1=15
+-- (TARGET_ENUM_UNITS_ENEMY_AOE_AT_SRC_LOC) -- both location/AOE target types,
+-- contributing only TARGET_FLAG_SOURCE_LOCATION to AllowedTargetMask, no
+-- TARGET_FLAG_UNIT.
+--
+-- But the CLIENT's own Spell.dbc copy of Divine Strike (40008-40012, cloned via
+-- custom_spell_meta from Holy Strike's single-target template before the
+-- "stun-to-AOE rework") was never updated to match -- confirmed by extracting the
+-- live patch-3.MPQ and reading the raw client DBC fields directly: Divine
+-- Strike's client-side effectImplicitTargetA[0] is still 6 (TARGET_UNIT_ENEMY),
+-- identical to Holy Strike (40000). The client, correctly per its own (stale)
+-- data, always includes the player's selected enemy in the cast packet
+-- (TARGET_FLAG_UNIT) -- which the server's AllowedTargetMask (SOURCE_LOCATION
+-- only) rejects outright.
+--
+-- Fix: rather than repatch the client DBC (a materially bigger, riskier change --
+-- see tonight's mount-tooltip investigation for why editing target fields for
+-- spells this pipeline has never touched before is not to be done lightly), add a
+-- second, purely server-side effect that independently widens AllowedTargetMask
+-- to also accept TARGET_FLAG_UNIT: effect2 = SPELL_EFFECT_DUMMY (3) with
+-- effectImplicitTargetA2 = TARGET_UNIT_ENEMY (6). SPELL_EFFECT_DUMMY with no
+-- spell-specific script registered (confirmed: no case for these IDs in
+-- Spell::EffectDummy, no PetAura, no ScriptMgr hook) is a guaranteed no-op -- it
+-- exists purely to make the server's own target-mask computation agree with what
+-- the client, unavoidably, already sends. effect1 (the real weapon-damage AOE,
+-- and the tooltip's $s1 reference) is untouched -- damage and tooltip both stay
+-- exactly as they are. No client patch/rebuild needed -- this is the same "pure
+-- spell_template data" category as the original effectImplicitTargetB1 fix.
+UPDATE `spell_template` SET `effect2` = 3, `effectImplicitTargetA2` = 6
+    WHERE `entry` IN (2497, 2498, 2499, 2500, 2501, 40008, 40009, 40010, 40011, 40012);
