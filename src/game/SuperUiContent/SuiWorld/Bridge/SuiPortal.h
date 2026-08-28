@@ -47,6 +47,10 @@ namespace SuiPortal
     // PLAN_20 P4a: take group leadership back from a companion bot. Only ever
     // from a BOT -- taking it from a real player would be a griefing verb.
     constexpr uint32 CAPABILITY_PARTY_LEAD_V1 = 1u << 9;
+    // PLAN_20 Model B (commander-view questing): a questgiver's offered/ended
+    // quests plus a per-member eligibility verdict, so the free-view quest window
+    // can draw each member's card without possession or the main at the NPC.
+    constexpr uint32 CAPABILITY_PARTY_GIVER_QUESTS_V1 = 1u << 10;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

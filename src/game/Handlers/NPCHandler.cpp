@@ -37,6 +37,7 @@
 #include "Chat.h"
 #include "CharacterDatabaseCache.h"
 #include "SuiHero.h"
+#include "SuiPossess.h"      // [SUI] P4b: GetSuiActor + ResnapshotControlled for possessed-bot trainer/repair
 
 enum StableResultCode
 {
@@ -140,7 +141,13 @@ static void SendTrainerSpellHelper(WorldPacket& data, TrainerSpell const* tSpell
 
 void WorldSession::SendTrainerList(ObjectGuid guid)
 {
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_TRAINER);
+    // [SUI] P4b: list the DRIVEN bot's trainable spells (its class/race/skill/level,
+    // its already-known set), not the parked commander's. Built on GetSuiActor();
+    // the packet still sends on `this` — the commander's socket directly when this
+    // ran from the trainer frame, or the bot's socket (→ MirrorOwnerPacket) when it
+    // ran from a gossip "train" option. Unpossessed, pActor == _player, unchanged.
+    Player* pActor = GetSuiActor();
+    Creature* unit = pActor->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_TRAINER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: SendTrainerList - %s not found or you can't interact with him.", guid.GetString().c_str());
@@ -148,7 +155,7 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
     }
 
     // trainer list loaded at check;
-    if (!unit->IsTrainerOf(_player, true))
+    if (!unit->IsTrainerOf(pActor, true))
         return;
 
     CreatureInfo const* ci = unit->GetCreatureInfo();
@@ -164,8 +171,8 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
     uint32 maxcount = (cSpells ? cSpells->spellList.size() : 0) + (tSpells ? tSpells->spellList.size() : 0);
     uint32 trainer_type = cSpells && cSpells->trainerType ? cSpells->trainerType : (tSpells ? tSpells->trainerType : 0);
@@ -193,8 +200,8 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
     data << uint32(maxcount);
 
     // reputation discount
-    float fDiscountMod = _player->GetReputationPriceDiscount(unit);
-    bool can_learn_primary_prof = GetPlayer()->GetFreePrimaryProfessionPoints() > 0;
+    float fDiscountMod = pActor->GetReputationPriceDiscount(unit);
+    bool can_learn_primary_prof = pActor->GetFreePrimaryProfessionPoints() > 0;
 
     uint32 count = 0;
 
@@ -206,10 +213,10 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
             uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
 
-            if (!_player->IsSpellFitByClassAndRace(triggerSpell))
+            if (!pActor->IsSpellFitByClassAndRace(triggerSpell))
                 continue;
 
-            TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
+            TrainerSpellState state = pActor->GetTrainerSpellState(tSpell);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
 
@@ -225,10 +232,10 @@ void WorldSession::SendTrainerList(ObjectGuid guid)
 
             uint32 triggerSpell = sSpellMgr.GetSpellEntry(tSpell->spell)->EffectTriggerSpell[0];
 
-            if (!_player->IsSpellFitByClassAndRace(triggerSpell))
+            if (!pActor->IsSpellFitByClassAndRace(triggerSpell))
                 continue;
 
-            TrainerSpellState state = _player->GetTrainerSpellState(tSpell);
+            TrainerSpellState state = pActor->GetTrainerSpellState(tSpell);
 
             SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof);
 
@@ -263,9 +270,15 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
 {
     sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: Received CMSG_TRAINER_BUY_SPELL Trainer: %s, learn spell id is: %u", packet.guid.GetString().c_str(), packet.spellId);
 
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_TRAINER);
+    // [SUI] P4b: the DRIVEN bot learns and pays. Acts on GetSuiActor(); the
+    // learned spell reaches the commander as the already-mirrored SMSG_LEARNED_SPELL,
+    // and a re-snapshot updates the bot's shown purse. SendTraining* still go on
+    // `this` (the commander's socket) so the failure toast is seen directly.
+    Player* pActor = GetSuiActor();
+    bool suiActing = pActor != _player;
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_TRAINER);
 
-    if (!unit || !unit->IsTrainerOf(_player, true) || !unit->IsWithinLOSInMap(_player))
+    if (!unit || !unit->IsTrainerOf(pActor, true) || !unit->IsWithinLOSInMap(pActor))
     {
         SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_UNAVAILABLE);
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleTrainerBuySpellOpcode - %s not found or you can't interact with him.", packet.guid.GetString().c_str());
@@ -297,7 +310,7 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
     }
 
     // Can't be learned, cheat? Or double learn with lags...
-    if (_player->GetTrainerSpellState(trainer_spell) != TRAINER_SPELL_GREEN)
+    if (pActor->GetTrainerSpellState(trainer_spell) != TRAINER_SPELL_GREEN)
     {
         SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_NOT_ENOUGH_SKILL);
         return;
@@ -306,28 +319,28 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
     SpellEntry const* proto = sSpellMgr.GetSpellEntry(trainer_spell->spell);
 
     // Apply reputation discount.
-    uint32 nSpellCost = uint32(trainer_spell->spellCost * _player->GetReputationPriceDiscount(unit) + 0.5f);
+    uint32 nSpellCost = uint32(trainer_spell->spellCost * pActor->GetReputationPriceDiscount(unit) + 0.5f);
 
     // Check money requirement.
-    if (_player->GetMoney() < nSpellCost)
+    if (pActor->GetMoney() < nSpellCost)
     {
         SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_NOT_ENOUGH_MONEY);
         return;
     }
 
     // All is good. Spell can be learned if we reach this point.
-    _player->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    _player->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    _player->RemoveSpellsCausingAura(SPELL_AURA_MOUNTED);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveSpellsCausingAura(SPELL_AURA_MOUNTED);
 
     Spell* spell;
     if (proto->SpellVisual == 222)
-        spell = new Spell(_player, proto, false);
+        spell = new Spell(pActor, proto, false);
     else
         spell = new Spell(unit, proto, false);
 
     SpellCastTargets targets;
-    targets.setUnitTarget(_player);
+    targets.setUnitTarget(pActor);
 
     SpellCastResult cast_result = spell->prepare(std::move(targets));
     spell->update(1); // Update the spell right now. Prevents desynch => take twice the money if you click really fast.
@@ -335,8 +348,10 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
     // Only charge player if cast of learning spell was successful.
     if (cast_result == SPELL_CAST_OK)
     {
-        _player->ModifyMoney(-int32(nSpellCost));
+        pActor->ModifyMoney(-int32(nSpellCost));
         SendTrainingSuccess(packet.guid, packet.spellId);
+        if (suiActing)
+            SuiPossess::ResnapshotControlled(this);
     }
     else
         SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_UNAVAILABLE);
@@ -344,47 +359,53 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
 
 void WorldSession::HandleGossipHelloOpcode(WorldPackets::Npc::GossipHello const& packet)
 {
-    Creature* pCreature = GetPlayer()->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_NONE);
+    // [SUI] P4b: while driving a party bot, run the whole NPC interaction as the
+    // BOT (its quest state, its bags, its trainer eligibility) and let the reply
+    // ride the possession proxy back to the commander. Unpossessed, GetSuiActor()
+    // is _player and this is bit-identical.
+    Player* actor = GetSuiActor();
+    Creature* pCreature = actor->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_NONE);
     if (!pCreature)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleGossipHelloOpcode - %s not found or you can't interact with him.", packet.npcGuid.GetString().c_str());
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
     if (!pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_MOVEMENT_PAUSE))
         pCreature->PauseOutOfCombatMovement();
 
     if (pCreature->IsSpiritGuide())
-        pCreature->SendAreaSpiritHealerQueryOpcode(_player);
+        pCreature->SendAreaSpiritHealerQueryOpcode(actor);
 
-    if (!sScriptMgr.OnGossipHello(_player, pCreature))
+    if (!sScriptMgr.OnGossipHello(actor, pCreature))
     {
-        _player->PrepareGossipMenu(pCreature, pCreature->GetDefaultGossipMenuId());
-        _player->SendPreparedGossip(pCreature);
+        actor->PrepareGossipMenu(pCreature, pCreature->GetDefaultGossipMenuId());
+        actor->SendPreparedGossip(pCreature);
     }
 }
 
 void WorldSession::HandleGossipSelectOptionOpcode(WorldPackets::Npc::GossipSelectOption const& packet)
 {
-    bool const isCoded = _player->PlayerTalkClass->GossipOptionCoded(packet.gossipListId);
+    Player* actor = GetSuiActor();   // [SUI] P4b: the driven bot owns this menu
+    bool const isCoded = actor->PlayerTalkClass->GossipOptionCoded(packet.gossipListId);
     if (isCoded && packet.code.empty())
         return;  // coded option requires a code from the client
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    uint32 sender = _player->PlayerTalkClass->GossipOptionSender(packet.gossipListId);
-    uint32 action = _player->PlayerTalkClass->GossipOptionAction(packet.gossipListId);
+    uint32 sender = actor->PlayerTalkClass->GossipOptionSender(packet.gossipListId);
+    uint32 action = actor->PlayerTalkClass->GossipOptionAction(packet.gossipListId);
 
     // Only forward a non-null code to scripts for coded gossip options.
     const char* code = (isCoded && !packet.code.empty()) ? packet.code.c_str() : nullptr;
 
     if (packet.guid.IsAnyTypeCreature())
     {
-        Creature* pCreature = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_NONE);
+        Creature* pCreature = actor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_NONE);
 
         if (!pCreature)
         {
@@ -395,12 +416,12 @@ void WorldSession::HandleGossipSelectOptionOpcode(WorldPackets::Npc::GossipSelec
         if (!pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_MOVEMENT_PAUSE))
             pCreature->PauseOutOfCombatMovement();
 
-        if (!sScriptMgr.OnGossipSelect(_player, pCreature, sender, action, code))
-            _player->OnGossipSelect(pCreature, packet.gossipListId);
+        if (!sScriptMgr.OnGossipSelect(actor, pCreature, sender, action, code))
+            actor->OnGossipSelect(pCreature, packet.gossipListId);
     }
     else if (packet.guid.IsGameObject())
     {
-        GameObject* pGo = GetPlayer()->GetGameObjectIfCanInteractWith(packet.guid);
+        GameObject* pGo = actor->GetGameObjectIfCanInteractWith(packet.guid);
 
         if (!pGo)
         {
@@ -408,8 +429,8 @@ void WorldSession::HandleGossipSelectOptionOpcode(WorldPackets::Npc::GossipSelec
             return;
         }
 
-        if (!sScriptMgr.OnGossipSelect(_player, pGo, sender, action, code))
-            _player->OnGossipSelect(pGo, packet.gossipListId);
+        if (!sScriptMgr.OnGossipSelect(actor, pGo, sender, action, code))
+            actor->OnGossipSelect(pGo, packet.gossipListId);
     }
 }
 
@@ -793,28 +814,36 @@ void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& p
 
 void WorldSession::HandleRepairItemOpcode(WorldPackets::Npc::RepairItem const& packet)
 {
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_REPAIR);
+    // [SUI] P4b: repair the DRIVEN bot's gear (its durability, its purse). Acts on
+    // GetSuiActor(); re-snapshots the bot afterward so the commander sees the mended
+    // durability and reduced coinage. Unpossessed, pActor == _player, unchanged.
+    Player* pActor = GetSuiActor();
+    bool suiActing = pActor != _player;
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_REPAIR);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleRepairItemOpcode - %s not found or you can't interact with him.", packet.npcGuid.GetString().c_str());
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
     // reputation discount
-    float discountMod = _player->GetReputationPriceDiscount(unit);
+    float discountMod = pActor->GetReputationPriceDiscount(unit);
 
     if (packet.itemGuid)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "ITEM: %s repair of %s", packet.npcGuid.GetString().c_str(), packet.itemGuid.GetString().c_str());
-        if (Item* item = _player->GetItemByGuid(packet.itemGuid))
-            _player->DurabilityRepair(item->GetPos(), true, discountMod);
+        if (Item* item = pActor->GetItemByGuid(packet.itemGuid))
+            pActor->DurabilityRepair(item->GetPos(), true, discountMod);
     }
     else
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "ITEM: %s repair all items", packet.npcGuid.GetString().c_str());
-        _player->DurabilityRepairAll(true, discountMod);
+        pActor->DurabilityRepairAll(true, discountMod);
     }
+
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }

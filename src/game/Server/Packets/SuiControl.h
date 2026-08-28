@@ -256,28 +256,65 @@ namespace WorldPackets
             }
         };
 
+        /// PLAN_20 Model B: one questgiver's quests + per-member eligibility. The
+        /// party is derived server-side from the requester's group; the client sends
+        /// only the giver it right-clicked from the free-view camera.
+        class GiverQuests final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;                    // reserved
+            ObjectGuid giver;
+            bool exactSize = false;             // wire discipline: reject sloppy lengths
+
+            explicit GiverQuests() : ClientPacket(CMSG_SUI_GIVER_QUESTS) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() != 9)      // u8 flags + u64 giver
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                exactSize = true;
+                recv_data >> flags >> giver;
+            }
+        };
+
         class MemberItemMove final : public ClientPacket
         {
         public:
-            static constexpr size_t WIRE_SIZE = 19;
+            static constexpr size_t WIRE_SIZE = 19;           // cross-member give
+            static constexpr size_t WIRE_SIZE_IN_PLACE = 21;  // in-place rearrange (dest follows)
+            static constexpr uint8 FLAG_IN_PLACE = 0x01;
 
-            uint8 flags = 0;            // reserved
+            uint8 flags = 0;            // bit0 = in-place rearrange within one owner
             ObjectGuid from;
             ObjectGuid to;
             uint8 bag = 0;              // 255 = character-held, 19-22 = equipped bag
             uint8 slot = 0;
+            uint8 destBag = 0;          // in-place only: destination bag
+            uint8 destSlot = 0;         // in-place only: destination slot
+            bool inPlace = false;
             bool exactSize = false;     // wire discipline: reject sloppy lengths
 
             explicit MemberItemMove() : ClientPacket(CMSG_SUI_MEMBER_ITEM_MOVE) {}
             void ReadFromWorldPacket(WorldPacket& recv_data) override
             {
-                exactSize = recv_data.size() == WIRE_SIZE;
-                if (!exactSize)
+                size_t sz = recv_data.size();
+                if (sz != WIRE_SIZE && sz != WIRE_SIZE_IN_PLACE)
                 {
+                    exactSize = false;
                     recv_data.rfinish();
                     return;
                 }
                 recv_data >> flags >> from >> to >> bag >> slot;
+                inPlace = (flags & FLAG_IN_PLACE) != 0;
+                if (sz == WIRE_SIZE_IN_PLACE)
+                {
+                    recv_data >> destBag >> destSlot;
+                    exactSize = inPlace;   // 21 bytes must carry the in-place flag
+                }
+                else
+                    exactSize = !inPlace;  // 19 bytes must not
             }
         };
 

@@ -35,9 +35,14 @@
 
 void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPackets::Quest::QuestgiverStatusQuery const& packet)
 {
+    // [SUI] P4b: while driving a party bot, answer the questgiver for the BOT, not
+    // the parked commander. GetSuiActor() is the possessed bot, or _player unchanged
+    // when nothing is possessed (bit-identical). The reply rides the possession
+    // proxy (MirrorOwnerPacket) back to the commander's client.
+    Player* actor = GetSuiActor();
     uint8 dialogStatus = DIALOG_STATUS_NONE;
 
-    Object* questgiver = _player->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+    Object* questgiver = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
     if (!questgiver)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DETAIL, "Error in CMSG_QUESTGIVER_STATUS_QUERY, called for not found questgiver %s", packet.guid.GetString().c_str());
@@ -50,21 +55,21 @@ void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPackets::Quest::Questg
         {
             Creature* cr_questgiver = (Creature*)questgiver;
 
-            if (!cr_questgiver->IsHostileTo(_player))       // not show quest status to enemies
+            if (!cr_questgiver->IsHostileTo(actor))       // not show quest status to enemies
             {
-                dialogStatus = sScriptMgr.GetDialogStatus(_player, cr_questgiver);
+                dialogStatus = sScriptMgr.GetDialogStatus(actor, cr_questgiver);
 
                 if (dialogStatus > 6)
-                    dialogStatus = GetDialogStatus(_player, cr_questgiver, DIALOG_STATUS_NONE);
+                    dialogStatus = GetDialogStatus(actor, cr_questgiver, DIALOG_STATUS_NONE);
             }
             break;
         }
         case TYPEID_GAMEOBJECT:
         {
             GameObject* go_questgiver = (GameObject*)questgiver;
-            dialogStatus = sScriptMgr.GetDialogStatus(_player, go_questgiver);
+            dialogStatus = sScriptMgr.GetDialogStatus(actor, go_questgiver);
             if (dialogStatus > 6)
-                dialogStatus = GetDialogStatus(_player, go_questgiver, DIALOG_STATUS_NONE);
+                dialogStatus = GetDialogStatus(actor, go_questgiver, DIALOG_STATUS_NONE);
             break;
         }
         default:
@@ -73,12 +78,13 @@ void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPackets::Quest::Questg
     }
 
     //inform client about status of quest
-    _player->PlayerTalkClass->SendQuestGiverStatus(dialogStatus, packet.guid);
+    actor->PlayerTalkClass->SendQuestGiverStatus(dialogStatus, packet.guid);
 }
 
 void WorldSession::HandleQuestgiverHelloOpcode(WorldPackets::Quest::QuestgiverHello const& packet)
 {
-    Creature* pCreature = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_NONE);
+    Player* actor = GetSuiActor();   // [SUI] P4b: act as the driven bot, else _player
+    Creature* pCreature = actor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_NONE);
 
     if (!pCreature)
     {
@@ -87,26 +93,27 @@ void WorldSession::HandleQuestgiverHelloOpcode(WorldPackets::Quest::QuestgiverHe
     }
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (actor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        actor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     // Stop the npc if moving
     if (!pCreature->HasExtraFlag(CREATURE_FLAG_EXTRA_NO_MOVEMENT_PAUSE))
         pCreature->PauseOutOfCombatMovement();
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    actor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    if (sScriptMgr.OnGossipHello(_player, pCreature))
+    if (sScriptMgr.OnGossipHello(actor, pCreature))
         return;
 
-    _player->PrepareGossipMenu(pCreature, pCreature->GetDefaultGossipMenuId());
-    _player->SendPreparedGossip(pCreature);
+    actor->PrepareGossipMenu(pCreature, pCreature->GetDefaultGossipMenuId());
+    actor->SendPreparedGossip(pCreature);
 }
 
 void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::QuestgiverAcceptQuest const& packet)
 {
-    Object* pObject = _player->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_PLAYER_OR_ITEM);
+    Player* actor = GetSuiActor();   // [SUI] P4b: accept for the driven bot, else _player
+    Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_PLAYER_OR_ITEM);
 
     // no or incorrect quest giver
     if (!pObject
@@ -114,15 +121,15 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::Questg
             || (pObject->GetTypeId() == TYPEID_PLAYER && !((Player*)pObject)->CanShareQuest(packet.quest))
        )
     {
-        _player->PlayerTalkClass->CloseGossip();
-        _player->ClearQuestShareInfo();
+        actor->PlayerTalkClass->CloseGossip();
+        actor->ClearQuestShareInfo();
         return;
     }
 
-    if (!_player->CanInteractWithQuestGiver(pObject))
+    if (!actor->CanInteractWithQuestGiver(pObject))
     {
-        _player->PlayerTalkClass->CloseGossip();
-        _player->ClearQuestShareInfo();
+        actor->PlayerTalkClass->CloseGossip();
+        actor->ClearQuestShareInfo();
         return;
     }
 
@@ -130,98 +137,99 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::Questg
     if (qInfo)
     {
         // prevent cheating
-        if (!GetPlayer()->CanTakeQuest(qInfo, true))
+        if (!actor->CanTakeQuest(qInfo, true))
         {
-            _player->PlayerTalkClass->CloseGossip();
-            _player->ClearQuestShareInfo();
+            actor->PlayerTalkClass->CloseGossip();
+            actor->ClearQuestShareInfo();
             return;
         }
 
-        if (auto const& questShareInfo = _player->GetQuestShareInfo())
+        if (auto const& questShareInfo = actor->GetQuestShareInfo())
         {
             if (questShareInfo->QuestId == qInfo->GetQuestId())
             {
-                Player* sharer = _player->GetMap()->GetPlayer(questShareInfo->PlayerGuid);
+                Player* sharer = actor->GetMap()->GetPlayer(questShareInfo->PlayerGuid);
                 if (!sharer)
                 {
-                    _player->PlayerTalkClass->CloseGossip();
-                    _player->ClearQuestShareInfo();
+                    actor->PlayerTalkClass->CloseGossip();
+                    actor->ClearQuestShareInfo();
                     return;
                 }
 
-                if (!_player->IsWithinDist(sharer, QUEST_SHARE_DISTANCE, true, SizeFactor::None))
+                if (!actor->IsWithinDist(sharer, QUEST_SHARE_DISTANCE, true, SizeFactor::None))
                 {
-                    _player->PlayerTalkClass->CloseGossip();
-                    _player->ClearQuestShareInfo();
-                    sharer->SendPushToPartyResponse(_player, QUEST_PARTY_MSG_TOO_FAR);
+                    actor->PlayerTalkClass->CloseGossip();
+                    actor->ClearQuestShareInfo();
+                    sharer->SendPushToPartyResponse(actor, QUEST_PARTY_MSG_TOO_FAR);
                     return;
                 }
 
-                sharer->SendPushToPartyResponse(_player, QUEST_PARTY_MSG_ACCEPT_QUEST);
-                _player->ClearQuestShareInfo();
+                sharer->SendPushToPartyResponse(actor, QUEST_PARTY_MSG_ACCEPT_QUEST);
+                actor->ClearQuestShareInfo();
             }
             else
             {
-                _player->ClearQuestShareInfo();
+                actor->ClearQuestShareInfo();
             }
         }
 
-        if (_player->CanAddQuest(qInfo, true))
+        if (actor->CanAddQuest(qInfo, true))
         {
-            _player->AddQuest(qInfo, pObject);              // pObject (if it item) can be destroyed at call
+            actor->AddQuest(qInfo, pObject);              // pObject (if it item) can be destroyed at call
 
             if (qInfo->HasQuestFlag(QUEST_FLAGS_PARTY_ACCEPT))
             {
-                if (Group* pGroup = _player->GetGroup())
+                if (Group* pGroup = actor->GetGroup())
                 {
                     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
                     {
                         Player* pPlayer = itr->getSource();
 
-                        if (!pPlayer || pPlayer == _player || !pPlayer->IsInMap(_player))     // not self and in same map
+                        if (!pPlayer || pPlayer == actor || !pPlayer->IsInMap(actor))     // not self and in same map
                             continue;
 
                         if (pPlayer->CanTakeQuest(qInfo, true))
                         {
-                            pPlayer->SetQuestShareInfo(_player->GetObjectGuid(), qInfo->GetQuestId());
+                            pPlayer->SetQuestShareInfo(actor->GetObjectGuid(), qInfo->GetQuestId());
 
                             //need confirmation that any gossip window will close
                             pPlayer->PlayerTalkClass->CloseGossip();
 
-                            _player->SendQuestConfirmAccept(qInfo, pPlayer);
+                            actor->SendQuestConfirmAccept(qInfo, pPlayer);
                         }
                     }
                 }
             }
 
-            if (_player->CanCompleteQuest(packet.quest))
-                _player->CompleteQuest(packet.quest);
+            if (actor->CanCompleteQuest(packet.quest))
+                actor->CompleteQuest(packet.quest);
 
-            _player->PlayerTalkClass->CloseGossip();
+            actor->PlayerTalkClass->CloseGossip();
 
             if (qInfo->GetSrcSpell() > 0)
-                _player->CastSpell(_player, qInfo->GetSrcSpell(), true);
+                actor->CastSpell(actor, qInfo->GetSrcSpell(), true);
 
             return;
         }
     }
 
-    _player->PlayerTalkClass->CloseGossip();
-    _player->ClearQuestShareInfo();
+    actor->PlayerTalkClass->CloseGossip();
+    actor->ClearQuestShareInfo();
 }
 
 void WorldSession::HandleQuestgiverQueryQuestOpcode(WorldPackets::Quest::QuestgiverQueryQuest const& packet)
 {
+    Player* actor = GetSuiActor();   // [SUI] P4b
     // Verify that the guid is valid and is a questgiver or involved in the requested quest
-    Object* pObject = _player->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_OR_ITEM);
+    Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_OR_ITEM);
     if (!pObject || (!pObject->HasQuest(packet.quest) && !pObject->HasInvolvedQuest(packet.quest)))
     {
-        _player->PlayerTalkClass->CloseGossip();
+        actor->PlayerTalkClass->CloseGossip();
         return;
     }
 
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.quest))
-        _player->PlayerTalkClass->SendQuestGiverQuestDetails(pQuest, pObject->GetObjectGuid(), true);
+        actor->PlayerTalkClass->SendQuestGiverQuestDetails(pQuest, pObject->GetObjectGuid(), true);
 }
 
 void WorldSession::HandleQuestQueryOpcode(WorldPackets::Quest::QueryQuest const& packet)
@@ -406,22 +414,23 @@ void WorldSession::HandleQuestQueryOpcode(WorldPackets::Quest::QueryQuest const&
 
 void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPackets::Quest::QuestgiverChooseReward const& packet)
 {
+    Player* actor = GetSuiActor();   // [SUI] P4b: reward the driven bot
     ObjectGuid guid = packet.guid;
 
     if (packet.reward >= QUEST_REWARD_CHOICES_COUNT)
     {
-        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "Error in CMSG_QUESTGIVER_CHOOSE_REWARD: player %s (guid %d) tried to get invalid reward (%u) (probably packet hacking)", _player->GetName(), _player->GetGUIDLow(), packet.reward);
+        sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "Error in CMSG_QUESTGIVER_CHOOSE_REWARD: player %s (guid %d) tried to get invalid reward (%u) (probably packet hacking)", actor->GetName(), actor->GetGUIDLow(), packet.reward);
         return;
     }
 
-    WorldObject* pObject = (WorldObject*)_player->GetObjectByTypeMask(guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+    WorldObject* pObject = (WorldObject*)actor->GetObjectByTypeMask(guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
     if (!pObject)
         return;
 
     if (!pObject->HasInvolvedQuest(packet.quest))
         return;
 
-    if (!GetPlayer()->IsAlive())
+    if (!actor->IsAlive())
     {
         // Some quest can be rewarded while dead (cf q3912 [Meet at the Grave])
         if (Creature* crea = pObject->ToCreature())
@@ -436,28 +445,29 @@ void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPackets::Quest::Quest
     Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.quest);
     if (pQuest)
     {
-        if (_player->CanRewardQuest(pQuest, packet.reward, true))
+        if (actor->CanRewardQuest(pQuest, packet.reward, true))
         {
-            _player->RewardQuest(pQuest, packet.reward, pObject);
+            actor->RewardQuest(pQuest, packet.reward, pObject);
 
             // Send next quest
-            if (Quest const* nextquest = _player->GetNextQuest(guid, pQuest))
-                _player->PlayerTalkClass->SendQuestGiverQuestDetails(nextquest, guid, true);
+            if (Quest const* nextquest = actor->GetNextQuest(guid, pQuest))
+                actor->PlayerTalkClass->SendQuestGiverQuestDetails(nextquest, guid, true);
         }
         else
         {
-            _player->PlayerTalkClass->SendQuestGiverOfferReward(pQuest, guid, true);
+            actor->PlayerTalkClass->SendQuestGiverOfferReward(pQuest, guid, true);
         }
     }
 }
 
 void WorldSession::HandleQuestgiverRequestRewardOpcode(WorldPackets::Quest::QuestgiverRequestReward const& packet)
 {
-    Object* pObject = _player->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+    Player* actor = GetSuiActor();   // [SUI] P4b
+    Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
     if (!pObject || !pObject->HasInvolvedQuest(packet.quest))
         return;
 
-    if (!GetPlayer()->IsAlive())
+    if (!actor->IsAlive())
     {
         // Some quest can be rewarded while dead (cf q3912 [Meet at the Grave])
         if (Creature* crea = pObject->ToCreature())
@@ -469,19 +479,19 @@ void WorldSession::HandleQuestgiverRequestRewardOpcode(WorldPackets::Quest::Ques
             return;
     }
 
-    if (_player->CanCompleteQuest(packet.quest))
-        _player->CompleteQuest(packet.quest);
+    if (actor->CanCompleteQuest(packet.quest))
+        actor->CompleteQuest(packet.quest);
 
-    if (_player->GetQuestStatus(packet.quest) != QUEST_STATUS_COMPLETE)
+    if (actor->GetQuestStatus(packet.quest) != QUEST_STATUS_COMPLETE)
         return;
 
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.quest))
-        _player->PlayerTalkClass->SendQuestGiverOfferReward(pQuest, packet.guid, true);
+        actor->PlayerTalkClass->SendQuestGiverOfferReward(pQuest, packet.guid, true);
 }
 
 void WorldSession::HandleQuestgiverCancel(NullClientPacket const& /*packet*/)
 {
-    _player->PlayerTalkClass->CloseGossip();
+    GetSuiActor()->PlayerTalkClass->CloseGossip();   // [SUI] P4b: close the driven bot's frame
 }
 
 void WorldSession::HandleQuestLogSwapQuest(WorldPackets::Quest::QuestLogSwapQuest const& packet)
@@ -550,17 +560,18 @@ void WorldSession::HandleQuestConfirmAccept(WorldPackets::Quest::QuestConfirmAcc
 
 void WorldSession::HandleQuestgiverCompleteQuest(WorldPackets::Quest::QuestgiverCompleteQuest const& packet)
 {
+    Player* actor = GetSuiActor();   // [SUI] P4b
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.quest))
     {
-        if (_player->GetQuestStatus(packet.quest) != QUEST_STATUS_COMPLETE)
+        if (actor->GetQuestStatus(packet.quest) != QUEST_STATUS_COMPLETE)
         {
             if (pQuest->IsRepeatable())
-                _player->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, _player->CanCompleteRepeatableQuest(pQuest), false);
+                actor->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, actor->CanCompleteRepeatableQuest(pQuest), false);
             else
-                _player->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, _player->CanRewardQuest(pQuest, false), false);
+                actor->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, actor->CanRewardQuest(pQuest, false), false);
         }
         else
-            _player->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, _player->CanRewardQuest(pQuest, false), false);
+            actor->PlayerTalkClass->SendQuestGiverRequestItems(pQuest, packet.guid, actor->CanRewardQuest(pQuest, false), false);
     }
 }
 

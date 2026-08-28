@@ -2308,16 +2308,54 @@ Unit* CombatBotBaseAI::SelectAttackerDifferentFrom(Unit const* pExcept) const
 
 bool CombatBotBaseAI::IsValidBuffTarget(Unit const* pTarget, SpellEntry const* pSpellEntry) const
 {
+    return IsValidBuffTargetInternal(pTarget, pSpellEntry, false);
+}
+
+bool CombatBotBaseAI::IsValidMaintenanceBuffTarget(Unit const* pTarget,
+                                                    SpellEntry const* pSpellEntry) const
+{
+    return IsValidBuffTargetInternal(pTarget, pSpellEntry, true);
+}
+
+bool CombatBotBaseAI::IsValidBuffTargetInternal(Unit const* pTarget,
+                                                SpellEntry const* pSpellEntry,
+                                                bool allowAuraRefresh) const
+{
+    if (!pTarget || !pSpellEntry)
+        return false;
+
+    // Maintenance buffs may be refreshed shortly before they expire, and a
+    // learned higher rank must be allowed to replace a weaker aura.  The old
+    // symmetric chain test treated every rank as equivalent, which left bots
+    // carrying stale low-rank buffs until they disappeared completely.
+    static int32 const BUFF_REFRESH_WINDOW_MS = 30 * IN_MILLISECONDS;
     std::vector<uint32> morePowerfulSpells;
     sSpellMgr.ListMorePowerfulSpells(pSpellEntry->Id, morePowerfulSpells);
 
     for (const auto& i : pTarget->GetSpellAuraHolderMap())
     {
         if (i.first == pSpellEntry->Id)
-            return false;
+        {
+            SpellAuraHolder const* holder = i.second;
+            if (!allowAuraRefresh || !holder || holder->IsPermanent() ||
+                holder->GetCasterGuid() != me->GetObjectGuid() ||
+                holder->GetAuraMaxDuration() <= 60 * IN_MILLISECONDS ||
+                holder->GetAuraDuration() < 0 ||
+                holder->GetAuraDuration() > BUFF_REFRESH_WINDOW_MS)
+                return false;
+
+            continue;
+        }
 
         if (sSpellMgr.IsRankSpellDueToSpell(pSpellEntry, i.first))
+        {
+            // A lower aura is an upgrade candidate.  Equal/unordered or higher
+            // auras remain authoritative so a bot never downgrades a target.
+            if (sSpellMgr.IsHighRankOfSpell(pSpellEntry->Id, i.first))
+                continue;
+
             return false;
+        }
 
         for (const auto& it : morePowerfulSpells)
             if (it == i.first)
@@ -3013,12 +3051,17 @@ void CombatBotBaseAI::AutoEquipGear(uint32 option)
 
 bool CombatBotBaseAI::CanTryToCastSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const
 {
-    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, false);
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, false, false);
 }
 
 bool CombatBotBaseAI::CanTryToCastStackingSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const
 {
-    return CanTryToCastSpellInternal(pTarget, pSpellEntry, true, false);
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, true, false, false);
+}
+
+bool CombatBotBaseAI::CanTryToRefreshAura(Unit const* pTarget, SpellEntry const* pSpellEntry) const
+{
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, false, true);
 }
 
 bool CombatBotBaseAI::CanTryToCastSpellAfterLeavingForm(Unit const* pTarget,
@@ -3027,11 +3070,21 @@ bool CombatBotBaseAI::CanTryToCastSpellAfterLeavingForm(Unit const* pTarget,
     if (!pTarget || !pSpellEntry || me->GetShapeshiftForm() == FORM_NONE ||
         pSpellEntry->GetErrorAtShapeshiftedCast(me->GetShapeshiftForm()) == SPELL_CAST_OK)
         return false;
-    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, true);
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, true, false);
+}
+
+bool CombatBotBaseAI::CanTryToRefreshAuraAfterLeavingForm(Unit const* pTarget,
+                                                           SpellEntry const* pSpellEntry) const
+{
+    if (!pTarget || !pSpellEntry || me->GetShapeshiftForm() == FORM_NONE ||
+        pSpellEntry->GetErrorAtShapeshiftedCast(me->GetShapeshiftForm()) == SPELL_CAST_OK)
+        return false;
+    return CanTryToCastSpellInternal(pTarget, pSpellEntry, false, true, true);
 }
 
 bool CombatBotBaseAI::CanTryToCastSpellInternal(Unit const* pTarget, SpellEntry const* pSpellEntry,
-                                                bool allowExistingAuraStack, bool ignoreShapeshift) const
+                                                bool allowExistingAuraStack, bool ignoreShapeshift,
+                                                bool allowAuraRefresh) const
 {
     if (m_preventCasting)
         return false;
@@ -3072,13 +3125,21 @@ bool CombatBotBaseAI::CanTryToCastSpellInternal(Unit const* pTarget, SpellEntry 
 
     if (pSpellEntry->IsSpellAppliesAura() && pTarget->HasAura(pSpellEntry->Id))
     {
-        if (!allowExistingAuraStack)
-            return false;
-
         SpellAuraHolder* holder = pTarget->GetSpellAuraHolder(pSpellEntry->Id);
-        if (!holder || !pSpellEntry->StackAmount ||
-            holder->GetStackAmount() >= pSpellEntry->StackAmount)
-            return false;
+        bool const refreshExistingAura = allowAuraRefresh && holder && !holder->IsPermanent() &&
+            holder->GetCasterGuid() == me->GetObjectGuid() &&
+            holder->GetAuraMaxDuration() > 60 * IN_MILLISECONDS &&
+            holder->GetAuraDuration() >= 0 &&
+            holder->GetAuraDuration() <= 30 * IN_MILLISECONDS;
+        if (!refreshExistingAura)
+        {
+            if (!allowExistingAuraStack)
+                return false;
+
+            if (!holder || !pSpellEntry->StackAmount ||
+                holder->GetStackAmount() >= pSpellEntry->StackAmount)
+                return false;
+        }
     }
 
     SpellRangeEntry const* srange = sSpellRangeStore.LookupEntry(pSpellEntry->rangeIndex);

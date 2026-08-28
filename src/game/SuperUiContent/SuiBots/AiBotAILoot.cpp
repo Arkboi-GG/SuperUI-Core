@@ -241,6 +241,15 @@ void AiBotAI::DoAutoLoot(ObjectGuid creatureGuid)
                 if (member && me->IsWithinLootXPDist(member))
                     playersNear.push_back(member); // cb:fold nearby member tally for the split
             }
+            if (playersNear.empty())
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-loot: empty group split, falling back to self", gold);
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT-LOOT] %s: WARNING group gold split found no nearby members; "
+                    "crediting %u copper to the looter",
+                    me->GetName(), gold);
+                playersNear.push_back(me);
+            }
             uint32 share = gold / (uint32)playersNear.size();
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                 "[AIBOT-LOOT] %s: splitting %u copper among %zu members (%u each)",

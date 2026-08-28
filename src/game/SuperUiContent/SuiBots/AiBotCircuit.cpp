@@ -6,6 +6,7 @@
 #include "AiBotCircuit.h"
 #include "AiBotAIMain.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -47,8 +48,28 @@ namespace CbCircuit
     static std::mutex g_bufMu;
     static std::unordered_map<uint32_t, BotBuf*> g_bufs;
 
+    static std::once_flag g_epochOnce;
+    static char g_epoch[64];
+
     static const size_t HIT_CAP = 4096;      // per bot, per flush window (1s) — far above real volume
     static const size_t BATCH_HITS_MAX = 2048; // serialization cap per flush
+
+    const char* Epoch()
+    {
+        std::call_once(g_epochOnce, []
+        {
+            // Wall-clock precision prevents ordinary restart collisions; the
+            // process-local address adds an independent ASLR salt. The result is
+            // an opaque JSON-safe token, not a timestamp contract.
+            uint64_t const wall = static_cast<uint64_t>(
+                std::chrono::high_resolution_clock::now().time_since_epoch().count());
+            uintptr_t const salt = reinterpret_cast<uintptr_t>(&g_epoch);
+            snprintf(g_epoch, sizeof(g_epoch), "%llx-%llx",
+                static_cast<unsigned long long>(wall),
+                static_cast<unsigned long long>(salt));
+        });
+        return g_epoch;
+    }
 
     static const char* Basename(const char* path)
     {
@@ -74,7 +95,7 @@ namespace CbCircuit
         s.line = line;
         s.desc = desc;
         g_sites.push_back(s);
-        return (int)g_sites.size();   // ids are 1-based
+        return (int)g_sites.size();   // ids are 1-based inside Epoch()
     }
 
     static void Push(uint32_t guid, const HitRec& h)
@@ -150,6 +171,7 @@ namespace CbCircuit
         if (!ship || hits.empty())
             return;
 
+        char const* epoch = Epoch();
         char line[512];
 
         // 1. Any site defs this connection hasn't shipped yet (self-decoding stream).
@@ -160,8 +182,8 @@ namespace CbCircuit
             {
                 Site const& s = g_sites[(size_t)i];
                 snprintf(line, sizeof(line),
-                    "{\"type\":\"CIRCUIT_SITE\",\"payload\":{\"guid\":%u,\"id\":%d,\"file\":\"%s\",\"line\":%d,\"desc\":\"%s\"}}",
-                    guid, i + 1, s.file, s.line, s.desc);
+                    "{\"type\":\"CIRCUIT_SITE\",\"payload\":{\"circuitEpoch\":\"%s\",\"guid\":%u,\"id\":%d,\"file\":\"%s\",\"line\":%d,\"desc\":\"%s\"}}",
+                    epoch, guid, i + 1, s.file, s.line, s.desc);
                 out.push_back(line);
             }
             std::lock_guard<std::mutex> lk2(b->mu);
@@ -170,10 +192,10 @@ namespace CbCircuit
 
         // 2. The batch: one envelope carrying this second's hits + position (R10).
         std::string batch;
-        batch.reserve(64 + hits.size() * 16);
+        batch.reserve(96 + hits.size() * 16);
         snprintf(line, sizeof(line),
-            "{\"type\":\"CIRCUIT_BATCH\",\"payload\":{\"guid\":%u,\"map\":%d,\"zone\":%d,\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"drops\":%u,\"h\":[",
-            guid, mapId, zoneId, x, y, z, drops);
+            "{\"type\":\"CIRCUIT_BATCH\",\"payload\":{\"circuitEpoch\":\"%s\",\"guid\":%u,\"map\":%d,\"zone\":%d,\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"drops\":%u,\"h\":[",
+            epoch, guid, mapId, zoneId, x, y, z, drops);
         batch += line;
 
         size_t n = hits.size() < BATCH_HITS_MAX ? hits.size() : BATCH_HITS_MAX;

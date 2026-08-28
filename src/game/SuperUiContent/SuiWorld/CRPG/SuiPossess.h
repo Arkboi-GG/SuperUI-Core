@@ -140,6 +140,8 @@ namespace SuiPossess
     /// The bot this session is driving, or nullptr.
     Player* GetControlledBot(WorldSession const* session);
     bool IsSuiPossessed(Unit const* unit);
+    // Re-push the driven bot's bags/facts to the commander after an inventory edit (ItemHandler).
+    void ResnapshotControlled(WorldSession* session);
 
     // Cross-map faction control must retire the source-map free-camera eye
     // before Player::TeleportTo starts ordinary NEW_WORLD streaming.  The
@@ -213,6 +215,27 @@ namespace SuiPossess
     void HandleGiverStatus(WorldSession* session,
         std::vector<ObjectGuid> const& givers);
 
+    /// PLAN_20 Model B: per (quest, member) eligibility verdict at one giver, so the
+    /// commander-view quest window draws each member's card. Ordered by how much
+    /// needs doing so the client can colour without re-deriving.
+    enum GiverQuestVerdict : uint8
+    {
+        GIVER_QUEST_CAN_TAKE       = 0,   // eligible to accept right now
+        GIVER_QUEST_ON_IT          = 1,   // held, still working it
+        GIVER_QUEST_READY          = 2,   // held and complete -> can turn in here
+        GIVER_QUEST_DONE           = 3,   // already rewarded (non-repeatable)
+        GIVER_QUEST_NEEDS_PREREQ   = 4,   // previous/chain/breadcrumb quest first
+        GIVER_QUEST_LOW_LEVEL      = 5,
+        GIVER_QUEST_WRONG_RACE_CLASS = 6,
+        GIVER_QUEST_LOW_SKILL_REP  = 7,   // skill, reputation or condition
+        GIVER_QUEST_LOG_FULL       = 8,   // Quests.MaxHeld reached
+        GIVER_QUEST_CANT           = 9,   // ineligible for another reason
+    };
+
+    /// CMSG_SUI_GIVER_QUESTS: enumerate one giver's offered/ended quests and answer
+    /// a verdict for every party member (self included), no possession required.
+    void HandleGiverQuests(WorldSession* session, ObjectGuid giver);
+
     void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
         ObjectGuid npcGuid, std::vector<PartyQuestSubject> const& subjects);
 
@@ -234,7 +257,8 @@ namespace SuiPossess
     /// the auction house); conjured items are refused. Both endpoints
     /// re-snapshot to every real SUI member of the group afterwards.
     void HandleMemberItemMove(WorldSession* session, ObjectGuid from,
-        ObjectGuid to, uint8 bag, uint8 slot);
+        ObjectGuid to, uint8 bag, uint8 slot,
+        bool inPlace = false, uint8 destBag = 0, uint8 destSlot = 0);
 
     // ── Owner-data mirror (M3) ────────────────────────────────────────────────
     /// Wrap whitelisted owner-only packets of a possessed bot's socket-less

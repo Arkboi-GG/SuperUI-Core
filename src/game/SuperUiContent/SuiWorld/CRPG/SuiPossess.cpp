@@ -678,6 +678,26 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     // collected here and laid out after the expansion loop below.
     std::vector<std::pair<Player*, AiBotAI*>> formationSubjects;
 
+    // [SUI] Owner 2026-08-28: bots must not STACK in transit or on arrival. A
+    // multi-subject move/waypoint order fans out around the clicked point —
+    // slot 0 takes the point itself, later slots ring it at 2 yd spacing.
+    // Slots go by assignment order, which is stable per subject list, so a
+    // waypoint CHAIN keeps every bot in its own lane leg after leg. The offset
+    // destination rides the same task pathfinding a formation slot does.
+    uint32 moveSlot = 0;
+    auto fannedDest = [&moveSlot](float cx, float cy, float& fx, float& fy)
+    {
+        float const pi = 3.14159265f;
+        uint32 const slot = moveSlot++;
+        if (slot == 0) { fx = cx; fy = cy; return; }
+        uint32 const ring = (slot - 1) / 6 + 1;
+        uint32 const pos = (slot - 1) % 6;
+        float const angle = float(pos) * (pi / 3.0f) + float(ring - 1) * (pi / 6.0f);
+        float const radius = 2.0f * float(ring);
+        fx = cx + cosf(angle) * radius;
+        fy = cy + sinf(angle) * radius;
+    };
+
     auto orderBot = [&](Player* pMember)
     {
         if (!pMember)
@@ -736,11 +756,15 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         switch (orderType)
         {
             case ORDER_MOVE:
+            {
                 // [SUI] Fix A: coalesced — stash the newest dest; UpdateAI issues it once next
                 // tick (SuiClearWaypoints + MOVE_TO happen there), so a right-click flood can no
                 // longer trigger a full pathfind + spline restart per packet on a single unit.
-                ai->QueueSuiRtsMove(x, y, z);
+                float fx, fy;
+                fannedDest(x, y, fx, fy);
+                ai->QueueSuiRtsMove(fx, fy, z);
                 break;
+            }
             case ORDER_ATTACK:
                 if (targetGuid.IsCreature())
                 {
@@ -755,8 +779,12 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 }
                 break;
             case ORDER_MOVE_QUEUE:
-                ai->SuiQueueWaypoint(x, y, z);
+            {
+                float fx, fy;
+                fannedDest(x, y, fx, fy);
+                ai->SuiQueueWaypoint(fx, fy, z);
                 break;
+            }
             case ORDER_FOLLOW:
             {
                 // Portrait drag chain: this bot escorts the named group member.
@@ -783,12 +811,16 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 }
                 break;
             case ORDER_PATROL:
+            {
                 // Convert the queued chain into a loop. The coordinate in the
                 // packet joins the route as its final point (a bare patrol
                 // click with no chain gives a two-point there-and-back).
-                ai->SuiQueueWaypoint(x, y, z);
+                float fx, fy;
+                fannedDest(x, y, fx, fy);
+                ai->SuiQueueWaypoint(fx, fy, z);
                 ai->m_suiPatrolLoop = true;
                 break;
+            }
             case ORDER_STOP:
                 ai->SuiClearWaypoints();
                 ai->StopMoving();
@@ -1043,6 +1075,35 @@ static void SendSnapshot(WorldSession* to, Player* bot)
     data << bot->GetFloatValue(UNIT_FIELD_MINRANGEDDAMAGE);
     data << bot->GetFloatValue(UNIT_FIELD_MAXRANGEDDAMAGE);
 
+    // ── Snapshot v3: the buyback shelf. The twelve PLAYER_VENDOR_BUYBACK_SLOT
+    // guids, their prices/timestamps and the Item objects they point at are all
+    // owner-only, so the commander's Merchant Buyback tab rendered empty for a
+    // driven bot while its bags worked. u8 count, then per occupied slot:
+    // u8 index (0-11), u64 itemGuid, u32 entry, u32 stack, u32 price,
+    // u32 timestamp. Appended after the v2 stat block; older clients stop
+    // reading before this and are unharmed.
+    size_t buybackCountPos = data.wpos();
+    data << uint8(0);
+    uint8 buybackCount = 0;
+    for (uint32 i = 0; i < BUYBACK_SLOT_END - BUYBACK_SLOT_START; ++i)
+    {
+        Item* item = bot->GetItemFromBuyBackSlot(BUYBACK_SLOT_START + i);
+        if (!item)
+            continue;
+        // Same anti-datamining waiver as AppendSnapshotItem: an item on a party
+        // member's buyback shelf is discovered by any honest reading of the rule.
+        if (ItemPrototype const* proto = item->GetProto())
+            proto->Discovered = true;
+        data << uint8(i);
+        data << uint64(item->GetObjectGuid().GetRawValue());
+        data << uint32(item->GetEntry());
+        data << uint32(item->GetCount());
+        data << uint32(bot->GetUInt32Value(PLAYER_FIELD_BUYBACK_PRICE_1 + i));
+        data << uint32(bot->GetUInt32Value(PLAYER_FIELD_BUYBACK_TIMESTAMP_1 + i));
+        ++buybackCount;
+    }
+    data.put<uint8>(buybackCountPos, buybackCount);
+
     to->SendPacket(&data);
 }
 
@@ -1096,6 +1157,16 @@ static void SendMemberFacts(WorldSession* to, Player* bot)
 {
     SendSnapshot(to, bot);
     SendMemberSpells(to, bot);
+}
+
+// [SUI] Re-push the driven bot's owner-only facts (bags/coinage/stats + spells) to the commander
+// after the commander changed the bot's bags via ItemHandler (swap/split/equip through GetSuiActor).
+// The bot has no client session, so its private item fields never stream to the commander otherwise
+// — without this the rearrange/equip would silently not show. Public: ItemHandler calls it.
+void ResnapshotControlled(WorldSession* session)
+{
+    if (Player* bot = GetControlledBot(session))
+        SendMemberFacts(session, bot);
 }
 
 /// Fan the whole group's AiBot facts out to one real SUI member.
@@ -1481,6 +1552,196 @@ void HandleGiverStatus(WorldSession* session,
     session->SendPacket(&data);
 }
 
+// -- Giver quests + per-member eligibility (PLAN_20 Model B) -------------------
+// The commander-view quest window needs, for one NPC, the quests it offers or ends
+// and each member's verdict — none of which vanilla ever tells the client. The
+// verdict order mirrors CanTakeQuest's own check order so the first failing reason
+// is the one reported, exactly as the giver frame would have refused it.
+
+static uint8 QuestEligibilityFor(Player* member, Quest const* q, bool ends)
+{
+    uint32 id = q->GetQuestId();
+    QuestStatus st = member->GetQuestStatus(id);
+    bool held = (st == QUEST_STATUS_INCOMPLETE || st == QUEST_STATUS_COMPLETE);
+
+    if (member->GetQuestRewardStatus(id) && !q->IsRepeatable())
+        return SuiPossess::GIVER_QUEST_DONE;
+    if (held)
+    {
+        // READY becomes a "Turn in" button AT THIS GIVER on the client, so it
+        // may only be said by a giver that actually ENDS the quest. At a
+        // start-only giver a held-complete quest is still just "on it" — its
+        // turn-in point is somewhere else (owner report 2026-08-27: the modal
+        // offered a turn-in at the quest's ACCEPT NPC).
+        if (st == QUEST_STATUS_COMPLETE && ends)
+            return SuiPossess::GIVER_QUEST_READY;
+        return SuiPossess::GIVER_QUEST_ON_IT;
+    }
+    if (ends)
+        return SuiPossess::GIVER_QUEST_CANT;   // ends it, but this member does not hold it
+
+    // Giver STARTS it and the member does not hold it: can they take it, and if not,
+    // which check is the one that refuses them?
+    if (member->CanTakeQuest(q, false))
+        return SuiPossess::GIVER_QUEST_CAN_TAKE;
+    if (!member->SatisfyQuestLevel(q, false))
+        return SuiPossess::GIVER_QUEST_LOW_LEVEL;
+    if (!member->SatisfyQuestRace(q, false) || !member->SatisfyQuestClass(q, false))
+        return SuiPossess::GIVER_QUEST_WRONG_RACE_CLASS;
+    if (!member->SatisfyQuestPreviousQuest(q, false) ||
+        !member->SatisfyQuestPrevChain(q, false) ||
+        !member->SatisfyQuestBreadcrumbQuest(q, false) ||
+        !member->SatisfyQuestDependentBreadcrumbQuests(q, false))
+        return SuiPossess::GIVER_QUEST_NEEDS_PREREQ;
+    if (!member->SatisfyQuestSkill(q, false) ||
+        !member->SatisfyQuestReputation(q, false) ||
+        !member->SatisfyQuestCondition(q, false))
+        return SuiPossess::GIVER_QUEST_LOW_SKILL_REP;
+    if (!member->SatisfyQuestLog(false))
+        return SuiPossess::GIVER_QUEST_LOG_FULL;
+    return SuiPossess::GIVER_QUEST_CANT;
+}
+
+void HandleGiverQuests(WorldSession* session, ObjectGuid giver)
+{
+    session->SetSuiCapable(true);
+    Player* requester = session->GetPlayer();
+    if (!requester || session->GetBot() || giver.IsEmpty())
+        return;
+
+    // Resolved against the REQUESTER: they are the one looking at the NPC.
+    Object* questgiver =
+        requester->GetObjectByTypeMask(giver, TYPEMASK_CREATURE_OR_GAMEOBJECT);
+    if (!questgiver)
+        return;
+
+    uint32 entry = questgiver->GetEntry();
+    QuestRelationsMapBounds starts, ends;
+    if (questgiver->GetTypeId() == TYPEID_UNIT)
+    {
+        starts = sObjectMgr.GetCreatureQuestRelationsMapBounds(entry);
+        ends = sObjectMgr.GetCreatureQuestInvolvedRelationsMapBounds(entry);
+    }
+    else
+    {
+        starts = sObjectMgr.GetGOQuestRelationsMapBounds(entry);
+        ends = sObjectMgr.GetGOQuestInvolvedRelationsMapBounds(entry);
+    }
+
+    // Members = self first, then every party AiBot we may answer for.
+    std::vector<Player*> members;
+    members.push_back(requester);
+    if (Group* group = requester->GetGroup())
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            if (member && member != requester && member->IsInWorld() &&
+                IsMemberFactsSubject(requester, member))
+                members.push_back(member);
+        }
+
+    // De-duplicated quest list with a relation flag (bit0 starts, bit1 ends).
+    std::map<uint32, uint8> relById;
+    for (QuestRelationsMap::const_iterator itr = starts.first; itr != starts.second; ++itr)
+        relById[itr->second] |= 0x01;
+    for (QuestRelationsMap::const_iterator itr = ends.first; itr != ends.second; ++itr)
+        relById[itr->second] |= 0x02;
+
+    // Owner 2026-08-27: present the quests in DO-ORDER — a chain's steps kept
+    // together and in sequence — rather than raw quest-id order. The chain data
+    // (PrevQuestId) never reaches the client, so the ordering is decided here:
+    // walk each quest's PrevQuestId links up to its chain root, then sort by the
+    // root's level (where the storyline begins), root id, and depth within the
+    // chain. Standalone quests are one-step chains and interleave naturally.
+    struct GiverQuestRow
+    {
+        uint32 questId;
+        uint8 relation;
+        uint32 rootLevel;
+        uint32 rootId;
+        uint32 depth;
+    };
+    std::vector<GiverQuestRow> rows;
+    rows.reserve(relById.size());
+    for (auto const& kv : relById)
+    {
+        Quest const* q = sObjectMgr.GetQuestTemplate(kv.first);
+        if (!q || !q->IsActive())
+            continue;
+        uint32 rootId = kv.first;
+        uint32 depth = 0;
+        for (Quest const* step = q; step && depth < 32; ++depth)
+        {
+            int32 prevSigned = step->GetPrevQuestId();
+            uint32 prev = prevSigned ? uint32(std::abs(prevSigned)) : 0;
+            if (!prev || prev == rootId)
+                break;                          // no earlier step, or a data cycle
+            Quest const* prevQuest = sObjectMgr.GetQuestTemplate(prev);
+            if (!prevQuest)
+                break;
+            rootId = prev;
+            step = prevQuest;
+        }
+        Quest const* root = sObjectMgr.GetQuestTemplate(rootId);
+        uint32 rootLevel = root ? root->GetQuestLevel() : q->GetQuestLevel();
+        rows.push_back({ kv.first, kv.second, rootLevel, rootId, depth });
+    }
+    std::sort(rows.begin(), rows.end(),
+        [](GiverQuestRow const& a, GiverQuestRow const& b)
+    {
+        if (a.rootLevel != b.rootLevel) return a.rootLevel < b.rootLevel;
+        if (a.rootId != b.rootId) return a.rootId < b.rootId;
+        if (a.depth != b.depth) return a.depth < b.depth;
+        return a.questId < b.questId;
+    });
+
+    // Body: per quest -> u32 questId, u8 relation, u8 memberCount,
+    //       then per member -> u64 guid, u8 verdict.
+    ByteBuffer body;
+    uint16 questCount = 0;
+    for (GiverQuestRow const& row : rows)
+    {
+        Quest const* q = sObjectMgr.GetQuestTemplate(row.questId);
+        if (!q)
+            continue;
+        bool startsIt = (row.relation & 0x01) != 0;
+        bool endsIt = (row.relation & 0x02) != 0;
+
+        body << uint32(row.questId);
+        body << uint8(row.relation);
+        size_t countPos = body.wpos();
+        body << uint8(0);
+        uint8 memberCount = 0;
+        for (Player* member : members)
+        {
+            QuestStatus st = member->GetQuestStatus(row.questId);
+            bool holds = (st == QUEST_STATUS_INCOMPLETE || st == QUEST_STATUS_COMPLETE);
+            uint8 verdict;
+            if (endsIt && holds)
+                verdict = QuestEligibilityFor(member, q, true);
+            else if (startsIt)
+                verdict = QuestEligibilityFor(member, q, false);
+            else
+                continue;   // a quest this giver only ENDS and the member does not hold
+            body << uint64(member->GetObjectGuid().GetRawValue());
+            body << uint8(verdict);
+            ++memberCount;
+        }
+        body.put<uint8>(countPos, memberCount);
+        ++questCount;
+    }
+
+    if (!session->IsSuiCapable())
+        return;
+    WorldPacket data(SMSG_SUI_GIVER_QUESTS, 1 + 8 + 2 + body.size());
+    data << uint8(0);                       // flags, reserved
+    data << uint64(giver.GetRawValue());
+    data << uint16(questCount);
+    if (body.size() > 0)
+        data.append(body.contents(), body.size());
+    session->SendPacket(&data);
+}
+
 // -- Party quest acts (PLAN_20 P3) --------------------------------------------
 // Owner decision 2026-08-25: accept and turn in for the party in one gesture,
 // with the reward CHOSEN PER BOT BY THE PLAYER. Every subject is authorized and
@@ -1731,7 +1992,8 @@ static Player* ResolveItemMoveEndpoint(Player* requester, ObjectGuid guid)
 }
 
 void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
-    ObjectGuid toGuid, uint8 bag, uint8 slot)
+    ObjectGuid toGuid, uint8 bag, uint8 slot,
+    bool inPlace, uint8 destBag, uint8 destSlot)
 {
     // Only MSUIClient speaks this opcode — same latch as HandleRequest.
     session->SetSuiCapable(true);
@@ -1740,6 +2002,47 @@ void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
         return;
 
     Player* from = ResolveItemMoveEndpoint(requester, fromGuid);
+
+    // In-place rearrange within ONE owner (Ctrl+F party browser same-owner drag):
+    // swap src<->dest on that owner's own bags directly, no possession. from == to.
+    if (inPlace)
+    {
+        if (!from)
+        {
+            SendMemberItemMoveResult(session, ITEM_MOVE_DENIED, fromGuid, toGuid);
+            return;
+        }
+        if (from->GetTradeData())
+        {
+            SendMemberItemMoveResult(session, ITEM_MOVE_UNAVAILABLE, fromGuid, toGuid);
+            return;
+        }
+        if (!from->GetItemByPos(bag, slot))
+        {
+            SendMemberItemMoveResult(session, ITEM_MOVE_NO_ITEM, fromGuid, toGuid);
+            return;
+        }
+        // Same primitive the CMSG_SWAP_ITEM handler ends with; SwapItem validates
+        // the destination internally (empty slot, swap, or same-stack merge).
+        uint16 srcPos = (uint16(bag) << 8) | slot;
+        uint16 dstPos = (uint16(destBag) << 8) | destSlot;
+        from->SwapItem(srcPos, dstPos);
+        SendMemberItemMoveResult(session, ITEM_MOVE_OK, fromGuid, toGuid);
+        // Re-snapshot the one owner to every real SUI member; an own-char owner
+        // also updated through the ordinary owner wire that SwapItem drove.
+        if (Group* group = requester->GetGroup())
+            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                Player* member = itr->getSource();
+                WorldSession* memberSession = member ? member->GetSession() : nullptr;
+                if (!memberSession || memberSession->GetBot() || !memberSession->IsSuiCapable())
+                    continue;
+                if (IsMemberFactsSubject(member, from))
+                    SendMemberFacts(memberSession, from);
+            }
+        return;
+    }
+
     Player* to = ResolveItemMoveEndpoint(requester, toGuid);
     if (!from || !to || from == to)
     {
@@ -1821,6 +2124,36 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_COOLDOWN_EVENT:
         case SMSG_CLEAR_COOLDOWN:
         case SMSG_CAST_RESULT:
+        // [SUI] P4b: the NPC-interaction reply frames of a driven bot. The quest
+        // and gossip handler family now runs as GetSuiActor() (the possessed bot),
+        // so these are built from the BOT's quest state and must reach the
+        // commander's client, which unwraps them in ApplySuiProxy exactly as it
+        // does the spell/bar packets above. Only ever mirrored while the bot is
+        // possessed (GetPossessor gates below) — an autonomous bot mirrors nothing.
+        // Vendor/trainer reply frames are deliberately NOT here yet: their action
+        // handlers still act on _player, so a mirrored list would be misleading.
+        case SMSG_GOSSIP_MESSAGE:
+        case SMSG_GOSSIP_COMPLETE:
+        case SMSG_QUESTGIVER_STATUS:
+        case SMSG_QUESTGIVER_QUEST_LIST:
+        case SMSG_QUESTGIVER_QUEST_DETAILS:
+        case SMSG_QUESTGIVER_REQUEST_ITEMS:
+        case SMSG_QUESTGIVER_OFFER_REWARD:
+        case SMSG_QUESTGIVER_QUEST_INVALID:
+        case SMSG_QUESTGIVER_QUEST_COMPLETE:
+        // [SUI] P4b vendor/trainer/repair: the driven bot's shop and trainer reply
+        // frames. Reached here only when built on the bot's socket-less session (a
+        // gossip "browse goods" / "train" option, or an internal SendBuyError); the
+        // direct vendor/trainer-frame requests already answer on the commander's own
+        // socket. Either way the commander's ApplySuiProxy routes them into the same
+        // vendor/trainer parsers. Inventory/coin edits refresh via ResnapshotControlled.
+        case SMSG_LIST_INVENTORY:
+        case SMSG_SELL_ITEM:
+        case SMSG_BUY_ITEM:
+        case SMSG_BUY_FAILED:
+        case SMSG_TRAINER_LIST:
+        case SMSG_TRAINER_BUY_SUCCEEDED:
+        case SMSG_TRAINER_BUY_FAILED:
             break;
         default:
             return;
@@ -1974,7 +2307,7 @@ void WorldSession::HandleSuiMemberItemMoveOpcode(
     if (!packet.exactSize)
         return;
     SuiPossess::HandleMemberItemMove(this, packet.from, packet.to,
-        packet.bag, packet.slot);
+        packet.bag, packet.slot, packet.inPlace, packet.destBag, packet.destSlot);
 }
 
 void WorldSession::HandleSuiQuestFactsOpcode(
@@ -1999,6 +2332,14 @@ void WorldSession::HandleSuiGiverStatusOpcode(
     if (!packet.exactSize)
         return;
     SuiPossess::HandleGiverStatus(this, packet.givers);
+}
+
+void WorldSession::HandleSuiGiverQuestsOpcode(
+    WorldPackets::SuiControl::GiverQuests const& packet)
+{
+    if (!packet.exactSize)
+        return;
+    SuiPossess::HandleGiverQuests(this, packet.giver);
 }
 
 void WorldSession::HandleSuiPartyQuestOpcode(

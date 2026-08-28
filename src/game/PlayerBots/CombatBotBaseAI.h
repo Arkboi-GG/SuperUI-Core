@@ -112,6 +112,9 @@ public:
     Player* SelectBuffTarget(SpellEntry const* pSingleSpellEntry, SpellEntry const* pGroupSpellEntry, SpellEntry const*& pSelectedSpellEntry) const;
     Player* SelectDispelTarget(SpellEntry const* pSpellEntry) const;
     bool IsValidBuffTarget(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool IsValidMaintenanceBuffTarget(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool IsValidBuffTargetInternal(Unit const* pTarget, SpellEntry const* pSpellEntry,
+                                   bool allowAuraRefresh) const;
     bool IsValidHealTarget(Unit const* pTarget, float healthPercent = 100.0f) const;
     bool IsValidHostileTarget(Unit const* pTarget) const;
     bool IsValidDispelTarget(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
@@ -130,9 +133,12 @@ public:
     SpellCastResult DoCastSpell(Unit* pTarget, SpellEntry const* pSpellEntry);
     virtual bool CanTryToCastSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
     bool CanTryToCastStackingSpell(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool CanTryToRefreshAura(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
     bool CanTryToCastSpellAfterLeavingForm(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
+    bool CanTryToRefreshAuraAfterLeavingForm(Unit const* pTarget, SpellEntry const* pSpellEntry) const;
     bool CanTryToCastSpellInternal(Unit const* pTarget, SpellEntry const* pSpellEntry,
-                                   bool allowExistingAuraStack, bool ignoreShapeshift) const;
+                                   bool allowExistingAuraStack, bool ignoreShapeshift,
+                                   bool allowAuraRefresh) const;
     bool IsWearingShield(Player* pPlayer) const;
     bool IsInDuel() const;
     CombatBotRoles GetRole() const;

@@ -10,7 +10,7 @@
  *     CB_HITN(me->GetGUIDLow(), "cpp-bridge: dispatch", msgType);
  *
  * Identity is the CALL SITE (__FILE__/__LINE__, design rule R4): the site
- * registers itself on its first armed pass and gets a session-scoped id.
+ * registers itself on its first armed pass and gets a process-epoch-scoped id.
  * When g_mode is 0 (off) a probe costs exactly one volatile load + branch.
  * Mode 1 (shadow) buffers hits per bot; bots the C# side ARMED (ship=1) have
  * their buffer serialized once per second on the bridge tick and sent as
@@ -34,6 +34,11 @@
 namespace CbCircuit
 {
     extern volatile int g_mode;   // 0 = off, 1 = shadow (record; ship only armed bots)
+
+    // Opaque identity for this mangosd process. Numeric probe ids are only
+    // meaningful inside this epoch; HELLO, SITE, and BATCH all carry it so a
+    // C++ restart can never reinterpret an old trace label in a surviving C# host.
+    const char* Epoch();
 
     int  RegisterSite(const char* file, int line, const char* desc);
     void Hit(uint32_t guid, int siteId);
