@@ -253,7 +253,7 @@ logs. Gated behind capability bit 5.
 
 | Field | Type | Notes |
 |---|---|---|
-| flags | u8 | reserved, 0 |
+| flags | u8 | `0x01` requests absolute Unix quest deadlines in the response entries |
 | count | u8 | 0 = the whole group AND the requester's own character |
 | subjects | u64 x count | raw guids |
 
@@ -266,12 +266,12 @@ are rate-limited per session (1/s) INDEPENDENTLY of the member-facts pull, so a
 quest panel and a bag panel cannot starve each other. The server also pushes
 unsolicited on every roster edge (`SuiPossess::BroadcastRoster`).
 
-`SMSG_SUI_QUEST_LOG` (13-byte header + 19-byte fixed-stride entries):
+`SMSG_SUI_QUEST_LOG` (13-byte header + 19- or 23-byte fixed-stride entries):
 
 | Field | Type | Notes |
 |---|---|---|
 | subject | u64 | whose log this is |
-| flags | u8 | reserved, 0 |
+| flags | u8 | `0x01` = each entry includes the optional deadline field |
 | heldCap | u16 | server `Quests.MaxHeld` -- how many quests this character may hold; 0 = not stated |
 | count | u16 | entries following |
 | questId | u32 | per entry |
@@ -280,6 +280,13 @@ unsolicited on every roster edge (`SuiPossess::BroadcastRoster`).
 | slot | u8 | update-field log slot, or 255 when held without one |
 | objectives | u8 x 4 | `m_creatureOrGOcount`, clamped to a byte |
 | items | u16 x 4 | `m_itemcount`, clamped to a u16 |
+| deadline | u32 | only with flag `0x01`; absolute Unix seconds, 0 = untimed |
+
+Timer extension `0x01` is request-negotiated and remembered for the session, so
+legacy clients that send flags `0` continue receiving the original 19-byte entry.
+The absolute deadline matches the player's `QUEST_TIME_OFFSET` update field;
+clients subtract their synchronized server time locally, so countdowns keep
+moving between quest-facts polls.
 
 Entries are gated exactly as the bridge `questBlob` is: **`m_rewarded` is
 skipped**, because VMaNGOS leaves a turned-in quest at `QUEST_STATUS_COMPLETE`

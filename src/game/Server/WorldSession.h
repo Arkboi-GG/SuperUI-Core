@@ -321,6 +321,8 @@ class WorldSession
         // are different user actions and must not starve each other.
         uint32 GetSuiQuestFactsPullMs() const { return m_suiQuestFactsPullMs; }
         void SetSuiQuestFactsPullMs(uint32 ms) { m_suiQuestFactsPullMs = ms; }
+        uint8 GetSuiQuestFactsFlags() const { return m_suiQuestFactsFlags; }
+        void SetSuiQuestFactsFlags(uint8 flags) { m_suiQuestFactsFlags = flags; }
         uint32 GetSuiGiverStatusPullMs() const { return m_suiGiverStatusPullMs; }
         void SetSuiGiverStatusPullMs(uint32 ms) { m_suiGiverStatusPullMs = ms; }
         Player* GetSuiActor();                              // possessed bot while driving one, else _player
@@ -914,6 +916,7 @@ class WorldSession
         bool m_suiCapable = false;                          // session spoke CMSG_SUI_* - may receive SUI SMSGs
         uint32 m_suiMemberFactsPullMs = 0;                  // last CMSG_SUI_MEMBER_FACTS (rate limit)
         uint32 m_suiQuestFactsPullMs = 0;                   // last CMSG_SUI_QUEST_FACTS (rate limit)
+        uint8 m_suiQuestFactsFlags = 0;                     // negotiated CMSG_SUI_QUEST_FACTS extensions
         uint32 m_suiGiverStatusPullMs = 0;                  // last CMSG_SUI_GIVER_STATUS (rate limit)
         ObjectGuid m_suiPortalGuid;                         // currently prepared real-portal object
         uint32 m_suiPortalGeneration = 0;                  // increments when this session prepares a new object
