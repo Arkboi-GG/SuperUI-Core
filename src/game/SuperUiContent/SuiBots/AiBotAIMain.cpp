@@ -48,6 +48,42 @@
 #include "PathFinder.h"
 #include "MoveMap.h"
 
+// A null victim pointer is not proof of a kill: it also clears on evade,
+// leash, and our own AttackStop paths. Classify the remembered victim before
+// crediting it, with one map lookup shared by credit and loot.
+namespace
+{
+    enum class SuiKillVerdict : uint8
+    {
+        Confirmed = 0,
+        TappedAway = 1,
+        Refuted = 2,
+        Unconfirmed = 3,
+    };
+
+    SuiKillVerdict SuiClassifyCorpse(Player* bot, Creature* creature)
+    {
+        if (!creature)
+            return SuiKillVerdict::Unconfirmed;
+        if (!creature->IsDead())
+            return SuiKillVerdict::Refuted;
+        if (creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !creature->IsTappedBy(bot))
+            return SuiKillVerdict::TappedAway;
+        return SuiKillVerdict::Confirmed;
+    }
+
+    SuiKillVerdict SuiClassifyVictimLoss(Player* bot, uint32 victimEntry, uint32 victimGuidLow,
+                                         Creature*& outCreature)
+    {
+        outCreature = nullptr;
+        if (!bot || !bot->GetMap() || victimEntry == 0)
+            return SuiKillVerdict::Unconfirmed;
+        outCreature = bot->GetMap()->GetCreature(
+            ObjectGuid(HIGHGUID_UNIT, victimEntry, victimGuidLow));
+        return SuiClassifyCorpse(bot, outCreature);
+    }
+}
+
 // ============================================================
 // LIFECYCLE
 // ============================================================
@@ -2259,12 +2295,22 @@ void AiBotAI::UpdateAI(uint32 const diff)
         if (!pVictim && m_lastVictimEntry != 0)
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: victim gone, kill check");
-            // Victim pointer cleared = mob died or despawned. Fire kill event.
-            // --- Tapped check: only process kills we actually tagged ---
-            Creature* pKillCreature = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
-            if (pKillCreature && pKillCreature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !pKillCreature->IsTappedBy(me))
+            Creature* pKillCreature = nullptr;
+            SuiKillVerdict const verdict =
+                SuiClassifyVictimLoss(me, m_lastVictimEntry, m_lastVictimGuidLow, pKillCreature);
+
+            if (verdict == SuiKillVerdict::Refuted)
             {
-                CB_HIT(me->GetGUIDLow(), "cpp-main: kill tapped by another, no credit");
+                CB_HITV(me->GetGUIDLow(), "cpp-main: kill refuted, victim still alive", m_lastVictimEntry);
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT] %s: victim (entry=%u guid=%u) is alive — evade/leash/disengage, no kill credit",
+                    me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
+                m_lastVictimEntry = 0;
+                m_lastVictimGuidLow = 0;
+            }
+            else if (verdict == SuiKillVerdict::TappedAway)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: kill refused, corpse tapped by another");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
                     "[AIBOT] %s: mob (entry=%u guid=%u) tapped by another — skipping kill credit",
                     me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
@@ -2273,62 +2319,58 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
-            CB_HITV(me->GetGUIDLow(), "cpp-main: kill credited", m_lastVictimEntry);
-            SendKillEvent(m_lastVictimEntry, m_lastVictimGuidLow);
-            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                "[AIBOT] %s: kill detected (entry=%u guid=%u)",
-                me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
+                bool const confirmed = (verdict == SuiKillVerdict::Confirmed);
+                if (confirmed)
+                    CB_HITV(me->GetGUIDLow(), "cpp-main: kill credited, corpse confirmed", m_lastVictimEntry);
+                else
+                    CB_HITV(me->GetGUIDLow(), "cpp-main: kill unconfirmed, creature absent", m_lastVictimEntry);
 
-            // Queue auto-loot with humanization delay
-            Creature* victim = me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
-            if (victim && victim->IsDead())
-            {
-                CB_HIT(me->GetGUIDLow(), "cpp-main: queueing auto-loot");
-                m_lootTargetGuid = victim->GetObjectGuid();
-                m_lootTimer = urand(1000, 2500);
+                SendKillEvent(m_lastVictimEntry, m_lastVictimGuidLow, confirmed);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-LOOT] %s: loot timer started (%dms) for %s (entry=%u)",
-                    me->GetName(), m_lootTimer, victim->GetName(), m_lastVictimEntry);
-            }
-            else
-            {
-                CB_HIT(me->GetGUIDLow(), "cpp-main: dead creature not found for loot");
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-LOOT] %s: could not find dead creature for loot (entry=%u guid=%u)",
-                    me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow);
-            }
+                    "[AIBOT] %s: kill detected (entry=%u guid=%u confirmed=%u)",
+                    me->GetName(), m_lastVictimEntry, m_lastVictimGuidLow, confirmed ? 1u : 0u);
 
-            if (m_currentTask.type == TASK_GRIND)
-            {
-                CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping");
-                // wolf-meat fix (2026-06-30): MatchesObjectiveEntry checks the primary
-                // dispatched creatureEntry OR any tied item-drop alternate, not exact
-                // equality alone — so a kill on a tied local sibling (e.g. Timber Wolf
-                // when the dispatched entry was Young Wolf) still advances THIS leg's
-                // killCount instead of silently not counting toward the objective.
-                bool matches = (m_currentTask.creatureEntry == 0 ||
-                                m_currentTask.MatchesObjectiveEntry(m_lastVictimEntry));
-                if (matches)
+                if (confirmed)
                 {
-                    CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted", m_currentTask.killCount);
-                    m_currentTask.killCount++;
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: queueing auto-loot");
+                    m_lootTargetGuid = pKillCreature->GetObjectGuid();
+                    m_lootTimer = urand(1000, 2500);
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
-                        me->GetName(), m_currentTask.killCount, m_currentTask.killGoal, m_lastVictimEntry);
-                    if (m_currentTask.killGoal > 0 &&
-                        m_currentTask.killCount >= m_currentTask.killGoal)
+                        "[AIBOT-LOOT] %s: loot timer started (%dms) for %s (entry=%u)",
+                        me->GetName(), m_lootTimer, pKillCreature->GetName(), m_lastVictimEntry);
+                }
+
+                if (m_currentTask.type == TASK_GRIND)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping");
+                    // wolf-meat fix (2026-06-30): MatchesObjectiveEntry checks the primary
+                    // dispatched creatureEntry OR any tied item-drop alternate, not exact
+                    // equality alone — so a kill on a tied local sibling (e.g. Timber Wolf
+                    // when the dispatched entry was Young Wolf) still advances THIS leg's
+                    // killCount instead of silently not counting toward the objective.
+                    bool matches = (m_currentTask.creatureEntry == 0 ||
+                                    m_currentTask.MatchesObjectiveEntry(m_lastVictimEntry));
+                    if (matches)
                     {
-                        CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, TASK_COMPLETE");
+                        CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted", m_currentTask.killCount);
+                        m_currentTask.killCount++;
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                            "[AIBOT] %s: GRIND task complete (%d/%d kills)",
-                            me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
-                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
-                        m_currentTask.Clear();
+                            "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
+                            me->GetName(), m_currentTask.killCount, m_currentTask.killGoal, m_lastVictimEntry);
+                        if (m_currentTask.killGoal > 0 &&
+                            m_currentTask.killCount >= m_currentTask.killGoal)
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, TASK_COMPLETE");
+                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                                "[AIBOT] %s: GRIND task complete (%d/%d kills)",
+                                me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
+                            BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
+                            m_currentTask.Clear();
+                        }
                     }
                 }
-            }
-            m_lastVictimEntry = 0;
-            m_lastVictimGuidLow = 0;
+                m_lastVictimEntry = 0;
+                m_lastVictimGuidLow = 0;
             }
         }
         else if (pVictim && pVictim->IsCreature())
@@ -2899,9 +2941,23 @@ void AiBotAI::UpdateAI(uint32 const diff)
             CB_HIT(me->GetGUIDLow(), "cpp-main: combat victim died");
             uint32 killedEntry = pVictim ? static_cast<Creature*>(pVictim)->GetEntry() : m_lastVictimEntry;
             uint32 killedGuid = pVictim ? pVictim->GetGUIDLow() : m_lastVictimGuidLow;
-            // --- Tapped check: only process kills we actually tagged ---
-            Creature* pKillCreature2 = pVictim ? static_cast<Creature*>(pVictim) : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
-            if (pKillCreature2 && pKillCreature2->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_TAPPED) && !pKillCreature2->IsTappedBy(me))
+            Creature* pKillCreature2 = nullptr;
+            SuiKillVerdict const verdict2 = pVictim
+                ? SuiClassifyCorpse(me, static_cast<Creature*>(pVictim))
+                : SuiClassifyVictimLoss(me, m_lastVictimEntry, m_lastVictimGuidLow, pKillCreature2);
+            if (pVictim)
+                pKillCreature2 = static_cast<Creature*>(pVictim);
+
+            if (verdict2 == SuiKillVerdict::Refuted)
+            {
+                CB_HITV(me->GetGUIDLow(), "cpp-main: combat kill refuted, victim still alive", killedEntry);
+                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                    "[AIBOT] %s: combat victim (entry=%u guid=%u) is alive — no kill credit",
+                    me->GetName(), killedEntry, killedGuid);
+                m_lastVictimEntry = 0;
+                m_lastVictimGuidLow = 0;
+            }
+            else if (verdict2 == SuiKillVerdict::TappedAway)
             {
                 CB_HIT(me->GetGUIDLow(), "cpp-main: combat kill tapped, no credit");
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -2912,50 +2968,57 @@ void AiBotAI::UpdateAI(uint32 const diff)
             }
             else
             {
-            CB_HITV(me->GetGUIDLow(), "cpp-main: combat kill credited", killedEntry);
-            SendKillEvent(killedEntry, killedGuid);
+                bool const confirmed2 = (verdict2 == SuiKillVerdict::Confirmed);
+                if (confirmed2)
+                    CB_HITV(me->GetGUIDLow(), "cpp-main: combat kill credited, corpse confirmed", killedEntry);
+                else
+                    CB_HITV(me->GetGUIDLow(), "cpp-main: combat kill unconfirmed, creature absent", killedEntry);
 
-            // Queue auto-loot with humanization delay
-            Creature* deadCreature = pVictim ? static_cast<Creature*>(pVictim) : me->GetMap()->GetCreature(ObjectGuid(HIGHGUID_UNIT, m_lastVictimEntry, m_lastVictimGuidLow));
-            if (deadCreature && deadCreature->IsDead())
-            {
-                CB_HIT(me->GetGUIDLow(), "cpp-main: queueing loot, combat path");
-                m_lootTargetGuid = deadCreature->GetObjectGuid();
-                m_lootTimer = urand(1000, 2500);
+                SendKillEvent(killedEntry, killedGuid, confirmed2);
                 sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-LOOT] %s: loot timer started (%dms) for entry=%u (in-combat path)",
-                    me->GetName(), m_lootTimer, killedEntry);
-            }
+                    "[AIBOT] %s: combat kill detected (entry=%u guid=%u confirmed=%u)",
+                    me->GetName(), killedEntry, killedGuid, confirmed2 ? 1u : 0u);
 
-            if (m_currentTask.type == TASK_GRIND)
-            {
-                CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping, combat path");
-                // wolf-meat fix (2026-06-30): same MatchesObjectiveEntry widening as the
-                // OOC kill-detect path above — primary or any tied alternate counts.
-                bool matches = (m_currentTask.creatureEntry == 0 ||
-                                m_currentTask.MatchesObjectiveEntry(killedEntry));
-                if (matches)
+                // Queue auto-loot only when the corpse was actually confirmed.
+                if (confirmed2)
                 {
-                    CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted, combat path", m_currentTask.killCount);
-                    m_currentTask.killCount++;
+                    CB_HIT(me->GetGUIDLow(), "cpp-main: queueing loot, combat path");
+                    m_lootTargetGuid = pKillCreature2->GetObjectGuid();
+                    m_lootTimer = urand(1000, 2500);
                     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                        "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
-                        me->GetName(), m_currentTask.killCount, m_currentTask.killGoal, killedEntry);
-                    if (m_currentTask.killGoal > 0 &&
-                        m_currentTask.killCount >= m_currentTask.killGoal)
+                        "[AIBOT-LOOT] %s: loot timer started (%dms) for entry=%u (in-combat path)",
+                        me->GetName(), m_lootTimer, killedEntry);
+                }
+
+                if (m_currentTask.type == TASK_GRIND)
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-task: grind kill bookkeeping, combat path");
+                    // wolf-meat fix (2026-06-30): same MatchesObjectiveEntry widening as the
+                    // OOC kill-detect path above — primary or any tied alternate counts.
+                    bool matches = (m_currentTask.creatureEntry == 0 ||
+                                    m_currentTask.MatchesObjectiveEntry(killedEntry));
+                    if (matches)
                     {
-                        CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, combat path");
+                        CB_HITV(me->GetGUIDLow(), "cpp-task: objective kill counted, combat path", m_currentTask.killCount);
+                        m_currentTask.killCount++;
                         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                            "[AIBOT] %s: GRIND task complete (%d/%d kills)",
-                            me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
-                        BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
-                        m_currentTask.Clear();
+                            "[AIBOT] %s: GRIND kill %d/%d (entry=%u)",
+                            me->GetName(), m_currentTask.killCount, m_currentTask.killGoal, killedEntry);
+                        if (m_currentTask.killGoal > 0 &&
+                            m_currentTask.killCount >= m_currentTask.killGoal)
+                        {
+                            CB_HIT(me->GetGUIDLow(), "cpp-task: grind goal reached, combat path");
+                            sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                                "[AIBOT] %s: GRIND task complete (%d/%d kills)",
+                                me->GetName(), m_currentTask.killCount, m_currentTask.killGoal);
+                            BridgeSendEvent("TASK_COMPLETE", "GRIND finished", m_currentTask.commandCbt);
+                            m_currentTask.Clear();
+                        }
                     }
                 }
-            }
 
-            m_lastVictimEntry = 0;
-            m_lastVictimGuidLow = 0;
+                m_lastVictimEntry = 0;
+                m_lastVictimGuidLow = 0;
             }
         }
 

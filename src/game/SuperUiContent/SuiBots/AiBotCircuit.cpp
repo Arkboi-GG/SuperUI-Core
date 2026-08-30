@@ -6,7 +6,9 @@
 #include "AiBotCircuit.h"
 #include "AiBotAIMain.h"
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -18,6 +20,14 @@ namespace CbCircuit
 {
     volatile int g_mode = 0;
 
+    // Explicit arms remain live when fleet shadow is off. The high-water mark
+    // keeps the hot unarmed path proportional to the number of slots ever used
+    // (four in the normal diagnostic setup), without taking a mutex per probe.
+    static size_t const SHIP_GUID_CAP = 1024;
+    static std::atomic<uint32_t> g_shipGuids[SHIP_GUID_CAP];
+    static std::atomic<size_t> g_shipHighWater(0);
+    static std::mutex g_shipMu;
+
     struct Site
     {
         const char* file;   // basename of __FILE__ (string literal — lives forever)
@@ -27,8 +37,10 @@ namespace CbCircuit
 
     struct HitRec
     {
+        // Correlation ids and entity ids are exact below 2^53. Keeping this as
+        // float collapsed thousands of distinct command ids to one value.
+        double val;
         int site;
-        float val;
         uint8_t kind;       // 0 = bare, 1 = value, 2 = note
         char note[24];
     };
@@ -114,7 +126,7 @@ namespace CbCircuit
 
     void HitV(uint32_t guid, int siteId, double value)
     {
-        HitRec h; h.site = siteId; h.val = (float)value; h.kind = 1; h.note[0] = 0;
+        HitRec h; h.site = siteId; h.val = value; h.kind = 1; h.note[0] = 0;
         Push(guid, h);
     }
 
@@ -133,13 +145,59 @@ namespace CbCircuit
         Push(guid, h);
     }
 
+    bool ShouldRecord(uint32_t guid)
+    {
+        if (g_mode)
+            return true;
+        size_t const n = g_shipHighWater.load(std::memory_order_acquire);
+        for (size_t i = 0; i < n; ++i)
+            if (g_shipGuids[i].load(std::memory_order_relaxed) == guid)
+                return true;
+        return false;
+    }
+
     void SetMode(int mode) { g_mode = mode ? 1 : 0; }
 
     void SetShip(uint32_t guid, bool ship)
     {
         BotBuf* b = Buf(guid);
-        std::lock_guard<std::mutex> lk(b->mu);
-        b->ship = ship;
+        {
+            std::lock_guard<std::mutex> lk(b->mu);
+            b->ship = ship;
+        }
+
+        std::lock_guard<std::mutex> lk(g_shipMu);
+        size_t n = g_shipHighWater.load(std::memory_order_relaxed);
+        if (ship)
+        {
+            size_t empty = n;
+            for (size_t i = 0; i < n; ++i)
+            {
+                uint32_t const current = g_shipGuids[i].load(std::memory_order_relaxed);
+                if (current == guid)
+                    return;
+                if (current == 0 && empty == n)
+                    empty = i;
+            }
+            if (empty < n)
+            {
+                g_shipGuids[empty].store(guid, std::memory_order_release);
+                return;
+            }
+            if (n < SHIP_GUID_CAP)
+            {
+                g_shipGuids[n].store(guid, std::memory_order_release);
+                g_shipHighWater.store(n + 1, std::memory_order_release);
+            }
+            return;
+        }
+
+        for (size_t i = 0; i < n; ++i)
+            if (g_shipGuids[i].load(std::memory_order_relaxed) == guid)
+                g_shipGuids[i].store(0, std::memory_order_release);
+        while (n > 0 && g_shipGuids[n - 1].load(std::memory_order_relaxed) == 0)
+            --n;
+        g_shipHighWater.store(n, std::memory_order_release);
     }
 
     void ResetManifest(uint32_t guid)
@@ -152,7 +210,7 @@ namespace CbCircuit
     void Flush(uint32_t guid, int mapId, int zoneId, float x, float y, float z,
                std::vector<std::string>& out)
     {
-        if (!g_mode)
+        if (!ShouldRecord(guid))
             return;
 
         BotBuf* b = Buf(guid);
@@ -191,20 +249,29 @@ namespace CbCircuit
         }
 
         // 2. The batch: one envelope carrying this second's hits + position (R10).
+        size_t const shown = hits.size() < BATCH_HITS_MAX ? hits.size() : BATCH_HITS_MAX;
+        // The serialization tail used to disappear without contributing to drops.
+        drops += static_cast<uint32_t>(hits.size() - shown);
         std::string batch;
-        batch.reserve(96 + hits.size() * 16);
+        batch.reserve(96 + shown * 20);
         snprintf(line, sizeof(line),
             "{\"type\":\"CIRCUIT_BATCH\",\"payload\":{\"circuitEpoch\":\"%s\",\"guid\":%u,\"map\":%d,\"zone\":%d,\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"drops\":%u,\"h\":[",
             epoch, guid, mapId, zoneId, x, y, z, drops);
         batch += line;
 
-        size_t n = hits.size() < BATCH_HITS_MAX ? hits.size() : BATCH_HITS_MAX;
-        for (size_t i = 0; i < n; ++i)
+        for (size_t i = 0; i < shown; ++i)
         {
             HitRec const& h = hits[i];
             if (i) batch += ',';
             if (h.kind == 1)
-                snprintf(line, sizeof(line), "[%d,%.6g]", h.site, (double)h.val);
+            {
+                if (!std::isfinite(h.val))
+                    snprintf(line, sizeof(line), "[%d,null]", h.site);
+                else if (h.val == std::floor(h.val) && std::fabs(h.val) < 9007199254740992.0)
+                    snprintf(line, sizeof(line), "[%d,%.0f]", h.site, h.val);
+                else
+                    snprintf(line, sizeof(line), "[%d,%.17g]", h.site, h.val);
+            }
             else if (h.kind == 2)
                 snprintf(line, sizeof(line), "[%d,null,\"%s\"]", h.site, h.note);
             else
@@ -218,11 +285,11 @@ namespace CbCircuit
 
 /* ── AiBotAI glue ─────────────────────────────────────────────────────────── */
 
-/* Ship buffered probes once per second from UpdateBridgeTick. Cheap no-op when
- * the mode is off, the socket is down, or this bot isn't armed for shipping. */
+/* Ship buffered probes once per second from UpdateBridgeTick. Fleet shadow may
+ * be off; an explicitly armed bot still records and ships. */
 void AiBotAI::CircuitFlush()
 {
-    if (!CbCircuit::g_mode || !m_bridgeConnected || !me)
+    if (!m_bridgeConnected || !me || !CbCircuit::ShouldRecord(me->GetGUIDLow()))
         return;
     std::vector<std::string> lines;
     CbCircuit::Flush(me->GetGUIDLow(), (int)me->GetMapId(), (int)me->GetZoneId(),
