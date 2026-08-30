@@ -75,8 +75,10 @@ namespace
             { "rate.drop_item_uncommon",   CONFIG_FLOAT_RATE_DROP_ITEM_UNCOMMON },
             { "rate.drop_item_rare",       CONFIG_FLOAT_RATE_DROP_ITEM_RARE },
             { "rate.drop_item_epic",       CONFIG_FLOAT_RATE_DROP_ITEM_EPIC },
+            { "rate.drop_item_reforged",   CONFIG_FLOAT_RATE_DROP_ITEM_REFORGED },
             { "rate.drop_item_legendary",  CONFIG_FLOAT_RATE_DROP_ITEM_LEGENDARY },
             { "rate.drop_item_artifact",   CONFIG_FLOAT_RATE_DROP_ITEM_ARTIFACT },
+            { "rate.drop_item_relic",      CONFIG_FLOAT_RATE_DROP_ITEM_RELIC },
             { "rate.drop_item_referenced", CONFIG_FLOAT_RATE_DROP_ITEM_REFERENCED },
         };
         for (auto const& rate : RATES)

@@ -2441,8 +2441,10 @@ Visibility.ForceActiveObjects      = 1
 #    Rate.Drop.Item.Uncommon
 #    Rate.Drop.Item.Rare
 #    Rate.Drop.Item.Epic
+#    Rate.Drop.Item.Reforged
 #    Rate.Drop.Item.Legendary
 #    Rate.Drop.Item.Artifact
+#    Rate.Drop.Item.Relic
 #    Rate.Drop.Item.Referenced
 #    Rate.Drop.Money
 #         Drop rates (items by quality and money)
@@ -2608,8 +2610,10 @@ Rate.Drop.Item.Normal = 1
 Rate.Drop.Item.Uncommon = 1
 Rate.Drop.Item.Rare = 1
 Rate.Drop.Item.Epic = 1
+Rate.Drop.Item.Reforged = 1
 Rate.Drop.Item.Legendary = 1
 Rate.Drop.Item.Artifact = 1
+Rate.Drop.Item.Relic = 1
 Rate.Drop.Item.Referenced = 1
 Rate.Drop.Money = 1
 Rate.XP.Kill    = 1

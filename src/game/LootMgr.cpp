@@ -36,8 +36,10 @@ static eConfigFloatValues const qualityToRate[MAX_ITEM_QUALITY] =
     CONFIG_FLOAT_RATE_DROP_ITEM_UNCOMMON,                                // ITEM_QUALITY_UNCOMMON
     CONFIG_FLOAT_RATE_DROP_ITEM_RARE,                                    // ITEM_QUALITY_RARE
     CONFIG_FLOAT_RATE_DROP_ITEM_EPIC,                                    // ITEM_QUALITY_EPIC
+    CONFIG_FLOAT_RATE_DROP_ITEM_REFORGED,                                // ITEM_QUALITY_REFORGED
     CONFIG_FLOAT_RATE_DROP_ITEM_LEGENDARY,                               // ITEM_QUALITY_LEGENDARY
     CONFIG_FLOAT_RATE_DROP_ITEM_ARTIFACT,                                // ITEM_QUALITY_ARTIFACT
+    CONFIG_FLOAT_RATE_DROP_ITEM_RELIC,                                   // ITEM_QUALITY_RELIC
 };
 
 LootStore LootTemplates_Creature(     "creature_loot_template",      "creature entry",                     true);
