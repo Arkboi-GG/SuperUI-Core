@@ -817,7 +817,9 @@ public:
     char const* GetEffectiveRotationProfile() const;
 
     // --- Quest/combat/event helpers ---
-    void SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow);
+    // `confirmed` is corpse proof. False means the creature had already left
+    // the map, so the brain can measure inferred kills separately.
+    void SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow, bool confirmed = true);
     void SendQuestUpdateEvent(uint32 questId, const char* status);
     void SendLevelUpEvent(uint32 newLevel);
     // C0 (§5.1): senderGuidLow = GUID low of the sending player (0 when non-player/unresolvable).

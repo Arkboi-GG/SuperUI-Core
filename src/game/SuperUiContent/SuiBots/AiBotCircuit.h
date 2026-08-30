@@ -10,9 +10,9 @@
  *     CB_HITN(me->GetGUIDLow(), "cpp-bridge: dispatch", msgType);
  *
  * Identity is the CALL SITE (__FILE__/__LINE__, design rule R4): the site
- * registers itself on its first armed pass and gets a process-epoch-scoped id.
- * When g_mode is 0 (off) a probe costs exactly one volatile load + branch.
- * Mode 1 (shadow) buffers hits per bot; bots the C# side ARMED (ship=1) have
+ * registers itself on its first recording pass and gets a process-epoch-scoped id.
+ * Mode 0 disables fleet-wide shadow recording but explicitly armed bots still
+ * record; mode 1 buffers hits for every bot. Bots the C# side ARMED (ship=1) have
  * their buffer serialized once per second on the bridge tick and sent as
  * CIRCUIT_SITE / CIRCUIT_BATCH lines, which C# merges into the bot's single
  * timeline (rule R1) with this side's ids offset into their own space (R3).
@@ -33,7 +33,7 @@
 
 namespace CbCircuit
 {
-    extern volatile int g_mode;   // 0 = off, 1 = shadow (record; ship only armed bots)
+    extern volatile int g_mode;   // 0 = armed-only, 1 = fleet shadow (ship only armed bots)
 
     // Opaque identity for this mangosd process. Numeric probe ids are only
     // meaningful inside this epoch; HELLO, SITE, and BATCH all carry it so a
@@ -45,6 +45,7 @@ namespace CbCircuit
     void HitV(uint32_t guid, int siteId, double value);
     void HitN(uint32_t guid, int siteId, const char* note);
 
+    bool ShouldRecord(uint32_t guid);
     void SetMode(int mode);
     void SetShip(uint32_t guid, bool ship);
     void ResetManifest(uint32_t guid);   // after a (re)connect: re-ship site defs to C#
@@ -58,10 +59,11 @@ namespace CbCircuit
 }
 
 /* Probe macros — the site id caches in a function-local static on the first
- * ARMED pass (thread-safe magic static); a disarmed probe never registers. */
+ * recording pass (thread-safe magic static). With fleet shadow off, an unarmed
+ * probe performs only the small lock-free armed-guid scan. */
 #define CB_HIT(guid, desc) \
-    do { if (CbCircuit::g_mode) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::Hit((guid), _cbSite); } } while (0)
+    do { uint32_t const _cbGuid = (guid); if (CbCircuit::ShouldRecord(_cbGuid)) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::Hit(_cbGuid, _cbSite); } } while (0)
 #define CB_HITV(guid, desc, val) \
-    do { if (CbCircuit::g_mode) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::HitV((guid), _cbSite, (double)(val)); } } while (0)
+    do { uint32_t const _cbGuid = (guid); if (CbCircuit::ShouldRecord(_cbGuid)) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::HitV(_cbGuid, _cbSite, (double)(val)); } } while (0)
 #define CB_HITN(guid, desc, note) \
-    do { if (CbCircuit::g_mode) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::HitN((guid), _cbSite, (note)); } } while (0)
+    do { uint32_t const _cbGuid = (guid); if (CbCircuit::ShouldRecord(_cbGuid)) { static const int _cbSite = CbCircuit::RegisterSite(__FILE__, __LINE__, (desc)); CbCircuit::HitN(_cbGuid, _cbSite, (note)); } } while (0)

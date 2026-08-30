@@ -4324,7 +4324,7 @@ void AiBotAI::BridgeHandleResurrect(const char* json)
 // EVENT SENDERS — C++ → C# notifications
 // ============================================================
 
-void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow)
+void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow, bool confirmed)
 {
     if (!m_bridgeConnected)
     {
@@ -4336,8 +4336,8 @@ void AiBotAI::SendKillEvent(uint32 creatureEntry, uint32 creatureGuidLow)
     snprintf(json, sizeof(json),
         "{\"type\":\"EVENT\",\"payload\":{"
         "\"guid\":%u,\"event\":\"KILL\","
-        "\"creature_entry\":%u,\"creature_guid\":%u}}",
-        me->GetGUIDLow(), creatureEntry, creatureGuidLow);
+        "\"creature_entry\":%u,\"creature_guid\":%u,\"confirmed\":%u}}",
+        me->GetGUIDLow(), creatureEntry, creatureGuidLow, confirmed ? 1u : 0u);
     BridgeSend(json);
 }
 
