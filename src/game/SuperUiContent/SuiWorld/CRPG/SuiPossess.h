@@ -172,7 +172,7 @@ namespace SuiPossess
     /// own character — the latter is the only way a client can see quests it
     /// holds past the twenty update-field slots. Rate-limited per session,
     /// separately from the bag/spell pull.
-    void HandleQuestFacts(WorldSession* session,
+    void HandleQuestFacts(WorldSession* session, uint8 flags,
         std::vector<ObjectGuid> const& subjects);
 
     // ── Party quest acts (PLAN_20 P3) ─────────────────────────────────────────

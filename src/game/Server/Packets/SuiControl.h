@@ -127,7 +127,8 @@ namespace WorldPackets
         class QuestFacts final : public ClientPacket
         {
         public:
-            uint8 flags = 0;                    // reserved
+            // 0x01 opts into absolute Unix quest deadlines in response entries.
+            uint8 flags = 0;
             // empty = the whole group AND the requester's own character; the
             // latter is how a client learns about quests it holds past the
             // twenty update-field slots.

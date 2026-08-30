@@ -11,6 +11,7 @@
 #include "ScriptMgr.h"
 #include <algorithm>
 #include <unordered_map>
+#include <set>
 #include <cmath>
 
 #include "AiBotAIMain.h"
@@ -1220,6 +1221,9 @@ void HandleMemberFacts(WorldSession* session, std::vector<ObjectGuid> const& sub
 // requester's own character is a legal subject, because a client cannot see its
 // own quests held past the twenty update-field slots any other way.
 
+static constexpr uint8 QUEST_FACTS_INCLUDE_TIMERS = 0x01;
+static constexpr uint8 QUEST_FACTS_KNOWN_FLAGS = QUEST_FACTS_INCLUDE_TIMERS;
+
 /// The update-field log slot for a quest, or MAX_QUEST_LOG_SIZE when the quest
 /// is held without one. Player::FindQuestSlot is private and this file is not a
 /// friend, so the identical scan runs through the public field accessor. Today
@@ -1243,22 +1247,27 @@ static bool IsQuestFactsSubject(Player* requester, Player* member)
         (requester == member || IsMemberFactsSubject(requester, member));
 }
 
-/// u64 subject, u8 flags, u16 count, then fixed-stride 19-byte entries:
-/// u32 quest, u8 status, u8 entryFlags, u8 slot, u8 objectives[4], u16 items[4].
+/// u64 subject, u8 flags, u16 heldCap, u16 count, then fixed-stride entries:
+/// the original 19 bytes (u32 quest, u8 status, u8 entryFlags, u8 slot,
+/// u8 objectives[4], u16 items[4]), plus an optional trailing u32 absolute Unix
+/// deadline when the requester opted into timer extension 0x01.
 ///
 /// The counters are the SERVER-side truth (m_creatureOrGOcount / m_itemcount),
 /// never the packed update-field mirror: a party member's slots were never
 /// streamed to this client, and a quest held past the twenty slots has no
 /// mirror at all. Item progress especially -- vanilla reads the player's own
 /// bags for that, which is structurally unavailable for anyone else.
-static void SendMemberQuests(WorldSession* to, Player* member)
+static void SendMemberQuests(WorldSession* to, Player* member,
+                             std::set<uint32> const* unionHeld = nullptr)
 {
     if (!to->IsSuiCapable())
         return;
     QuestStatusMap& quests = member->GetQuestStatusMap();
-    WorldPacket data(SMSG_SUI_QUEST_LOG, 8 + 1 + 2 + 2 + 19 * quests.size());
+    bool const includeTimers = (to->GetSuiQuestFactsFlags() & QUEST_FACTS_INCLUDE_TIMERS) != 0;
+    uint32 const entryBytes = includeTimers ? 23 : 19;
+    WorldPacket data(SMSG_SUI_QUEST_LOG, 8 + 1 + 2 + 2 + entryBytes * quests.size());
     data << uint64(member->GetObjectGuid().GetRawValue());
-    data << uint8(0);                       // flags, reserved
+    data << uint8(includeTimers ? QUEST_FACTS_INCLUDE_TIMERS : 0);
     // How many quests this character may HOLD. Not knowable client-side once it
     // stops being the update-field slot count, and the quest log prints it.
     data << uint16(sWorld.getConfig(CONFIG_UINT32_MAX_QUEST_HELD));
@@ -1296,10 +1305,62 @@ static void SendMemberQuests(WorldSession* to, Player* member)
             data << uint8(std::min<uint32>(status.m_creatureOrGOcount[i], 255));
         for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
             data << uint16(std::min<uint32>(status.m_itemcount[i], 65535));
+        if (includeTimers)
+            data << uint32(status.m_timer
+                ? sWorld.GetGameTime() + status.m_timer / IN_MILLISECONDS : 0);
         ++count;
+    }
+    // Rewarded (already turned-in) quests that ANOTHER party member still holds:
+    // report them so the party log can show "completed" for the finisher, without
+    // dumping this character's whole quest history. IsHeldQuestStatus excludes a
+    // plain rewarded quest, so this is a separate, union-gated pass.
+    if (unionHeld)
+    {
+        for (auto const& pair : quests)
+        {
+            QuestStatusData const& status = pair.second;
+            if (Player::IsHeldQuestStatus(pair.first, status))
+                continue;                       // a held/re-held quest already went out above
+            if (!status.m_rewarded)
+                continue;
+            if (unionHeld->find(pair.first) == unionHeld->end())
+                continue;                       // nobody in the party still holds it
+            data << uint32(pair.first);
+            data << uint8(QUEST_STATUS_COMPLETE);
+            data << uint8(0x01 | 0x08);         // complete + rewarded
+            data << uint8(255);                 // no update-field log slot
+            for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+                data << uint8(0);
+            for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+                data << uint16(0);
+            if (includeTimers)
+                data << uint32(0);
+            ++count;
+        }
     }
     data.put<uint16>(countPos, count);
     to->SendPacket(&data);
+}
+
+// The union of quest ids any group member (including the requester) currently
+// HOLDS. Rewarded-quest reporting is gated on this so the wire stays bounded to
+// the quests the party log already shows, never a character's full history.
+static void BuildGroupHeldQuestUnion(Player* requester, std::set<uint32>& out)
+{
+    auto addHeld = [&out](Player* p)
+    {
+        if (!p)
+            return;
+        for (auto const& pair : p->GetQuestStatusMap())
+            if (Player::IsHeldQuestStatus(pair.first, pair.second))
+                out.insert(pair.first);
+    };
+    if (!requester)
+        return;
+    addHeld(requester);
+    if (Group* group = requester->GetGroup())
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            addHeld(itr->getSource());
 }
 
 /// Fan the whole group's quest logs out to one real SUI member, including that
@@ -1309,7 +1370,9 @@ static void PushMemberQuestsTo(Player* realPlayer)
     WorldSession* session = realPlayer ? realPlayer->GetSession() : nullptr;
     if (!session || session->GetBot() || !session->IsSuiCapable())
         return;
-    SendMemberQuests(session, realPlayer);
+    std::set<uint32> unionHeld;
+    BuildGroupHeldQuestUnion(realPlayer, unionHeld);
+    SendMemberQuests(session, realPlayer, &unionHeld);
     Group* group = realPlayer->GetGroup();
     if (!group)
         return;
@@ -1317,17 +1380,21 @@ static void PushMemberQuestsTo(Player* realPlayer)
     {
         Player* member = itr->getSource();
         if (member && member->IsInWorld() && IsMemberFactsSubject(realPlayer, member))
-            SendMemberQuests(session, member);
+            SendMemberQuests(session, member, &unionHeld);
     }
 }
 
-void HandleQuestFacts(WorldSession* session, std::vector<ObjectGuid> const& subjects)
+void HandleQuestFacts(WorldSession* session, uint8 flags,
+                      std::vector<ObjectGuid> const& subjects)
 {
     // Only MSUIClient speaks this opcode -- same latch as HandleRequest.
     session->SetSuiCapable(true);
     Player* requester = session->GetPlayer();
-    if (!requester || session->GetBot())
+    if (!requester || session->GetBot() || (flags & ~QUEST_FACTS_KNOWN_FLAGS) != 0)
         return;
+    // Remember the opt-in so roster-edge and party-act pushes keep the negotiated
+    // entry shape instead of briefly replacing timed facts with legacy rows.
+    session->SetSuiQuestFactsFlags(flags);
     uint32 nowMs = WorldTimer::getMSTime();
     if (session->GetSuiQuestFactsPullMs() &&
         WorldTimer::getMSTimeDiff(session->GetSuiQuestFactsPullMs(), nowMs) < 1000)
@@ -1339,11 +1406,13 @@ void HandleQuestFacts(WorldSession* session, std::vector<ObjectGuid> const& subj
         PushMemberQuestsTo(requester);
         return;
     }
+    std::set<uint32> unionHeld;
+    BuildGroupHeldQuestUnion(requester, unionHeld);
     for (ObjectGuid guid : subjects)
     {
         Player* member = sObjectMgr.GetPlayer(guid);
         if (member && member->IsInWorld() && IsQuestFactsSubject(requester, member))
-            SendMemberQuests(session, member);
+            SendMemberQuests(session, member, &unionHeld);
     }
 }
 
@@ -1908,10 +1977,18 @@ void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
                 if (reward == 255)
                 {
                     // "Auto" means the spec-aware pick the fleet already uses.
-                    // Our own character has no such chooser and the client always
-                    // has a picker for it, so auto-for-self is a refusal, not a 0.
+                    // Our own character has no such chooser, so it leans on the
+                    // client picker - but ONLY when the quest actually offers a
+                    // choice. A fixed/no-reward quest (e.g. 783 "A Threat Within")
+                    // has nothing to pick, so auto-for-self there is a plain 0, not
+                    // a refusal the client could never satisfy (no picker is shown).
                     if (!ai)
-                        result = PARTY_QUEST_NEEDS_CHOICE;
+                    {
+                        if (pQuest->GetRewChoiceItemsCount() > 0)
+                            result = PARTY_QUEST_NEEDS_CHOICE;
+                        else
+                            reward = 0;
+                    }
                     else
                         reward = ai->ChooseQuestReward(pQuest);
                 }
@@ -1958,8 +2035,10 @@ void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
 
     // Push fresh quest logs for everyone whose log actually moved, rather than
     // making the client re-pull (which is rate-limited to one per second).
+    std::set<uint32> unionHeld;
+    BuildGroupHeldQuestUnion(session->GetPlayer(), unionHeld);
     for (Player* subject : touched)
-        SendMemberQuests(session, subject);
+        SendMemberQuests(session, subject, &unionHeld);
 }
 
 // ── Party item move (Phase C v1, owner 2026-08-25) ───────────────────────────
@@ -2315,7 +2394,7 @@ void WorldSession::HandleSuiQuestFactsOpcode(
 {
     if (!packet.exactSize)
         return;
-    SuiPossess::HandleQuestFacts(this, packet.subjects);
+    SuiPossess::HandleQuestFacts(this, packet.flags, packet.subjects);
 }
 
 void WorldSession::HandleSuiPartyLeadOpcode(
