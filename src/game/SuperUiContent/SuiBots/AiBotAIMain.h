@@ -286,6 +286,7 @@ struct AiBotTaskData
 {
     AiBotTask type       = TASK_IDLE;
     uint64 commandCbt    = 0;       // protocol-v4 owner of async terminal outcomes for this task
+    bool isRtsCommand = false; // player-issued RTS order
     uint32 questId       = 0;
     float x              = 0.0f;
     float y              = 0.0f;
@@ -337,6 +338,7 @@ struct AiBotTaskData
     {
         type = TASK_IDLE;
         commandCbt = 0;
+        isRtsCommand = false;
         questId = 0;
         x = y = z = radius = 0.0f;
         npcGuid = 0;

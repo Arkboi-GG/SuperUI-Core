@@ -332,6 +332,7 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
     uint32 botLevel = me->GetLevel();
     uint32 maxSafeLevel = botLevel + 3;
     uint32 myMapId = me->GetMapId();
+    bool isRtsCommand = m_currentTask.isRtsCommand;
 
     // Cache bot faction template for hostility checks
     FactionTemplateEntry const* botFTE = me->GetFactionTemplateEntry();
@@ -432,22 +433,29 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
             // ── Level check ──
             if (cInfo->level_max > maxSafeLevel)
             {
-                CB_HITV(me->GetGUIDLow(), "cpp-path: corridor UNSAFE, hostile level on path", cInfo->level_max);
-                unsafeX = pt.x;
-                unsafeY = pt.y;
-                unsafeZ = pt.z;
-                dangerLevel = cInfo->level_max;
+                if (isRtsCommand)
+                {
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                             "[AIBOT-PATH] %s: RTS override — allowing unsafe waypoint "
+                             "(%.1f, %.1f, %.1f) '%s' (entry=%u) lvl %u-%u, bot lvl %u (safe<=%u)",
+                             me->GetName(), pt.x, pt.y, pt.z, cInfo->name.c_str(), entry, cInfo->level_min, cInfo->level_max, botLevel, maxSafeLevel);
+                }
+                else
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-path: corridor UNSAFE, hostile level on path", cInfo->level_max);
 
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-PATH] %s: UNSAFE at waypoint %u/%u (%.1f, %.1f, %.1f) — "
-                    "'%s' (entry=%u) lvl %u-%u, bot lvl %u (safe<=%u)",
-                    me->GetName(), i, (uint32)points.size(),
-                    pt.x, pt.y, pt.z,
-                    cInfo->name.c_str(), entry,
-                    cInfo->level_min, cInfo->level_max,
-                    botLevel, maxSafeLevel);
+                    unsafeX = pt.x;
+                    unsafeY = pt.y;
+                    unsafeZ = pt.z;
+                    dangerLevel = cInfo->level_max;
 
-                return false;
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                             "[AIBOT-PATH] %s: UNSAFE at waypoint %u/%u (%.1f, %.1f, %.1f) — "
+                             "'%s' (entry=%u) lvl %u-%u, bot lvl %u (safe<=%u)",
+                             me->GetName(), i, (uint32)points.size(), pt.x, pt.y, pt.z, cInfo->name.c_str(), entry, cInfo->level_min, cInfo->level_max, botLevel, maxSafeLevel);
+
+                    return false;
+                }
             }
         }
     }
@@ -492,18 +500,26 @@ bool AiBotAI::IsPathSafe(float destX, float destY, float destZ,
 
             if (cInfo->level_max > maxSafeLevel)
             {
-                CB_HITV(me->GetGUIDLow(), "cpp-path: dest UNSAFE, hostile level at dest", cInfo->level_max);
-                unsafeX = pt.x;
-                unsafeY = pt.y;
-                unsafeZ = pt.z;
-                dangerLevel = cInfo->level_max;
-                sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
-                    "[AIBOT-PATH] %s: UNSAFE at dest (%.1f, %.1f, %.1f) — "
-                    "'%s' (entry=%u) lvl %u-%u",
-                    me->GetName(), pt.x, pt.y, pt.z,
-                    cInfo->name.c_str(), entry,
-                    cInfo->level_min, cInfo->level_max);
-                return false;
+                if (m_currentTask.isRtsCommand)
+                {
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                             "[AIBOT-PATH] %s: RTS override - allowing unsafe destination "
+                             "(%.1f, %.1f, %.1f) '%s' (entry=%u) lvl %u-%u",
+                             me->GetName(), pt.x, pt.y, pt.z, cInfo->name.c_str(), entry, cInfo->level_min, cInfo->level_max);
+                }
+                else
+                {
+                    CB_HITV(me->GetGUIDLow(), "cpp-path: dest UNSAFE, hostile level at dest", cInfo->level_max);
+                    unsafeX = pt.x;
+                    unsafeY = pt.y;
+                    unsafeZ = pt.z;
+                    dangerLevel = cInfo->level_max;
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                             "[AIBOT-PATH] %s: UNSAFE at dest (%.1f, %.1f, %.1f) — "
+                             "'%s' (entry=%u) lvl %u-%u",
+                             me->GetName(), pt.x, pt.y, pt.z, cInfo->name.c_str(), entry, cInfo->level_min, cInfo->level_max);
+                    return false;
+                }
             }
         }
     }
@@ -609,7 +625,9 @@ bool AiBotAI::StartNextPathChunk()
 
 void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stopCurrentMovement)
 {
-    if (me->IsInCombat())
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-MOVE] %s MoveToDestination RTS=%s combat=%s dest=(%.1f %.1f %.1f)", me->GetName(), m_currentTask.isRtsCommand ? "YES" : "NO", me->IsInCombat() ? "YES" : "NO", destX, destY, destZ);
+
+    if (me->IsInCombat() && !m_currentTask.isRtsCommand)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-move: in combat, deferring MOVE_TO, task armed for resume");
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
@@ -627,6 +645,11 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         m_currentTask.y = destY;
         m_currentTask.z = destZ;
         return;
+    }
+
+    if (me->IsInCombat() && m_currentTask.isRtsCommand)
+    {
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: RTS MOVE_TO overriding combat movement lock", me->GetName());
     }
 
     // ── PATH-SMOOTHING JOURNEY SEED ──
