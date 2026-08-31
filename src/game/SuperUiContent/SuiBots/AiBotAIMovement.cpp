@@ -786,7 +786,7 @@ void AiBotAI::MoveToDestination(float destX, float destY, float destZ, bool stop
         uint64 const taskCbt = m_currentTask.commandCbt;
         SuiAbandonJourney();
         BridgeSendEvent("PATH_UNSAFE", eventData, taskCbt);
-        return;CB_HIT(me->GetGUIDLow(), "cpp-move: preempting prior task before cbt replacement");
+        return;
     }
 
     // ── Generate mmap path and check result ──
