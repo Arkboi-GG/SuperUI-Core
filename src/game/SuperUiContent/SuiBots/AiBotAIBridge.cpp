@@ -1265,6 +1265,8 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
         }
     }
 
+    m_currentTask.isRtsCommand = m_suiCommanderLine;
+
     sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT-BRIDGE] %s: MOVE_TO map=%d (%.1f, %.1f, %.1f)%s",
         me->GetName(), mapId, x, y, z, entry ? " [objective]" : "");
 
@@ -1272,6 +1274,8 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
     // point movement synchronously and calls MovementInform; both arrival guards make that
     // cancellation callback a no-op. Combat keeps its existing defer-without-stopping behavior:
     // the task-dest guard remains raised until the first out-of-combat tick performs the Clear.
+    // Normal combat movement is deferred, but commander-issued RTS movement
+    // is allowed to override the combat movement lock.
     m_suppressTaskDestInform = true;
     CancelPendingNpcInteraction("move_to");
     if (!me->IsInCombat())
@@ -1280,12 +1284,14 @@ void AiBotAI::BridgeHandleMoveTo(const char* json)
         StopMoving();
     }
     ClearStoredPath();
+    bool const isRts = m_suiCommanderLine;
     m_currentTask.Clear();
 
     // Stash the objective hint on the task BEFORE MoveToDestination. MoveToDestination
     // only writes type/x/y/z, so these persist through every continuation leg until the
     // approach scan or an arrival hands off to GRIND (re-centering on the bot).
     m_currentTask.commandCbt    = m_bridgeDispatchCbt;
+    m_currentTask.isRtsCommand = isRts;
     m_currentTask.creatureEntry = (uint32)entry;
     m_currentTask.radius        = grindRadius;
     m_currentTask.killGoal      = killCount;
