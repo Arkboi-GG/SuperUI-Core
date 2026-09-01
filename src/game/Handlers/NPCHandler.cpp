@@ -342,11 +342,20 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
     SpellCastTargets targets;
     targets.setUnitTarget(pActor);
 
+    uint32 const learnedSpellId = proto->EffectTriggerSpell[0];
     SpellCastResult cast_result = spell->prepare(std::move(targets));
     spell->update(1); // Update the spell right now. Prevents desynch => take twice the money if you click really fast.
 
-    // Only charge player if cast of learning spell was successful.
-    if (cast_result == SPELL_CAST_OK)
+    // prepare() only reports that the wrapper cast was admitted. The cast can
+    // still finish without executing SPELL_EFFECT_LEARN_SPELL, which used to
+    // charge the player and report success while leaving the trainer row green.
+    // Trainer data is validated at load time to use a learn-spell wrapper, so
+    // make the taught spell authoritative before committing the purchase.
+    if (cast_result == SPELL_CAST_OK && learnedSpellId && !pActor->HasSpell(learnedSpellId))
+        pActor->LearnSpell(learnedSpellId, false);
+
+    // Commit only after the taught spell is present on the acting player.
+    if (cast_result == SPELL_CAST_OK && learnedSpellId && pActor->HasSpell(learnedSpellId))
     {
         pActor->ModifyMoney(-int32(nSpellCost));
         SendTrainingSuccess(packet.guid, packet.spellId);
