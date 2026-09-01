@@ -49,6 +49,7 @@
 #include "AiBotDoctrine.h" // [DOCTRINE] IEngagementDoctrine + ResolveDoctrine/MakeDoctrine (Layer D)
 #include "PlayerBotMgr.h"  // PlayerBotEntry (complete type for m_ownedDummyEntry)
 #include <initializer_list>
+#include <atomic>       // [SUI] fleet-stagger spawn phase counter (see the constructor)
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -432,7 +433,34 @@ public:
           m_bridgeSocket(BRIDGE_INVALID_SOCKET)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] AiBotAI constructor fired (factory creation)");
-        m_updateTimer.Reset(2000);
+
+        // [SUI] STAGGER THE FLEET, OR THE WHOLE FLEET THINKS ON THE SAME TICK.
+        //
+        // This was a flat Reset(2000), and the per-tick reset in UpdateAI is a flat
+        // Reset(AIBOT_UPDATE_INTERVAL). Two constants, no jitter anywhere: every bot
+        // constructed on the same map tick decremented by the same diff and expired on the
+        // same tick, forever. Nothing ever made them diverge. A 300-bot fleet therefore ran
+        // 300 brains on ONE tick per second and almost nothing on the other nine.
+        //
+        // That is what put Map::UpdatePlayers at 200-500ms against a 100ms MapUpdateInterval.
+        // Measured 2026-09-01: 646 over-budget ticks on map 1 in a day, the players phase
+        // ~95% of
+        // every one, median fine with a heavy 300-600ms tail — the signature of a herd, not
+        // of steady load. The client felt it as commands that would not register.
+        //
+        // Spreading the INITIAL phase across one interval spreads the cost across the ticks
+        // in that interval (~10 at MapUpdateInterval 100). No bot's 1Hz rate changes, and the
+        // per-tick Reset preserves whatever offset a bot starts with, so this only has to be
+        // right once. The first tick still lands in [1s, 2s) as it always did.
+        //
+        // The 617 stride must stay COPRIME with AIBOT_UPDATE_INTERVAL: that is what makes the
+        // sequence walk the whole range instead of clustering, so any fleet size spreads
+        // evenly. Stride 1 would pack 300 bots into the first 300ms and fix nothing.
+        // Atomic because bot construction is not guaranteed to be single-threaded.
+        static std::atomic<uint32> s_spawnPhase{0};
+        uint32 const phase =
+            s_spawnPhase.fetch_add(617, std::memory_order_relaxed) % AIBOT_UPDATE_INTERVAL;
+        m_updateTimer.Reset(AIBOT_UPDATE_INTERVAL + phase);
     }
 
     ~AiBotAI()
