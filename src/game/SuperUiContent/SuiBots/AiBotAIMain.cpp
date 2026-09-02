@@ -1556,7 +1556,14 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (m_rotationSubTick.Passed())
     {   // cb:fold hot 4 Hz sub-tick cadence, cast decisions probed inside
         m_rotationSubTick.Reset(AIBOT_ROTATION_SUBTICK_MS);
-        if (!m_possessed && !m_recoveryResetHoldMs
+        // [SUI] Manual primary: the commander swings and casts from the sky, so the body must keep
+        // facing its victim on its own (a driven client turns its own character; this one has no
+        // driver). 4 Hz, planted only - a chasing body already faces where it runs.
+        if (m_suiManual && me && me->IsInWorld() && me->IsAlive() && !me->IsMoving())
+            if (Unit* pVictim = me->GetVictim())
+                if (!me->HasInArc(pVictim, 2 * M_PI_F / 3))
+                    me->SetInFront(pVictim);
+        if (!m_possessed && !m_suiManual && !m_recoveryResetHoldMs
             && HasFastCombatPolicy() && me && me->IsInWorld() && !me->IsBeingTeleported()
             && me->IsAlive() && me->IsInCombat()
             && !me->HasUnitState(UNIT_STATE_CAN_NOT_REACT_OR_LOST_CONTROL)
@@ -1658,6 +1665,22 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: possessed, autonomy suspended, bridge only");
+        UpdateBridgeTick();
+        return;
+    }
+
+    // [SUI] Manual primary: the commander's own keys drive this unit. Orders still land (the RTS
+    // move drained above, ATTACK_TARGET through the bridge below); nothing autonomous runs.
+    if (m_suiManual)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: manual primary, autonomy suspended, bridge only");
+        // Body etiquette the AI used to own: weapons out while fighting, away when clear.
+        // The commander has no sheath key for a unit he is not possessing.
+        bool const fighting = me->IsInCombat() || me->GetVictim() != nullptr;
+        if (fighting && me->GetSheath() == SHEATH_STATE_UNARMED && !me->IsMounted())
+            me->SetSheath(SHEATH_STATE_MELEE);
+        else if (!fighting && me->GetSheath() != SHEATH_STATE_UNARMED && m_suiSheathOverride < 0)
+            me->SetSheath(SHEATH_STATE_UNARMED);
         UpdateBridgeTick();
         return;
     }

@@ -33,6 +33,7 @@
 #include "Util.h"
 #include "Chat.h"
 #include "Anticheat.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: the DRIVEN bot auctions, bids and cancels
 
 // please DO NOT use iterator++, because it is slower than ++iterator!!!
 // post-incrementation is always slower than pre-incrementation !
@@ -40,7 +41,11 @@
 // void called when player click on auctioneer npc
 void WorldSession::HandleAuctionHelloOpcode(WorldPackets::AuctionHouse::AuctionHello const& packet)
 {
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.auctioneerGuid, UNIT_NPC_FLAG_AUCTIONEER);
+    // [SUI] The auction house belongs to the body standing at the auctioneer: the possessed
+    // bot while driving one (its purse, its bags, its auctions), else the session player.
+    // Unpossessed, GetSuiActor() == _player and nothing below changes.
+    Player* pActor = GetSuiActor();
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.auctioneerGuid, UNIT_NPC_FLAG_AUCTIONEER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleAuctionHelloOpcode - %s not found or you can't interact with him.", packet.auctioneerGuid.GetString().c_str());
@@ -48,8 +53,8 @@ void WorldSession::HandleAuctionHelloOpcode(WorldPackets::AuctionHouse::AuctionH
     }
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pActor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pActor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     SendAuctionHello(unit);
 }
@@ -224,7 +229,8 @@ AuctionHouseEntry const* WorldSession::GetCheckedAuctionHouseForAuctioneer(Objec
     // auctioneer case
     else
     {
-        auctioneer = GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_AUCTIONEER);
+        // [SUI] interaction range is measured from the DRIVEN body, not the parked commander.
+        auctioneer = GetSuiActor()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_AUCTIONEER);
         if (!auctioneer)
         {
             sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "Auctioneeer %s accessed in cheating way.", guid.GetString().c_str());
@@ -268,7 +274,11 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
         return;
     }
 
-    Player* pl = GetPlayer();
+    // [SUI] the DRIVEN bot lists the item out of ITS bags and pays the deposit from ITS purse;
+    // the verdict packets stay on this (the commander's) session, and a re-snapshot afterwards
+    // is what makes the bot's shown bags/purse reflect the listing.
+    Player* pl = GetSuiActor();
+    bool suiActing = pl != _player;
 
     AuctionHouseEntry const* auctionHouseEntry = GetCheckedAuctionHouseForAuctioneer(packet.auctioneerGuid);
     if (!auctionHouseEntry)
@@ -306,8 +316,8 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
     }
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pl->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pl->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     if (!packet.itemGuid)
     {
@@ -333,7 +343,7 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
     }
 
     // prevent selling item in bank slot
-    if (_player->IsBankPos(it->GetPos()))
+    if (pl->IsBankPos(it->GetPos()))
     {
         SendAuctionCommandResult(nullptr, AUCTION_STARTED, AUCTION_ERR_INVENTORY, EQUIP_ERR_ITEM_NOT_FOUND);
         return;
@@ -376,7 +386,7 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
     AH->itemGuidLow = it->GetObjectGuid().GetCounter();
     AH->itemTemplate = it->GetEntry();
     AH->owner = pl->GetGUIDLow();
-    AH->ownerAccount = pl->GetSession()->GetAccountId();
+    AH->ownerAccount = pl->GetSession() ? pl->GetSession()->GetAccountId() : GetAccountId();
     AH->startbid = packet.bid;
     AH->bidder = 0;
     AH->bid = 0;
@@ -416,6 +426,8 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
     CharacterDatabase.CommitTransaction();
 
     SendAuctionCommandResult(AH, AUCTION_STARTED, AUCTION_OK);
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 // this function is called when client bids or buys out auction
@@ -449,12 +461,15 @@ void WorldSession::HandleAuctionPlaceBid(WorldPackets::AuctionHouse::AuctionPlac
     // always return pointer
     AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(auctionHouseEntry);
 
+    // [SUI] the DRIVEN bot bids with ITS purse and becomes the bidder of record.
+    Player* pl = GetSuiActor();
+    bool suiActing = pl != _player;
+
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pl->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pl->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     AuctionEntry* auction = auctionHouse->GetAuction(packet.auctionId);
-    Player* pl = GetPlayer();
 
     if (!auction)
     {
@@ -474,7 +489,7 @@ void WorldSession::HandleAuctionPlaceBid(WorldPackets::AuctionHouse::AuctionPlac
 
     // impossible have online own another character (use this for speedup check in case online owner)
     Player* auction_owner = sObjectMgr.GetPlayer(ownerGuid);
-    if (!auction_owner && sObjectMgr.GetPlayerAccountIdByGUID(ownerGuid) == pl->GetSession()->GetAccountId())
+    if (!auction_owner && pl->GetSession() && sObjectMgr.GetPlayerAccountIdByGUID(ownerGuid) == pl->GetSession()->GetAccountId())
     {
         // you cannot bid your another character auction:
         SendAuctionCommandResult(nullptr, AUCTION_BID_PLACED, AUCTION_ERR_BID_OWN);
@@ -573,6 +588,8 @@ void WorldSession::HandleAuctionPlaceBid(WorldPackets::AuctionHouse::AuctionPlac
     CharacterDatabase.BeginTransaction(pl->GetGUIDLow());
     pl->SaveInventoryAndGoldToDB();
     CharacterDatabase.CommitTransaction();
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 // this void is called when auction_owner cancels his auction
@@ -582,14 +599,17 @@ void WorldSession::HandleAuctionRemoveItem(WorldPackets::AuctionHouse::AuctionRe
     if (!auctionHouseEntry)
         return;
 
+    // [SUI] the DRIVEN bot cancels ITS auction and pays the cut from ITS purse.
+    Player* pl = GetSuiActor();
+    bool suiActing = pl != _player;
+
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pl->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pl->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     // always return pointer
     AuctionHouseObject* auctionHouse = sAuctionMgr.GetAuctionsMap(auctionHouseEntry);
     AuctionEntry* auction = auctionHouse->GetAuction(packet.auctionId);
-    Player* pl = GetPlayer();
 
     if (auction && auction->owner == pl->GetGUIDLow())
     {
@@ -639,6 +659,8 @@ void WorldSession::HandleAuctionRemoveItem(WorldPackets::AuctionHouse::AuctionRe
     sAuctionMgr.RemoveAItem(auction->itemGuidLow);
     auctionHouse->RemoveAuction(auction);
     delete auction;
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 
@@ -654,7 +676,8 @@ public:
         {
             sess->SetReceivedAHListRequest(false);
 
-            Player* player = sess->GetPlayer();
+            // [SUI] the owner/bidder pages and the "usable" browse filter are the DRIVEN bot's.
+            Player* player = sess->GetSuiActor();
             if (!player || !player->IsInWorld())
                 return;
 

@@ -540,6 +540,12 @@ public:
     // (doctrine change, possession). Formation orders also stamp a slot facing
     // taken on arrival, and ORDER_SHEATH overrides the auto-arm until combat.
     bool m_suiRtsHold = false;
+    // [SUI] Manual primary (owner 2026-09-01, "primary should always be user controlled"): the
+    // commander drives this unit's actions himself from the Command View. RTS orders still land;
+    // every autonomous decision (rotation, assist, grind, self-care, doctrine) is suspended and
+    // brain errands are fenced like a conscript's. ORDER_AUTO or the free view coming down clears it.
+    bool m_suiManual = false;
+    bool m_suiOrderedAttackPass = false;   // an explicit ATTACK order passing the manual gate
     float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
     int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
 

@@ -36,6 +36,7 @@
 #include "Mail.h"
 #include "TransactionLog.h"
 #include "Policies/SingletonImp.h"
+#include "SuiPossess.h"      // [SUI] GetPossessor: the IP-lock judges a driven bot by its commander
 
 INSTANTIATE_SINGLETON_1(AuctionHouseMgr);
 
@@ -872,7 +873,16 @@ void AuctionEntry::SaveToDB() const
 bool AuctionEntry::IsAvailableFor(Player* player)
 {
     if (!lockedIpAddress.empty())
-        return lockedIpAddress == player->GetSession()->GetRemoteAddress();
+    {
+        // [SUI] the 5-minute anti-snipe IP lock reads the SESSION that is actually browsing: a
+        // possessed bot has no socket of its own, so judge it by its commander's address —
+        // otherwise a bot could not see an auction its own commander just posted (its own).
+        WorldSession* session = player->GetSession();
+        if (Player* possessor = SuiPossess::GetPossessor(player))
+            if (possessor->GetSession())
+                session = possessor->GetSession();
+        return session && lockedIpAddress == session->GetRemoteAddress();
+    }
 
     return true;
 }

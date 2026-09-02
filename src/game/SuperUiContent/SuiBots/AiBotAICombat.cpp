@@ -753,6 +753,13 @@ bool AiBotAI::HandlePullRetreat()
 
 bool AiBotAI::AttackStart(Unit* pVictim)
 {
+    // [SUI] Manual primary: only an explicit RTS ATTACK order (m_suiOrderedAttackPass) may start
+    // a fight; assist, grind, defend and the doctrine all stand down.
+    if (m_suiManual && !m_suiOrderedAttackPass)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-combat: attack start refused, manual primary");
+        return false;
+    }
     m_isBuffing = false;
 
     if (me->IsMounted())

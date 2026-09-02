@@ -33,6 +33,7 @@
 #include "Map.h"
 #include "TradeData.h"
 #include "TransactionLog.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor: the DRIVEN bot trades; ResnapshotControlled refreshes its bags
 
 void WorldSession::SendTradeStatus(TradeStatus status)
 {
@@ -72,17 +73,23 @@ void WorldSession::SendTradeStatus(TradeStatus status)
 
 void WorldSession::HandleIgnoreTradeOpcode(NullClientPacket const& /*packet*/)
 {
-    _player->TradeCancel(true, TRADE_STATUS_IGNORE_YOU);
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    pActor->TradeCancel(true, TRADE_STATUS_IGNORE_YOU);
 }
 
 void WorldSession::HandleBusyTradeOpcode(NullClientPacket const& /*packet*/)
 {
-    _player->TradeCancel(true, TRADE_STATUS_BUSY);
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    pActor->TradeCancel(true, TRADE_STATUS_BUSY);
 }
 
 void WorldSession::SendUpdateTrade(bool trader_state /*= true*/)
 {
-    TradeData* view_trade = trader_state ? _player->GetTradeData()->GetTraderData() : _player->GetTradeData();
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* view_trade = trader_state ? pActor->GetTradeData()->GetTraderData() : pActor->GetTradeData();
 
     WorldPacket data(SMSG_TRADE_STATUS_EXTENDED, (100));    // guess size
     data << uint8(trader_state ? 1 : 0);                    // send trader or own trade windows state (last need for proper show spell apply to non-trade slot)
@@ -131,7 +138,9 @@ void WorldSession::SendUpdateTrade(bool trader_state /*= true*/)
 
 void WorldSession::MoveItems(Item* myItems[], Item* hisItems[])
 {
-    Player* trader = _player->GetTrader();
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    Player* trader = pActor->GetTrader();
     if (!trader)
         return;
 
@@ -140,7 +149,7 @@ void WorldSession::MoveItems(Item* myItems[], Item* hisItems[])
         ItemPosCountVec traderDst;
         ItemPosCountVec playerDst;
         bool traderCanTrade = (myItems[i] == nullptr || trader->CanStoreItem(NULL_BAG, NULL_SLOT, traderDst, myItems[i], false) == EQUIP_ERR_OK);
-        bool playerCanTrade = (hisItems[i] == nullptr || _player->CanStoreItem(NULL_BAG, NULL_SLOT, playerDst, hisItems[i], false) == EQUIP_ERR_OK);
+        bool playerCanTrade = (hisItems[i] == nullptr || pActor->CanStoreItem(NULL_BAG, NULL_SLOT, playerDst, hisItems[i], false) == EQUIP_ERR_OK);
         if (traderCanTrade && playerCanTrade)
         {
             // Ok, if trade item exists and can be stored
@@ -150,11 +159,11 @@ void WorldSession::MoveItems(Item* myItems[], Item* hisItems[])
             {
                 // logging
                 sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "partner storing: %s", myItems[i]->GetGuidStr().c_str());
-                if (_player->GetSession()->GetSecurity() > SEC_PLAYER && sWorld.getConfig(CONFIG_BOOL_GM_LOG_TRADE))
+                if (pActor->GetSession()->GetSecurity() > SEC_PLAYER && sWorld.getConfig(CONFIG_BOOL_GM_LOG_TRADE))
                 {
                     sLog.Player(this, LOG_GM, LOG_LVL_BASIC,
                         "GM %s (Account: %u) trade: %s (Entry: %d Count: %u) to player: %s (Account: %u)",
-                        _player->GetName(), _player->GetSession()->GetAccountId(),
+                        pActor->GetName(), pActor->GetSession()->GetAccountId(),
                         myItems[i]->GetProto()->Name1, myItems[i]->GetEntry(), myItems[i]->GetCount(),
                         trader->GetName(), trader->GetSession()->GetAccountId());
                 }
@@ -182,19 +191,19 @@ void WorldSession::MoveItems(Item* myItems[], Item* hisItems[])
                         "GM %s (Account: %u) trade: %s (Entry: %d Count: %u) to player: %s (Account: %u)",
                         trader->GetName(), trader->GetSession()->GetAccountId(),
                         hisItems[i]->GetProto()->Name1, hisItems[i]->GetEntry(), hisItems[i]->GetCount(),
-                        _player->GetName(), _player->GetSession()->GetAccountId());
+                        pActor->GetName(), pActor->GetSession()->GetAccountId());
                 }
 
                 // If saving is disabled for player who receives the item, it must be deleted from db, or it enables duping.
-                if (_player->IsSavingDisabled())
+                if (pActor->IsSavingDisabled())
                 {
-                    sLog.Out(LOG_BASIC, LOG_LVL_DETAIL, "Item guid %u traded to character %u with disabled saving. Deleting from DB.", hisItems[i]->GetGUIDLow(), _player->GetGUIDLow());
+                    sLog.Out(LOG_BASIC, LOG_LVL_DETAIL, "Item guid %u traded to character %u with disabled saving. Deleting from DB.", hisItems[i]->GetGUIDLow(), pActor->GetGUIDLow());
                     hisItems[i]->DeleteFromInventoryDB();
                     hisItems[i]->DeleteAllFromDB();
                 }
 
                 // store
-                _player->MoveItemToInventory(playerDst, hisItems[i], true, true);
+                pActor->MoveItemToInventory(playerDst, hisItems[i], true, true);
             }
         }
         else
@@ -205,8 +214,8 @@ void WorldSession::MoveItems(Item* myItems[], Item* hisItems[])
             {
                 if (!traderCanTrade)
                     sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "trader can't store item: %s", myItems[i]->GetGuidStr().c_str());
-                if (_player->CanStoreItem(NULL_BAG, NULL_SLOT, playerDst, myItems[i], false) == EQUIP_ERR_OK)
-                    _player->MoveItemToInventory(playerDst, myItems[i], true, true);
+                if (pActor->CanStoreItem(NULL_BAG, NULL_SLOT, playerDst, myItems[i], false) == EQUIP_ERR_OK)
+                    pActor->MoveItemToInventory(playerDst, myItems[i], true, true);
                 else
                     sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "player can't take item back: %s", myItems[i]->GetGuidStr().c_str());
             }
@@ -270,7 +279,9 @@ static void clearAcceptTradeMode(Item **myItems, Item **hisItems)
 
 void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade const& /*packet*/)
 {
-    TradeData* my_trade = _player->m_trade;
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->m_trade;
     if (!my_trade)
         return;
 
@@ -295,14 +306,14 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
     // set before checks to properly undo at problems (it already set in to client)
     my_trade->SetAccepted(true);
 
-    if (_player->GetDistance3dToCenter(trader) > TRADE_DISTANCE)
+    if (pActor->GetDistance3dToCenter(trader) > TRADE_DISTANCE)
     {
         SendTradeStatus(TRADE_STATUS_TARGET_TO_FAR);
         return;
     }
 
     // not accept case incorrect money amount
-    if (my_trade->GetMoney() > _player->GetMoney())
+    if (my_trade->GetMoney() > pActor->GetMoney())
     {
         SendNotification(LANG_NOT_ENOUGH_GOLD);
         my_trade->SetAccepted(false, true);
@@ -318,7 +329,7 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
     }
 
     // prevent losing money due to reaching gold cap
-    if (((int64(_player->GetMoney()) + int64(his_trade->GetMoney()) - int64(my_trade->GetMoney())) > int64(_player->GetMaxMoney())) ||
+    if (((int64(pActor->GetMoney()) + int64(his_trade->GetMoney()) - int64(my_trade->GetMoney())) > int64(pActor->GetMaxMoney())) ||
         ((int64(trader->GetMoney()) + int64(my_trade->GetMoney()) - int64(his_trade->GetMoney())) > int64(trader->GetMaxMoney())))
     {
         SendTradeStatus(TRADE_STATUS_TRADE_CANCELED);
@@ -385,9 +396,9 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
                 return;
             }
 
-            my_spell = new Spell(_player, spellEntry, true);
+            my_spell = new Spell(pActor, spellEntry, true);
             my_spell->SetCastItem(castItem);
-            my_targets.setTradeItemTarget(_player);
+            my_targets.setTradeItemTarget(pActor);
             my_spell->m_targets = my_targets;
 
             SpellCastResult res = my_spell->CheckCast(true);
@@ -449,7 +460,7 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
 
         // test if item will fit in each inventory
         bool hisCanCompleteTrade = (trader->CanStoreItems(myItems, TRADE_SLOT_TRADED_COUNT) == EQUIP_ERR_OK);
-        bool myCanCompleteTrade = (_player->CanStoreItems(hisItems, TRADE_SLOT_TRADED_COUNT) == EQUIP_ERR_OK);
+        bool myCanCompleteTrade = (pActor->CanStoreItems(hisItems, TRADE_SLOT_TRADED_COUNT) == EQUIP_ERR_OK);
 
         clearAcceptTradeMode(myItems, hisItems);
 
@@ -491,8 +502,8 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
             if (Item* item = myItems[i])
             {
                 if (!item->GetGuidValue(ITEM_FIELD_GIFTCREATOR).IsEmpty())
-                    item->SetGuidValue(ITEM_FIELD_GIFTCREATOR, _player->GetObjectGuid());
-                _player->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
+                    item->SetGuidValue(ITEM_FIELD_GIFTCREATOR, pActor->GetObjectGuid());
+                pActor->MoveItemFromInventory(item->GetBagSlot(), item->GetSlot(), true);
             }
             if (Item* item = hisItems[i])
             {
@@ -508,11 +519,11 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
         // logging money
         if (sWorld.getConfig(CONFIG_BOOL_GM_LOG_TRADE))
         {
-            if (_player->GetSession()->GetSecurity() > SEC_PLAYER && my_trade->GetMoney() > 0)
+            if (pActor->GetSession()->GetSecurity() > SEC_PLAYER && my_trade->GetMoney() > 0)
             {
                 sLog.Player(this, LOG_GM, LOG_LVL_BASIC,
                     "GM %s (Account: %u) give money (Amount: %u) to player: %s (Account: %u)",
-                    _player->GetName(), _player->GetSession()->GetAccountId(),
+                    pActor->GetName(), pActor->GetSession()->GetAccountId(),
                     my_trade->GetMoney(),
                     trader->GetName(), trader->GetSession()->GetAccountId());
             }
@@ -522,15 +533,15 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
                     "GM %s (Account: %u) give money (Amount: %u) to player: %s (Account: %u)",
                     trader->GetName(), trader->GetSession()->GetAccountId(),
                     his_trade->GetMoney(),
-                    _player->GetName(), _player->GetSession()->GetAccountId());
+                    pActor->GetName(), pActor->GetSession()->GetAccountId());
             }
         }
 
         // update money
-        _player->ModifyMoney(-int32(my_trade->GetMoney()));
-        _player->LogModifyMoney(his_trade->GetMoney(), "Trade", trader->GetObjectGuid());
+        pActor->ModifyMoney(-int32(my_trade->GetMoney()));
+        pActor->LogModifyMoney(his_trade->GetMoney(), "Trade", trader->GetObjectGuid());
         trader->ModifyMoney(-int32(his_trade->GetMoney()));
-        trader->LogModifyMoney(my_trade->GetMoney(), "Trade", _player->GetObjectGuid());
+        trader->LogModifyMoney(my_trade->GetMoney(), "Trade", pActor->GetObjectGuid());
 
         if (my_spell)
             my_spell->prepare(std::move(my_targets));
@@ -540,17 +551,25 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
 
         // cleanup
         clearAcceptTradeMode(my_trade, his_trade);
-        delete _player->m_trade;
-        _player->m_trade = nullptr;
+        delete pActor->m_trade;
+        pActor->m_trade = nullptr;
         delete trader->m_trade;
         trader->m_trade = nullptr;
 
         // desynchronized with the other saves here, let players save gold per their own serialized transaction
-        _player->SaveInventoryAndGoldToDB();
+        pActor->SaveInventoryAndGoldToDB();
         trader->SaveInventoryAndGoldToDB();
 
         trader->GetSession()->SendTradeStatus(TRADE_STATUS_TRADE_COMPLETE);
         SendTradeStatus(TRADE_STATUS_TRADE_COMPLETE);
+
+        // [SUI] a possessed bot on either side has no socket to stream its private bag
+        // fields; re-push them to its commander so the traded goods show up.
+        if (pActor != _player)
+            SuiPossess::ResnapshotControlled(this);
+        if (Player* possessor = SuiPossess::GetPossessor(trader))
+            if (possessor->GetSession())
+                SuiPossess::ResnapshotControlled(possessor->GetSession());
     }
     else
         trader->GetSession()->SendTradeStatus(TRADE_STATUS_TRADE_ACCEPT);
@@ -558,7 +577,9 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
 
 void WorldSession::HandleUnacceptTradeOpcode(NullClientPacket const& /*packet*/)
 {
-    TradeData* my_trade = _player->m_trade;
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->m_trade;
     if (!my_trade)
         return;
 
@@ -567,7 +588,9 @@ void WorldSession::HandleUnacceptTradeOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleBeginTradeOpcode(NullClientPacket const& /*packet*/)
 {
-    TradeData* my_trade = _player->m_trade;
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->m_trade;
     if (!my_trade)
         return;
 
@@ -585,23 +608,27 @@ void WorldSession::SendCancelTrade(TradeStatus status)
 
 void WorldSession::HandleCancelTradeOpcode(NullClientPacket const& /*packet*/)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     // sent also after LOGOUT COMPLETE
-    if (_player)                                            // needed because STATUS_LOGGEDIN_OR_RECENTLY_LOGGOUT
-        _player->TradeCancel(true);
+    if (_player && pActor)                                 // needed because STATUS_LOGGEDIN_OR_RECENTLY_LOGGOUT
+        pActor->TradeCancel(true);
 }
 
 void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade const& packet)
 {
-    if (GetPlayer()->m_trade)
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    if (pActor->m_trade)
         return;
 
-    if (!GetPlayer()->IsAlive())
+    if (!pActor->IsAlive())
     {
         SendTradeStatus(TRADE_STATUS_YOU_DEAD);
         return;
     }
 
-    if (GetPlayer()->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_PENDING_STUNNED))
+    if (pActor->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_PENDING_STUNNED))
     {
         SendTradeStatus(TRADE_STATUS_YOU_STUNNED);
         return;
@@ -613,13 +640,13 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
         return;
     }
 
-    if (GetPlayer()->IsTaxiFlying() || !GetPlayer()->FindMap())
+    if (pActor->IsTaxiFlying() || !pActor->FindMap())
     {
         SendTradeStatus(TRADE_STATUS_TARGET_TO_FAR);
         return;
     }
 
-    Player* pOther = GetPlayer()->GetMap()->GetPlayer(packet.tradeTargetGuid);
+    Player* pOther = pActor->GetMap()->GetPlayer(packet.tradeTargetGuid);
 
     if (!pOther)
     {
@@ -627,7 +654,7 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
         return;
     }
 
-    if (pOther == GetPlayer() || pOther->m_trade)
+    if (pOther == pActor || pOther->m_trade)
     {
         SendTradeStatus(TRADE_STATUS_BUSY);
         return;
@@ -657,13 +684,13 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
         return;
     }
 
-    if (!sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_TRADE) && pOther->GetTeam() != _player->GetTeam())
+    if (!sWorld.getConfig(CONFIG_BOOL_ALLOW_TWO_SIDE_INTERACTION_TRADE) && pOther->GetTeam() != pActor->GetTeam())
     {
         SendTradeStatus(TRADE_STATUS_WRONG_FACTION);
         return;
     }
 
-    if (_player->GetDistance3dToCenter(pOther) > TRADE_DISTANCE)
+    if (pActor->GetDistance3dToCenter(pOther) > TRADE_DISTANCE)
     {
         SendTradeStatus(TRADE_STATUS_TARGET_TO_FAR);
         return;
@@ -676,28 +703,30 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
     }
 
     // OK start trade
-    _player->m_trade = new TradeData(_player, pOther);
-    pOther->m_trade = new TradeData(pOther, _player);
+    pActor->m_trade = new TradeData(pActor, pOther);
+    pOther->m_trade = new TradeData(pOther, pActor);
 
     // Set the scam prevention, a delay  of 200 ms should suffice
-    _player->m_trade->SetScamPreventionDelay(200);
+    pActor->m_trade->SetScamPreventionDelay(200);
     pOther->m_trade->SetScamPreventionDelay(200);
 
     WorldPacket data(SMSG_TRADE_STATUS, 12);
     data << uint32(TRADE_STATUS_BEGIN_TRADE);
-    data << ObjectGuid(_player->GetObjectGuid());
+    data << ObjectGuid(pActor->GetObjectGuid());
     pOther->GetSession()->SendPacket(&data);
 }
 
 void WorldSession::HandleSetTradeGoldOpcode(WorldPackets::Trade::SetTradeGold const& packet)
 {
-    TradeData* my_trade = _player->GetTradeData();
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
     TradeData* his_trade = my_trade->GetTrader()->m_trade;
     if (!his_trade)
         return;
-    if (packet.gold > _player->GetMoney())
+    if (packet.gold > pActor->GetMoney())
         return;
 
     // gold can be incorrect, but this is checked at trade finished.
@@ -709,7 +738,9 @@ void WorldSession::HandleSetTradeGoldOpcode(WorldPackets::Trade::SetTradeGold co
 
 void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem const& packet)
 {
-    TradeData* my_trade = _player->GetTradeData();
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
     TradeData* his_trade = my_trade->GetTrader()->m_trade;
@@ -724,7 +755,7 @@ void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem co
     }
 
     // check cheating, can't fail with correct client operations
-    Item* item = _player->GetItemByPos(packet.bag, packet.slot);
+    Item* item = pActor->GetItemByPos(packet.bag, packet.slot);
     if (!item || (packet.tradeSlot != TRADE_SLOT_NONTRADED && !item->CanBeTraded()))
     {
         SendTradeStatus(TRADE_STATUS_TRADE_CANCELED);
@@ -732,7 +763,7 @@ void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem co
     }
 
     // prevent trading item from bank slot
-    if (_player->IsBankPos(packet.bag, packet.slot))
+    if (pActor->IsBankPos(packet.bag, packet.slot))
     {
         SendTradeStatus(TRADE_STATUS_TRADE_CANCELED);
         return;
@@ -754,7 +785,9 @@ void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem co
 
 void WorldSession::HandleClearTradeItemOpcode(WorldPackets::Trade::ClearTradeItem const& packet)
 {
-    TradeData* my_trade = _player->GetTradeData();
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
     TradeData* his_trade = my_trade->GetTrader()->m_trade;

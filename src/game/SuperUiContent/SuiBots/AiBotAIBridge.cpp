@@ -775,7 +775,7 @@ void AiBotAI::BridgeProcessLine(const char* line)
     // combat configuration, not errands (an enlisted bot is exactly the one you
     // raid-plan with). Commander-injected RTS orders arrive via
     // SuiInjectCommandLine and pass the fence.
-    if (IsSuiConscripted() && !m_suiCommanderLine &&
+    if ((IsSuiConscripted() || m_suiManual) && !m_suiCommanderLine &&
         strcmp(msgType, "PING") != 0 && strcmp(msgType, "COMBAT_DIRECTIVE") != 0 &&
         strcmp(msgType, "LOAD_ROTATION") != 0 && strcmp(msgType, "APPLY_COMBAT_LOADOUT") != 0 &&
         strcmp(msgType, "LOAD_RAID_PLAN") != 0)
@@ -2458,7 +2458,9 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
         me->AttackStop(false);
         StopMoving();
     }
+    m_suiOrderedAttackPass = true;      // the commander's explicit order passes the manual gate
     AttackStart(pCreature);
+    m_suiOrderedAttackPass = false;
 }
 
 void AiBotAI::BridgeHandleInteractNpc(const char* json)
