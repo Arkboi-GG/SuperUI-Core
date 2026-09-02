@@ -114,8 +114,56 @@ void AiBotAI::OnPlayerLogin()
 // [SUI] Ctrl+RightClick waypoint chain. An idle bot starts the first leg right
 // away through the normal bridge MOVE_TO path (chunked pathfinding included); a
 // bot already walking an ordered leg appends, and arrival chains the next leg.
+WorldSession* AiBotAI::SuiCommanderSession() const
+{
+    if (Player* possessor = SuiPossess::GetPossessor(me))
+        return possessor->GetSession();
+    if (!m_suiConscriptedBy.IsEmpty())
+        if (Player* commander = sObjectMgr.GetPlayer(m_suiConscriptedBy))
+            return commander->GetSession();
+    // A real character commanded from its own free view: its session IS the commander's.
+    if (me && me->GetSession() && !me->GetSession()->GetBot())
+        return me->GetSession();
+    return nullptr;
+}
+
+bool AiBotAI::SuiValidateOrderDest(float& x, float& y, float& z)
+{
+    if (!me || !me->IsInWorld())
+        return false;
+    PathInfo probe(me);
+    probe.calculate(x, y, z);
+    PathType const t = probe.getPathType();
+    bool const airLine = (t & (PATHFIND_SHORTCUT | PATHFIND_NOT_USING_PATH)) && !me->CanFly();
+    if ((t & PATHFIND_NOPATH) || airLine)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-order: dest off the mesh or unreachable, refused");
+        if (WorldSession* commander = SuiCommanderSession())
+            ChatHandler(commander).PSendSysMessage("%s: no path to that spot.", me->GetName());
+        return false;
+    }
+    if (t & PATHFIND_INCOMPLETE)
+    {
+        PointsArray const& pts = probe.getPath();
+        if (pts.size() < 2)
+        {
+            if (WorldSession* commander = SuiCommanderSession())
+                ChatHandler(commander).PSendSysMessage("%s: no path to that spot.", me->GetName());
+            return false;
+        }
+        // Walk to where the mesh actually ends toward the click: the wall, not the far side of it.
+        CB_HIT(me->GetGUIDLow(), "cpp-order: partial path, going to the reachable end");
+        x = pts.back().x;
+        y = pts.back().y;
+        z = pts.back().z;
+    }
+    return true;
+}
+
 void AiBotAI::SuiQueueWaypoint(float x, float y, float z)
 {
+    if (!SuiValidateOrderDest(x, y, z))
+        return;
     if (m_currentTask.type == TASK_MOVE_TO)
     {
         CB_HIT(me->GetGUIDLow(), "cpp-task: waypoint appended to active leg");

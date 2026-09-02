@@ -545,6 +545,12 @@ public:
     // every autonomous decision (rotation, assist, grind, self-care, doctrine) is suspended and
     // brain errands are fenced like a conscript's. ORDER_AUTO or the free view coming down clears it.
     bool m_suiManual = false;
+    // [SUI] Commander orders are STRICT about the navmesh (owner, 2026-09-02): a destination must
+    // be a mesh point with a complete path, or the reachable end of a partial one; no seam
+    // crossing, nudging or ring-scanning toward a spot the commander mis-clicked (an exterior
+    // wall, a roof). Returns false and tells the commander when there is no path at all.
+    bool SuiValidateOrderDest(float& x, float& y, float& z);
+    WorldSession* SuiCommanderSession() const;
     bool m_suiOrderedAttackPass = false;   // an explicit ATTACK order passing the manual gate
     float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
     int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
