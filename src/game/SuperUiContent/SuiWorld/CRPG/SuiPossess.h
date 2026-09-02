@@ -81,6 +81,8 @@ namespace SuiPossess
         ORDER_SHEATH           = 10,  // x >= 0.5 draws weapons; else sheathes until combat
         ORDER_CONSCRIPT        = 11,  // enlist: the brain planner stands down for these bots
         ORDER_DISMISS          = 12,  // muster out: the brain resumes questing in place
+        ORDER_MANUAL           = 13,  // the commander drives this unit's actions himself
+        ORDER_AUTO             = 14,  // hand the unit's actions back to its AI
     };
 
     // SMSG_SUI_CONTROL_ROSTER member flags

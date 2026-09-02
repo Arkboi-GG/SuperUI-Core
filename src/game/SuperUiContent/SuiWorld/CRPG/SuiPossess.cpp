@@ -449,6 +449,20 @@ void HandleCam(WorldSession* session, float x, float y, float z, bool active)
         // MovementInform still reads "commanded" and chains the next task leg
         // under the feet of the client that is about to really drive it.
         RemoveFreecamEye(player);
+        // Manual primaries are a Command View thing: hand every unit's actions back to its AI.
+        {
+            auto handBack = [](Player* p)
+            {
+                if (!p)
+                    return;
+                if (AiBotAI* ai = dynamic_cast<AiBotAI*>(p->AI()))
+                    ai->m_suiManual = false;
+            };
+            handBack(player);
+            if (Group* group = player->GetGroup())
+                for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    handBack(itr->getSource());
+        }
         // The command era walked the bot by server splines this client never
         // confirms; stop it where it stands and drop the pending flag, or every
         // movement packet from its returning driver is silently discarded.
@@ -672,7 +686,8 @@ void HandleOrder(WorldSession* session, uint8 orderType,
 
     // Enrollment is always explicit: the privileged empty-list party expansion
     // stays a nudge and must never conscript or dismiss anyone.
-    if ((orderType == ORDER_CONSCRIPT || orderType == ORDER_DISMISS) && subjects.empty())
+    if ((orderType == ORDER_CONSCRIPT || orderType == ORDER_DISMISS ||
+         orderType == ORDER_MANUAL || orderType == ORDER_AUTO) && subjects.empty())
         return;
 
     // Formation slots depend on the whole ordered set, so those subjects are
@@ -751,7 +766,8 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         // formation-snapped on the next tick.
         // [SUI] Every explicit order is discipline: the idle wander stands down
         // until the journey is abandoned (doctrine change or possession).
-        ai->m_suiRtsHold = true;
+        if (orderType != ORDER_AUTO)
+            ai->m_suiRtsHold = true;
 
         char json[192];
         switch (orderType)
@@ -849,6 +865,15 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                 break;
             case ORDER_DISMISS:
                 Dismiss(pMember, ai);
+                break;
+            case ORDER_MANUAL:
+                // [SUI] Manual primary (owner 2026-09-01): "primary should always be user
+                // controlled". Autonomy off from the next tick; a fight the AI already began
+                // is left to the engine's auto-attack and the commander's own keys.
+                ai->m_suiManual = true;
+                break;
+            case ORDER_AUTO:
+                ai->m_suiManual = false;
                 break;
             default:
                 break;
@@ -2233,6 +2258,16 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_TRAINER_LIST:
         case SMSG_TRAINER_BUY_SUCCEEDED:
         case SMSG_TRAINER_BUY_FAILED:
+        // [SUI] trade: the partner's session addresses the BOT (TradeData::Update →
+        // m_player->GetSession()->SendUpdateTrade, HandleBeginTrade's OPEN_WINDOW, the
+        // completion verdict). The handlers themselves run as GetSuiActor() on the
+        // commander's session; these are the halves that come back through the bot.
+        case SMSG_TRADE_STATUS:
+        case SMSG_TRADE_STATUS_EXTENDED:
+        // [SUI] mail: new-mail notices are pushed at the RECEIVER's session (the bot's). The
+        // mailbox verbs themselves run as GetSuiActor() on the commander's session.
+        case SMSG_RECEIVED_MAIL:
+        case MSG_QUERY_NEXT_MAIL_TIME:
             break;
         default:
             return;

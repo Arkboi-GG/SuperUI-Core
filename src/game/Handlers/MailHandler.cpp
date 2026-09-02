@@ -41,6 +41,7 @@
 #include "AccountMgr.h"
 #include "TransactionLog.h"
 #include "Database/DatabaseImpl.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor: the DRIVEN bot reads and works ITS mailbox; ResnapshotControlled refreshes its bags/purse
 
 void WorldSession::SendMailResult(uint32 mailId, MailResponseType mailAction, MailResponseResult mailError, uint32 equipError, uint32 item_guid, uint32 item_count)
 {
@@ -68,7 +69,9 @@ void WorldSession::SendNewMail()
 
 bool WorldSession::CheckMailBox(ObjectGuid guid)
 {
-    if (!GetPlayer()->GetGameObjectIfCanInteractWith(guid, GAMEOBJECT_TYPE_MAILBOX))
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
+    if (!pActor->GetGameObjectIfCanInteractWith(guid, GAMEOBJECT_TYPE_MAILBOX))
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "Mailbox %s not found or you can't interact with it.", guid.GetString().c_str());
         return false;
@@ -132,6 +135,8 @@ public:
  */
 void WorldSession::HandleSendMail(WorldPackets::Mail::SendMail const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
     {
         SendMailResult(0, MAIL_SEND, MAIL_ERR_INTERNAL_ERROR);
@@ -213,6 +218,8 @@ void WorldSession::HandleSendMail(WorldPackets::Mail::SendMail const& packet)
 
 void WorldSession::HandleSendMailRequest(AsyncMailSendRequest* req)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (req->receiverPtr)
     {
         // check trial account restrictions for online receiver
@@ -240,8 +247,10 @@ void WorldSession::HandleSendMailRequest(AsyncMailSendRequest* req)
 // $req will be deleted by the caller.
 void WorldSession::HandleSendMailCallback(WorldSession::AsyncMailSendRequest* req)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     MasterPlayer* pl = GetMasterPlayer();
-    Player* loadedPlayer = GetPlayer();
+    Player* loadedPlayer = pActor;
     ASSERT(pl);
 
     uint32 reqmoney = req->money + 30;
@@ -296,7 +305,7 @@ void WorldSession::HandleSendMailCallback(WorldSession::AsyncMailSendRequest* re
         }
 
         // prevent sending item from bank slot
-        if (_player->IsBankPos(item->GetPos()))
+        if (pActor->IsBankPos(item->GetPos()))
         {
             SendMailResult(0, MAIL_SEND, MAIL_ERR_INTERNAL_ERROR);
             return;
@@ -423,6 +432,9 @@ void WorldSession::HandleSendMailCallback(WorldSession::AsyncMailSendRequest* re
     CharacterDatabase.BeginTransaction(loadedPlayer->GetGUIDLow());
     loadedPlayer->SaveInventoryAndGoldToDB();
     CharacterDatabase.CommitTransaction();
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);   // [SUI] the bot has no socket to stream its bags/purse
+
 }
 
 /**
@@ -438,6 +450,8 @@ void WorldSession::HandleSendMailCallback(WorldSession::AsyncMailSendRequest* re
  */
 void WorldSession::HandleMailMarkAsRead(WorldPackets::Mail::MailMarkAsRead const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
@@ -472,6 +486,8 @@ void WorldSession::HandleMailMarkAsRead(WorldPackets::Mail::MailMarkAsRead const
  */
 void WorldSession::HandleMailDelete(WorldPackets::Mail::MailDelete const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
@@ -503,6 +519,8 @@ void WorldSession::HandleMailDelete(WorldPackets::Mail::MailDelete const& packet
  */
 void WorldSession::HandleMailReturnToSender(WorldPackets::Mail::MailReturnToSender const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
@@ -556,11 +574,13 @@ void WorldSession::HandleMailReturnToSender(WorldPackets::Mail::MailReturnToSend
  */
 void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
     MasterPlayer* pl = GetMasterPlayer();
-    Player* loadedPlayer = GetPlayer();
+    Player* loadedPlayer = pActor;
     ASSERT(pl);
 
     Mail* m = pl->GetMail(packet.mailId);
@@ -597,7 +617,7 @@ void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& pa
     Item *it = pl->GetMItem(itemGuid);
 
     ItemPosCountVec dest;
-    uint8 msg = _player->CanStoreItem(NULL_BAG, NULL_SLOT, dest, it, false);
+    uint8 msg = pActor->CanStoreItem(NULL_BAG, NULL_SLOT, dest, it, false);
     if (msg == EQUIP_ERR_OK)
     {
         m->RemoveItem(itemGuid);
@@ -618,7 +638,7 @@ void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& pa
                 data.parts[0].itemsCount[0] = it->GetCount();
                 data.parts[0].itemsGuid[0] = it->GetGUIDLow();
             }
-            data.parts[1].lowGuid = _player->GetGUIDLow();
+            data.parts[1].lowGuid = pActor->GetGUIDLow();
             data.parts[1].money = m->COD;
             sWorld.LogTransaction(data);
 
@@ -652,7 +672,7 @@ void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& pa
             {
                 MailDraft(m->subject)
                 .SetMoney(m->COD)
-                .SendMailTo(MailReceiver(sender, sender_guid), _player, MAIL_CHECK_MASK_COD_PAYMENT);
+                .SendMailTo(MailReceiver(sender, sender_guid), pActor, MAIL_CHECK_MASK_COD_PAYMENT);
             }
 
             loadedPlayer->ModifyMoney(-int32(m->COD));
@@ -675,17 +695,22 @@ void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& pa
     }
     else
         SendMailResult(packet.mailId, MAIL_ITEM_TAKEN, MAIL_ERR_EQUIP_ERROR, msg);
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);   // [SUI] the bot has no socket to stream its bags/purse
+
 }
 /**
  * Handles the packet sent by the client when taking money from the mail.
  */
 void WorldSession::HandleMailTakeMoney(WorldPackets::Mail::MailTakeMoney const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
     MasterPlayer* pl = GetMasterPlayer();
-    Player* loadedPlayer = GetPlayer();
+    Player* loadedPlayer = pActor;
     ASSERT(pl);
 
     Mail* m = pl->GetMail(packet.mailId);
@@ -714,6 +739,9 @@ void WorldSession::HandleMailTakeMoney(WorldPackets::Mail::MailTakeMoney const& 
     loadedPlayer->SaveGoldToDB();
     pl->SaveMails();
     CharacterDatabase.CommitTransaction();
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);   // [SUI] the bot has no socket to stream its bags/purse
+
 }
 
 /**
@@ -722,6 +750,8 @@ void WorldSession::HandleMailTakeMoney(WorldPackets::Mail::MailTakeMoney const& 
  */
 void WorldSession::HandleGetMailList(WorldPackets::Mail::GetMailList const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
@@ -836,6 +866,8 @@ void WorldSession::HandleGetMailList(WorldPackets::Mail::GetMailList const& pack
  */
 void WorldSession::HandleItemTextQuery(WorldPackets::Misc::ItemTextQuery const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     // packet.mailId and packet.unk not used
 
     // TODO: some check needed, if player has item with guid mailId, or has mail with id mailId
@@ -855,12 +887,14 @@ void WorldSession::HandleItemTextQuery(WorldPackets::Misc::ItemTextQuery const& 
  */
 void WorldSession::HandleMailCreateTextItem(WorldPackets::Mail::MailCreateTextItem const& packet)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
         return;
 
     MasterPlayer* pl = GetMasterPlayer();
     ASSERT(pl);
-    Player* loadedPlayer = _player;
+    Player* loadedPlayer = pActor;
 
     Mail* m = pl->GetMail(packet.mailId);
     if (!m || (!m->itemTextId && !m->mailTemplateId) || m->state == MAIL_STATE_DELETED || m->deliver_time > time(nullptr) || m->checked & MAIL_CHECK_MASK_COPIED)
@@ -882,7 +916,7 @@ void WorldSession::HandleMailCreateTextItem(WorldPackets::Mail::MailCreateTextIt
     bodyItem->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid(HIGHGUID_PLAYER, m->sender));
 
     ItemPosCountVec dest;
-    uint8 msg = _player->CanStoreItem(NULL_BAG, NULL_SLOT, dest, bodyItem, false);
+    uint8 msg = pActor->CanStoreItem(NULL_BAG, NULL_SLOT, dest, bodyItem, false);
     if (msg == EQUIP_ERR_OK)
     {
         m->checked = m->checked | MAIL_CHECK_MASK_COPIED;
@@ -897,6 +931,9 @@ void WorldSession::HandleMailCreateTextItem(WorldPackets::Mail::MailCreateTextIt
         SendMailResult(packet.mailId, MAIL_MADE_PERMANENT, MAIL_ERR_EQUIP_ERROR, msg);
         delete bodyItem;
     }
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);   // [SUI] the bot has no socket to stream its bags/purse
+
 }
 
 /**
@@ -904,6 +941,8 @@ void WorldSession::HandleMailCreateTextItem(WorldPackets::Mail::MailCreateTextIt
  */
 void WorldSession::HandleQueryNextMailTime(NullClientPacket const& /*packet*/)
 {
+    // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
+    Player* pActor = GetSuiActor();
     MasterPlayer* player = GetMasterPlayer();
     ASSERT(player);
     WorldPacket data(MSG_QUERY_NEXT_MAIL_TIME, 8);

@@ -775,7 +775,7 @@ void AiBotAI::BridgeProcessLine(const char* line)
     // combat configuration, not errands (an enlisted bot is exactly the one you
     // raid-plan with). Commander-injected RTS orders arrive via
     // SuiInjectCommandLine and pass the fence.
-    if (IsSuiConscripted() && !m_suiCommanderLine &&
+    if ((IsSuiConscripted() || m_suiManual) && !m_suiCommanderLine &&
         strcmp(msgType, "PING") != 0 && strcmp(msgType, "COMBAT_DIRECTIVE") != 0 &&
         strcmp(msgType, "LOAD_ROTATION") != 0 && strcmp(msgType, "APPLY_COMBAT_LOADOUT") != 0 &&
         strcmp(msgType, "LOAD_RAID_PLAN") != 0)
@@ -2458,7 +2458,9 @@ void AiBotAI::BridgeHandleAttackTarget(const char* json)
         me->AttackStop(false);
         StopMoving();
     }
+    m_suiOrderedAttackPass = true;      // the commander's explicit order passes the manual gate
     AttackStart(pCreature);
+    m_suiOrderedAttackPass = false;
 }
 
 void AiBotAI::BridgeHandleInteractNpc(const char* json)
@@ -3197,13 +3199,20 @@ void AiBotAI::BridgeHandleSellItems(const char* json)
                 // else: never-usable (wrong class/prof/race) or too far off → sell
             }
         }
-        // --- MISC / trade goods / recipes: keep the quality threshold (conservative — see note) ---
-        // NOTE (2026-07-28): recipes (ITEM_CLASS_RECIPE), trade goods (ITEM_CLASS_TRADE_GOODS) and
-        // unopenable lockboxes still fall here and are kept by rarity. A combat grind bot never
-        // crafts/enchants, so these are pure fodder — but they're also exactly what an AH would list
-        // for real value, so the sell-vs-hold call is deferred to the AH-value model (see
-        // SuperUiBots_ARCHITECTURE, the AH warning). Flip to sell-by-default here when that lands (or
-        // sooner, if slots beat the lost AH value).
+        // --- RECIPES: temporary sell-by-default policy until bots participate in the economy ---
+        else if (proto->Class == ITEM_CLASS_RECIPE)
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-vendor: recipe policy, selling until economy enabled", proto->ItemId);
+            // Autonomous bots do not currently learn professions, craft, trade, mail, or list items
+            // on the auction house. Retaining recipes therefore has no simulated utility and has
+            // filled bags fleet-wide. Sell every sellable recipe for now, regardless of rarity.
+            //
+            // TODO(economy): reintroduce recipe retention when bots participate in the full simulated
+            // economy. Consider known/learnable recipes, profession plans, trading, and auction-house
+            // value instead of restoring the generic rarity threshold.
+            // fall through to sell
+        }
+        // --- OTHER MISC / trade goods: keep the quality threshold (conservative) ---
         else
         {
             CB_HITV(me->GetGUIDLow(), "cpp-vendor: misc quality threshold check", proto->ItemId);
