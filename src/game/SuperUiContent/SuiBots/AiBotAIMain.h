@@ -684,6 +684,33 @@ public:
     // the brain bridge entirely by the theft wall, so any "stand down" that travels as a
     // STATE echo is invisible to it — the non-autonomy decree has to be enforced locally.
     bool IsUnattendedRealCharacter() const { return m_ownedDummyEntry != nullptr; }
+    // [COMPANION] Any REAL account's character running this AI: the enrolled
+    // unattended own character OR a summoned companion. Every fabricated-bot
+    // mutation (spec/gear/skill repairs, whisper flag) and the brain bridge
+    // gate on this, not on m_ownedDummyEntry alone.
+    bool IsRealCharacter() const
+    {
+        return m_ownedDummyEntry != nullptr || (botEntry && botEntry->ownerAccountId != 0);
+    }
+    // [COMPANION] The ONE human this unit answers to, or nullptr for a shared
+    // fleet bot: a companion -> its owner, an unattended own character -> its
+    // own session's character (me), a conscript -> its conscriptor.
+    Player* SuiBoundHuman() const;
+    // The body a human is playing right now: the bot they possess, else themselves.
+    static Player* SuiDrivenBodyOf(Player* human);
+    // Set by SuiCompanion::Summon; consumed by TickArrival on the first map tick.
+    ObjectGuid m_suiCompanionOwner;
+    bool m_suiCompanionArrival = false;
+    // [COMPANION] Death rule (owner 2026-09-02): the party gets first call on a
+    // resurrection (healer out of combat, druid Rebirth in combat); failing that
+    // the corpse "runs itself": the ghost waits at the body for as long as the
+    // graveyard run would have taken (never less than the reclaim delay), then
+    // pops in place at 50% once the party is out of combat.
+    uint32 m_suiCompanionDeadMs = 0;
+    uint32 m_suiCompanionSelfRezAtMs = 0;
+    // Fleet-wide ally resurrection: healers rez a dead party member out of
+    // combat; a druid Rebirths one in combat. True when a cast was started.
+    bool SuiTryResurrectAlly();
     void    DoPartyFollow();
 
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---

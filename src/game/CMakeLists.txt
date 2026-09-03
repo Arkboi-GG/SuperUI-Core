@@ -217,6 +217,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.cpp
     SuperUiContent/SuiWorld/Shared/SuiWorldState.cpp
     SuperUiContent/SuiWorld/CRPG/SuiPossess.cpp
+    SuperUiContent/SuiWorld/CRPG/SuiCompanion.cpp
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.cpp
     SuperUiContent/SuiWorld/RTS/SuiHonor.cpp
     SuperUiContent/SuiWorld/RTS/SuiHero.cpp
@@ -478,6 +479,7 @@ set (game_SRCS
     SuperUiContent/SuiBots/AiBotAITeamPlay.h
     SuperUiContent/SuiWorld/Shared/SuiWorldState.h
     SuperUiContent/SuiWorld/CRPG/SuiPossess.h
+    SuperUiContent/SuiWorld/CRPG/SuiCompanion.h
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.h
     SuperUiContent/SuiWorld/RTS/SuiHonor.h
     SuperUiContent/SuiWorld/RTS/SuiHero.h

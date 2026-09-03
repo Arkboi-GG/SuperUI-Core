@@ -91,6 +91,7 @@ namespace SuiPossess
         ROSTER_CONTROLLABLE = 0x01,    // AiBot in your group you may possess
         ROSTER_POSSESSED    = 0x02,    // currently driven by a real player
         ROSTER_CONSCRIPTED  = 0x04,    // enlisted in someone's RTS army (brain off)
+        ROSTER_COMPANION    = 0x08,    // one of YOUR summoned alts (owner sees this; others see 0)
     };
 
     /// Attempt possession. Sends the ACK (grant or deny) itself.

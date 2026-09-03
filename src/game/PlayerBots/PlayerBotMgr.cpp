@@ -2,6 +2,7 @@
 #include "Policies/SingletonImp.h"
 #include "PlayerBotMgr.h"
 #include "SuiRts.h"
+#include "SuiCompanion.h"
 #include "ObjectMgr.h"
 #include "World.h"
 #include "WorldSession.h"
@@ -202,6 +203,8 @@ void PlayerBotMgr::OnPlayerInWorld(Player* player)
         player->SetAI(e->ai.get());
         e->ai->SetPlayer(player);
         e->ai->OnPlayerLogin();
+        if (e->ownerAccountId)
+            SuiCompanion::OnCompanionInWorld(player);
     }
 }
 
@@ -258,7 +261,7 @@ void PlayerBotMgr::Update(uint32 diff)
 
                 DeleteBot(iter);
 
-                if (WorldSession* sess = sWorld.FindSession(iter->second->accountId))
+                if (WorldSession* sess = sWorld.FindSession(iter->second->sessionKey))
                     sess->LogoutPlayer(m_confAllowSaving);
 
                 iter->second->requestRemoval = false;
@@ -278,7 +281,9 @@ void PlayerBotMgr::Update(uint32 diff)
             continue;
         }
 
-        WorldSession* sess = sWorld.FindSession(iter->second->accountId);
+        // By session KEY: a companion shares its owner's account id, and the
+        // owner's live session is exactly the wrong place to log a bot in.
+        WorldSession* sess = sWorld.FindSession(iter->second->sessionKey);
 
         if (!sess)
         {
@@ -408,6 +413,7 @@ bool PlayerBotMgr::AddBot(PlayerBotAI* ai)
     std::shared_ptr<PlayerBotEntry> e = std::make_shared<PlayerBotEntry>();
     e->ai.reset(ai);
     e->accountId = GenBotAccountId();
+    e->sessionKey = e->accountId;
     e->playerGUID = sObjectMgr.GeneratePlayerLowGuid();
     e->customBot = true;
     ai->botEntry = e.get();
@@ -419,6 +425,11 @@ bool PlayerBotMgr::AddBot(uint32 playerGUID, bool chatBot, PlayerBotAI* pAI)
 {
     uint32 accountId = 0;
     auto iter = m_bots.find(playerGUID);
+    // [COMPANION] A companion entry is never a fleet bot: refusing here keeps
+    // `.bot add`/`add_all` from reviving it on a real-account session keyed by
+    // the account, which would kick its owner.
+    if (iter != m_bots.end() && iter->second->ownerAccountId)
+        return false;
     if (iter == m_bots.end())
         accountId = sObjectMgr.GetPlayerAccountIdByGUID(playerGUID);
     else
@@ -455,6 +466,7 @@ bool PlayerBotMgr::AddBot(uint32 playerGUID, bool chatBot, PlayerBotAI* pAI)
         e->playerGUID   = playerGUID;
         e->chance       = 10;
         e->accountId    = accountId;
+        e->sessionKey   = accountId;
         e->isChatBot    = chatBot;
         if (pAI)
         {
@@ -680,6 +692,50 @@ bool PlayerBotMgr::ForceAccountConnection(WorldSession* sess)
 
     // Temporary bots.
     return m_tempBots.find(sess->GetAccountId()) != m_tempBots.end();
+}
+
+bool PlayerBotMgr::AddCompanion(uint32 playerGUID, uint32 ownerAccount, ObjectGuid ownerGuid, PlayerBotAI* ai)
+{
+    std::unique_ptr<PlayerBotAI> owned(ai);
+    auto iter = m_bots.find(playerGUID);
+    if (iter != m_bots.end())
+    {
+        // A fleet registry row (or a still-live entry) is never summonable.
+        if (iter->second->state != PB_STATE_OFFLINE || !iter->second->ownerAccountId)
+            return false;
+        m_bots.erase(iter);   // stale companion row from an earlier summon
+    }
+
+    std::shared_ptr<PlayerBotEntry> e = std::make_shared<PlayerBotEntry>();
+    e->state          = PB_STATE_LOADING;
+    e->playerGUID     = playerGUID;
+    e->chance         = 0;
+    e->accountId      = ownerAccount;      // the REAL account: SaveToDB stamps this
+    e->sessionKey     = GenBotAccountId();  // synthetic map key: coexists with the owner
+    e->ownerAccountId = ownerAccount;
+    e->ownerGuid      = ownerGuid;
+    e->customBot      = true;              // never picked by the random cycler
+    e->ai             = std::move(owned);
+    e->ai->botEntry   = e.get();
+    if (!sObjectMgr.GetPlayerNameByGUID(playerGUID, e->name))
+        e->name = "<Unknown>";
+    m_bots.insert({ playerGUID, e });
+
+    // Plain player security regardless of the owner's GM level: an AI must
+    // never walk a GM path. Synthetic session KEY, real account id.
+    WorldSession* session = new WorldSession(ownerAccount, nullptr, SEC_PLAYER, 0, LOCALE_enUS);
+    session->SetSessionKey(e->sessionKey);
+    session->SetBot(e);
+    sWorld.AddSession(session);
+    m_stats.loadingCount++;
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[PlayerBotMgr] companion %s (guid %u) loading for account %u",
+        e->name.c_str(), playerGUID, ownerAccount);
+    return true;
+}
+
+void PlayerBotMgr::ForgetBot(uint32 playerGUID)
+{
+    m_bots.erase(playerGUID);
 }
 
 bool PlayerBotMgr::IsPermanentBot(uint32 playerGUID)

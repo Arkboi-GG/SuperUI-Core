@@ -63,7 +63,7 @@ Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,
 | `SMSG_SUI_PARTY_QUEST_RESULT` | 857 (0x0359) | S -> C |
 
 858-859 stay RESERVED for the PLAN_20 P4 vendor pair, so a half-deployed server
-can never renumber them out from under a client. `NUM_MSG_TYPES` is 858.
+can never renumber them out from under a client. `NUM_MSG_TYPES` is 868 (see the Companions section at the end).
 
 Values 835-843 are the camera, zone-intel, and RTS extensions.
 The portal values are intentionally fixed above that range so those branches
@@ -664,3 +664,100 @@ Version 1 grants a 5-second Ready lease. A portal that remains open is renewed
 by another PREPARE/DESCRIPTOR/READY cycle; the generation/ticket may be reused
 while the previous correlation is still live. This lease still does not bypass
 the stock `CMSG_GAMEOBJ_USE` range and eligibility checks.
+
+## Companions — CMSG_SUI_COMPANION / SMSG_SUI_COMPANION (owner decision 2026-09-02)
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_COMPANION` | 866 (0x0362) | C → S |
+| `SMSG_SUI_COMPANION` | 867 (0x0363) | S → C |
+
+`NUM_MSG_TYPES` is 868. Advertised by capability bit 7 (`COMPANIONS_V1`) in the
+`SUI1` trailer; the client must not send `CMSG_SUI_COMPANION` until it has seen it.
+
+A **companion** is one of the requester's OWN characters (same account, verified
+server-side from the character cache — never from anything the client claims)
+logged in on a socket-less AiBot session for the length of the owner's session.
+The session keeps the **real account id**; only the World session-map key is
+synthetic (`WorldSession::GetSessionKey`), so the owner's live session and the
+companion coexist and `SaveToDB` never re-stamps `characters.account`. It is the
+single owner-verified exception to the real-account wall in
+`AiBotAI::OnSessionLoaded`; it never opens the brain bridge and is never written
+to `characters.playerbot`. Server implementation:
+`src/game/SuperUiContent/SuiWorld/CRPG/SuiCompanion.{h,cpp}`.
+
+**Authority law:** a companion counts as a bot ONLY for its owner. To every
+other human it is a real player — no possession (`DENY_NOT_BOT`), no orders,
+no bag/spell/quest facts, no item moves, no faction control, no force-roster
+row. The same closure now applies to an unattended own character: real
+sessions other than the actor's own are never commandable
+(`SuiCompanion::MayCommand`, the one predicate every site funnels through).
+
+**Follow law (multi-human):** every unit keeps formation on *the driven body of
+its human* — the bot that human possesses, else that human's own character.
+A bound unit (companion → owner, unattended own character → its own session,
+conscript → conscriptor) follows nobody else and HOLDS when its human is
+outside the group or drives nothing else. Shared fleet bots keep the group
+rules (real leader, else the deterministic split / follow override) and then
+follow that human's driven body.
+
+### CMSG_SUI_COMPANION (9 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| action | u8 | 1 summon · 2 dismiss · 3 list |
+| guid | u64 | character guid; 0 for list |
+
+Summon requires the requester in the world, alive, outdoors (non-instanceable
+map), not on a taxi/transport, not teleporting, not a bot session. Possessing a
+bot is allowed: the companion arrives beside the driven body. On its first AI
+tick the companion leaves any stale saved group, joins the owner's group
+(created with the owner as leader if there is none; a full party converts to a
+raid), and teleports beside the owner's driven body. Max 9 companions.
+
+Dismissal (explicit, or the owner's session logging its player out) drops the
+companion out of the party, then logs it out with a save. A character login
+that finds its own companion still logging out answers
+`SMSG_CHARACTER_LOGIN_FAILED` and dismisses it; retry a moment later.
+
+### SMSG_SUI_COMPANION
+
+| Field | Type | Notes |
+|---|---|---|
+| kind | u8 | 1 result · 2 list |
+
+kind 1 (result): `u8 action`, `u64 guid`, `u8 result` — 0 OK · 1 DENIED (not a
+character on your account / unknown) · 2 ALREADY_IN_WORLD · 3 OWNER_STATE ·
+4 LIMIT · 5 NOT_A_COMPANION · 6 FAILED.
+
+kind 2 (list): `u8 count`, then per row `u64 guid, u8 race, u8 class, u8 gender,
+u8 level, u8 state, cstring name` — state 0 offline/summonable · 1 online as your
+companion · 2 loading · 3 the character you are playing · 4 unavailable. Pushed
+after every result, when a companion enters the world and again on arrival,
+when one leaves, and in answer to action 3.
+
+### Roster flag
+
+`SMSG_SUI_CONTROL_ROSTER` member flags gain `0x08` = this member is YOUR
+companion (set only for its owner, who also sees 0x01; other humans see 0).
+
+### GM command (stock-client testable)
+
+`.sui companion summon <name>` · `.sui companion dismiss <name>` ·
+`.sui companion list` — same rules and result codes as the wire.
+
+**Group removal = dismissal (owner 2026-09-02):** a companion kicked from the
+party, its owner leaving or being kicked, or a disband dismisses the companion
+(party drop, logout with save, owner window refreshed, chat notice). Park a
+companion with Hold instead. The companion arrival step (leaving a stale saved
+group) is exempt.
+
+**Feel pass (owner 2026-09-02):** result code **7 PARTY_FULL** — a full 5-man
+party refuses the summon; convert to a raid on purpose first (arrival never
+converts). Arrival lands in formation behind the owner's driven body (slot ring,
+2.5 yd per ring, same fan as move orders) with the teleport-in visual (spell
+7141) and a chat line. Death: the party gets first call on a resurrection
+(healer out of combat, druid Rebirth in combat — fleet AI now casts these for any
+dead party member); otherwise the ghost waits at its corpse for the graveyard
+run time (floored by the reclaim delay) and pops in place at 50% once the party
+is out of combat.

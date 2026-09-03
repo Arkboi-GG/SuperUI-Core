@@ -20,6 +20,8 @@
 #include "Server/Packet.h"   // NullClientPacket — the typed empty client packet the group accept/decline handlers take
 #include "AiBotAITeamPlay.h"   // [TEAMPLAY] ResolveCombatTarget — the group focus-fire resolver
 #include "SuiPossess.h"      // [SUI] possessed-bot-as-boss precedence in FindPartyBoss
+#include "SuiCompanion.h"    // [COMPANION] owner binding for the boss rules + arrival tick
+#include "DBCStores.h"        // WorldSafeLocsEntry for the companion self-run wait
 #include "Player.h"
 #include <cstring>
 #include <cstdio>
@@ -99,7 +101,27 @@ void AiBotAI::OnPlayerLogin()
     // security; the core hides higher-security characters from lower-security
     // whisperers ("That player doesn't exist") UNLESS the target accepts whispers.
     // A social-layer bot must be whisperable by everyone, always.
-    me->SetAcceptWhispers(true);
+    // A real character keeps its own whisper setting.
+    if (!IsRealCharacter())
+        me->SetAcceptWhispers(true);
+
+    // [COMPANION] A summoned companion arrives through the restart path with
+    // m_initialized false. Mirror AttachToRealCharacter: role + spell caches
+    // only, none of the fabricated-bot first-tick spawn work (no SPAWNING flag,
+    // no spec/gear/skill repairs), so the character stays exactly as its owner
+    // left it.
+    if (IsRealCharacter() && !m_ownedDummyEntry && !m_initialized)
+    {
+        AutoAssignRole();
+        ResetSpellData();
+        PopulateSpellData();
+        m_freshSpawn = false;
+        m_initialized = true;
+        m_lastKnownLevel = me->GetLevel();
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT] %s (guid %u) companion character enrolled as fleet AI",
+            me->GetName(), me->GetGUIDLow());
+    }
 
     if (!m_initialized)
     {
@@ -121,6 +143,9 @@ WorldSession* AiBotAI::SuiCommanderSession() const
     if (!m_suiConscriptedBy.IsEmpty())
         if (Player* commander = sObjectMgr.GetPlayer(m_suiConscriptedBy))
             return commander->GetSession();
+    // [COMPANION] A summoned alt answers to its owner's session.
+    if (Player* owner = SuiCompanion::OwnerOf(me))
+        return owner->GetSession();
     // A real character commanded from its own free view: its session IS the commander's.
     if (me && me->GetSession() && !me->GetSession()->GetBot())
         return me->GetSession();
@@ -238,11 +263,26 @@ bool AiBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
             if (LoginDatabase.PQuery(
                     "SELECT 1 FROM `account` WHERE `id` = '%u'", ownerAccount))
             {
-                CB_HIT(entry->playerGUID, "cpp-main: real account owner, spawn refused");
-                sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
-                    "[AIBOT] REFUSING to spawn guid %u as a bot: character belongs to REAL account %u",
-                    entry->playerGUID, ownerAccount);
-                return false;
+                // [COMPANION] The one exception: the owner of that very account
+                // asked for this character on their own live session
+                // (SuiCompanion::Summon verified the account match server-side
+                // and the session keeps the real account id, so SaveToDB cannot
+                // re-stamp it). Anything else stays refused.
+                if (entry->ownerAccountId != 0 && entry->ownerAccountId == ownerAccount)
+                {
+                    CB_HIT(entry->playerGUID, "cpp-main: companion of its own account, allowed");
+                    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+                        "[AIBOT] guid %u is a companion of account %u: logging in on the real account",
+                        entry->playerGUID, ownerAccount);
+                }
+                else
+                {
+                    CB_HIT(entry->playerGUID, "cpp-main: real account owner, spawn refused");
+                    sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                        "[AIBOT] REFUSING to spawn guid %u as a bot: character belongs to REAL account %u",
+                        entry->playerGUID, ownerAccount);
+                    return false;
+                }
             }
         }
 
@@ -1047,6 +1087,102 @@ void AiBotAI::RefreshDoctrine()
 // STATE producer echoes it (pparty), the bridge Form/Disband guards refuse on it, and the
 // escort hook follows it. Bot sessions are identified by WorldSession::GetBot() (the
 // PlayerBotEntry every PlayerBotMgr-owned session carries; real clients have none).
+// [COMPANION] Multi-human law (owner 2026-09-02): every unit follows "the driven
+// body of ITS human". A bound unit (companion / unattended own character /
+// conscript) has exactly one human and follows nobody else; a shared fleet bot
+// keeps the group rules (real leader first, else the deterministic split) and
+// then follows THAT human's driven body. The old "first possessed member in
+// iteration order" pre-pass was the single-human special case of this and
+// dragged everyone after one human's toon once two humans possessed.
+Player* AiBotAI::SuiDrivenBodyOf(Player* human)
+{
+    if (!human || !human->GetSession())
+        return nullptr;
+    if (Player* bot = SuiPossess::GetControlledBot(human->GetSession()))
+        if (bot->IsInWorld())
+            return bot;
+    return human;
+}
+
+bool AiBotAI::SuiTryResurrectAlly()
+{
+    if (!me || !me->IsInWorld() || !me->IsAlive() || m_possessed || m_suiManual)
+        return false;
+    // Out of combat: the class resurrection spell (priest/paladin/shaman).
+    // In combat: only a druid's Rebirth.
+    SpellEntry const* spell = me->IsInCombat()
+        ? (me->GetClass() == CLASS_DRUID ? m_spells.druid.pRebirth : nullptr)
+        : m_resurrectionSpell;
+    if (!spell)
+        return false;
+    Group* pGroup = me->GetGroup();
+    if (!pGroup)
+        return false;
+    if (me->IsNonMeleeSpellCasted(false))
+        return false;
+    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+    {
+        Player* pMember = itr->getSource();
+        if (!pMember || pMember == me || !pMember->IsInWorld() || pMember->IsAlive())
+            continue;
+        if (pMember->IsRessurectRequested())
+            continue;   // someone already offered
+        if (pMember->GetMapId() != me->GetMapId() || pMember->GetInstanceId() != me->GetInstanceId())
+            continue;
+        if (!me->IsWithinLOSInMap(pMember) || !spell->IsTargetInRange(me, pMember))
+            continue;
+        if (!CanTryToCastSpell(pMember, spell))
+            continue;
+        if (DoCastSpell(pMember, spell) == SPELL_CAST_OK)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[AIBOT] %s resurrects %s (%s)",
+                me->GetName(), pMember->GetName(), me->IsInCombat() ? "combat rez" : "out of combat");
+            return true;
+        }
+    }
+    return false;
+}
+
+Player* AiBotAI::SuiBoundHuman() const
+{
+    if (!me)
+        return nullptr;
+    if (Player* owner = SuiCompanion::OwnerOf(me))
+        return owner;
+    if (IsUnattendedRealCharacter())
+        return me;
+    if (!m_suiConscriptedBy.IsEmpty())
+        if (Player* commander = sObjectMgr.GetPlayer(m_suiConscriptedBy))
+            if (commander->GetSession() && !commander->GetSession()->GetBot())
+                return commander;
+    return nullptr;
+}
+
+// Resolve a bound unit's boss: the bound human's driven body, or hold. Returns
+// true when the bound rule decided (boss may be nullptr = stand still).
+static bool SuiBoundBoss(AiBotAI const* ai, Player* me, Group* pGroup, Player** boss)
+{
+    Player* human = ai->SuiBoundHuman();
+    if (!human)
+        return false;
+    *boss = nullptr;
+    if (human->GetGroup() != pGroup)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: bound human outside my group, holding");
+        return true;
+    }
+    Player* body = AiBotAI::SuiDrivenBodyOf(human);
+    if (!body || body == me)
+    {
+        // I AM what my human plays (or my own session drives nothing else): hold.
+        CB_HIT(me->GetGUIDLow(), "cpp-main: bound human drives nothing else, holding");
+        return true;
+    }
+    CB_HIT(me->GetGUIDLow(), "cpp-main: bound human's driven body is boss");
+    *boss = body;
+    return true;
+}
+
 Player* AiBotAI::FindPartyBoss() const
 {
     if (!me || !me->IsInWorld())
@@ -1062,19 +1198,9 @@ Player* AiBotAI::FindPartyBoss() const
         return nullptr;
     }
 
-    // [SUI] A group member currently DRIVEN by a real player outranks every other
-    // candidate — the pack follows the character the human is actually playing,
-    // not the human's abandoned (AI-run) body. Full pre-pass so a real leader
-    // earlier in iteration order can't shadow a possessed bot later in it.
-    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
-    {
-        Player* pMember = itr->getSource();
-        if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
-        {
-            CB_HIT(me->GetGUIDLow(), "cpp-main: possessed member outranks, boss resolved");
-            return pMember;
-        }
-    }
+    Player* boundBoss = nullptr;
+    if (SuiBoundBoss(this, me, pGroup, &boundBoss))
+        return boundBoss;
 
     Player* firstReal = nullptr;
     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
@@ -1094,7 +1220,8 @@ Player* AiBotAI::FindPartyBoss() const
         if (pMember->GetObjectGuid() == pGroup->GetLeaderGuid())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: real leader is boss");
-            return pMember;   // the leader is real — unambiguous
+            Player* body = SuiDrivenBodyOf(pMember);   // the leader is real — unambiguous
+            return body && body != me ? body : pMember;
         }
         if (!firstReal)
         {
@@ -1102,7 +1229,10 @@ Player* AiBotAI::FindPartyBoss() const
             firstReal = pMember;
         }
     }
-    return firstReal;   // leader is a bot but a human is present — escort the human
+    // leader is a bot but a human is present — escort the human's driven body
+    if (Player* body = SuiDrivenBodyOf(firstReal))
+        return body != me ? body : firstReal;
+    return firstReal;
 }
 
 // The human THIS bot keeps formation on (2026-07-08, multi-human split). Null iff the group
@@ -1127,21 +1257,12 @@ Player* AiBotAI::FindEscortBoss() const
         return nullptr;
     }
 
-    // [SUI] Mirror FindPartyBoss's pre-pass: the group member the human actually
-    // DRIVES outranks every real-session candidate. This function feeds the STATE
-    // pparty echo and the formation target; without the pre-pass the enrolled own
-    // character reads pparty=0 (no OTHER real player in its group) so the brain
-    // sends it questing, and every bot keeps formation on the abandoned (AI-run)
-    // body instead of the character the human is playing.
-    for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
-    {
-        Player* pMember = itr->getSource();
-        if (pMember && pMember != me && SuiPossess::GetPossessor(pMember))
-        {
-            CB_HIT(me->GetGUIDLow(), "cpp-main: possessed member outranks, escort boss resolved");
-            return pMember;
-        }
-    }
+    // [COMPANION] Bound units answer to one human's driven body (see SuiBoundBoss).
+    // Shared fleet bots fall through to the assigned-human split below and then
+    // escort THAT human's driven body.
+    Player* boundBoss = nullptr;
+    if (SuiBoundBoss(this, me, pGroup, &boundBoss))
+        return boundBoss;
 
     std::vector<Player*> reals;
     for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
@@ -1183,12 +1304,15 @@ Player* AiBotAI::FindEscortBoss() const
             if (!n[i] && i == m_escortOverrideName.size())
             {
                 CB_HIT(me->GetGUIDLow(), "cpp-main: follow override matched, boss chosen");
-                return pReal;   // full-length case-insensitive match
+                Player* body = SuiDrivenBodyOf(pReal);   // full-length case-insensitive match
+                return body && body != me ? body : pReal;
             }
         }
     }
 
-    return reals[me->GetGUIDLow() % reals.size()];
+    Player* assigned = reals[me->GetGUIDLow() % reals.size()];
+    Player* body = SuiDrivenBodyOf(assigned);
+    return body && body != me ? body : assigned;
 }
 
 // Keep formation on the boss (called from the escort hook, out of combat, after the engage
@@ -1335,7 +1459,7 @@ void AiBotAI::UpdateBridgeTick()
     // it on a synthetic account after a restart, and stole it from its owner
     // (Tesfff, 2026-08-10). Doctrine + explicit CMSG_SUI_ORDER injections are
     // the whole control surface for an unattended real character.
-    if (m_ownedDummyEntry)
+    if (IsRealCharacter())
     {
         CB_HIT(me ? me->GetGUIDLow() : 0, "cpp-main: enrolled real character, brain suppressed");
         return;
@@ -1587,6 +1711,15 @@ void AiBotAI::UpdateAI(uint32 const diff)
 {
     // Handle pending teleports from base class
     PlayerBotAI::UpdateAI(diff);
+
+    // [COMPANION] First tick after AddToWorld: join the owner's party and
+    // teleport beside the owner's driven body. Nothing else this tick — the
+    // body may be mid-transfer afterwards.
+    if (m_suiCompanionArrival)
+    {
+        SuiCompanion::TickArrival(this);
+        return;
+    }
 
     // [SUI] Fix A: drain at most one coalesced RTS move per tick (latest dest wins). Runs ahead of
     // the 1 Hz behaviour gate so an ordered move stays responsive, and before the possess
@@ -1844,7 +1977,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         uint32 learnedArmorSpells = 0;
 
         // Attached real characters deliberately bypass all fabricated-bot mutations.
-        if (!m_ownedDummyEntry)
+        if (!IsRealCharacter())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: fabricated bot, running spawn repairs");
             AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
@@ -1985,6 +2118,26 @@ void AiBotAI::UpdateAI(uint32 const diff)
             me->BuildPlayerRepop();
             // NO RepopAtGraveyard — ghost stays right here at the death position
 
+            // [COMPANION] Size the self-run: the time a spirit would spend running
+            // back from the nearest graveyard, floored by the reclaim delay.
+            if (SuiCompanion::IsCompanion(me))
+            {
+                float runSeconds = 0.0f;
+                if (WorldSafeLocsEntry const* grave = sObjectMgr.GetClosestGraveYard(
+                        deathX, deathY, deathZ, deathMap, me->GetTeam()))
+                {
+                    float const dx = grave->x - deathX, dy = grave->y - deathY;
+                    runSeconds = sqrtf(dx * dx + dy * dy) / SuiCompanion::GHOST_RUN_SPEED;
+                }
+                uint32 const reclaimMs = me->GetCorpseReclaimDelay(false) * IN_MILLISECONDS;
+                m_suiCompanionDeadMs = 0;
+                m_suiCompanionSelfRezAtMs = std::max(reclaimMs, uint32(runSeconds * 1000.0f));
+                sLog.Out(LOG_BASIC, LOG_LVL_BASIC,
+                    "[SUI-COMPANION] %s died; self-run pops in %u s unless the party rezzes first",
+                    me->GetName(), m_suiCompanionSelfRezAtMs / 1000);
+                SuiCompanion::NotifyOwner(me, "%s has died.", me->GetName());
+            }
+
             char deathData[160];
             snprintf(deathData, sizeof(deathData),
                 "x=%.1f|y=%.1f|z=%.1f|map=%u|attackers=%u",
@@ -2041,6 +2194,34 @@ void AiBotAI::UpdateAI(uint32 const diff)
                 return;
             }
 
+            return;
+        }
+
+        // [COMPANION] Nobody's brain will ever RESURRECT a companion. Wait out the
+        // self-run (a party rez arriving meanwhile simply revives us), then pop
+        // in place once the party has left combat — never mid-fight.
+        if (SuiCompanion::IsCompanion(me))
+        {
+            m_suiCompanionDeadMs += AIBOT_UPDATE_INTERVAL;
+            if (m_suiCompanionDeadMs < m_suiCompanionSelfRezAtMs)
+                return;
+            bool partyInCombat = false;
+            if (Group* pGroup = me->GetGroup())
+                for (GroupReference* itr = pGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    if (Player* pMember = itr->getSource())
+                        if (pMember->IsInWorld() && pMember->IsAlive() && pMember->IsInCombat())
+                        {
+                            partyInCombat = true;
+                            break;
+                        }
+            if (partyInCombat)
+                return;
+            sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI-COMPANION] %s recovers its corpse in place",
+                me->GetName());
+            me->ResurrectPlayer(0.5f);
+            me->CombatStop(true);
+            me->SpawnCorpseBones();
+            SuiCompanion::NotifyOwner(me, "%s has recovered its body.", me->GetName());
             return;
         }
 
@@ -2103,7 +2284,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         CB_HITV(me->GetGUIDLow(), "cpp-main: level-up detected", me->GetLevel());
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[AIBOT] %s leveled up: %u -> %u",
             me->GetName(), m_lastKnownLevel, me->GetLevel());
-        if (!m_ownedDummyEntry)
+        if (!IsRealCharacter())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: level-up repairs for fabricated bot");
             AiBotTalents::RepairResult repair = AiBotTalents::EnsureProfileAndTalents(me, botEntry);
@@ -2129,7 +2310,7 @@ void AiBotAI::UpdateAI(uint32 const diff)
         // characters, but never mutate an attached character's skills/items.
         ResetSpellData();
         PopulateSpellData();
-        if (!m_ownedDummyEntry)
+        if (!IsRealCharacter())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: level-up reagents and skills refresh");
             AddAllSpellReagents();
@@ -2337,6 +2518,13 @@ void AiBotAI::UpdateAI(uint32 const diff)
         if (CheckForUnreachableTarget())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: unreachable target handled, tick ends");
+            return;
+        }
+
+        // A dead party member outranks buffing and wandering.
+        if (SuiTryResurrectAlly())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: resurrecting an ally, tick ends");
             return;
         }
 
@@ -3176,6 +3364,12 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (me->IsInCombat())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: combat AI dispatch");
+        // Druid combat rez: Rebirth a fallen party member before the rotation.
+        if (SuiTryResurrectAlly())
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: combat rez cast, tick ends");
+            return;
+        }
         if (!HasFastCombatPolicy())
         {
             CB_HIT(me->GetGUIDLow(), "cpp-main: legacy combat AI tick");

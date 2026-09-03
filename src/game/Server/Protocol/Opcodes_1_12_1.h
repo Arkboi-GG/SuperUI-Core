@@ -885,5 +885,9 @@ enum OpcodesList
     // otherwise, which is why this is a wire and not a client derivation.
     CMSG_SUI_GIVER_QUESTS                  = 864,      // 0x0360
     SMSG_SUI_GIVER_QUESTS                  = 865,      // 0x0361
-    NUM_MSG_TYPES                          = 866
+    // Companions (owner 2026-09-02): the owner's own alts summoned as AiBot
+    // party members for the session. See SuiCompanion.h.
+    CMSG_SUI_COMPANION                     = 866,      // 0x0362
+    SMSG_SUI_COMPANION                     = 867,      // 0x0363
+    NUM_MSG_TYPES                          = 868
 };

@@ -21,6 +21,7 @@
 #include "Server/WorldSession.h"
 #include "SuiHero.h"
 #include "SuiPossess.h"
+#include "SuiCompanion.h"
 #include "SuiRts.h"
 
 namespace SuiFactionControl
@@ -59,6 +60,10 @@ namespace
     bool IsAiBot(Player const* player)
     {
         if (!player || !player->GetSession() || !player->GetSession()->GetBot())
+            return false;
+        // [COMPANION] A summoned alt belongs to its owner's account, not to the
+        // faction: it never appears in a force roster or under faction control.
+        if (SuiCompanion::IsCompanion(player))
             return false;
         return dynamic_cast<AiBotAI*>(const_cast<Player*>(player)->AI()) != nullptr;
     }

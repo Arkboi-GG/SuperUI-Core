@@ -126,6 +126,9 @@ public:
         if (!holder)
             return;
 
+        // GetAccountId() here is the session KEY the holder was built with (see
+        // LoginPlayer): m_sessions is keyed by it, so a companion resolves to its
+        // own bot session and never to its owner's live one.
         WorldSession* session = sWorld.FindSession(((LoginQueryHolder*)holder)->GetAccountId());
         if (!session)
         {
@@ -384,7 +387,7 @@ void WorldSession::HandlePlayerLoginOpcode(WorldPackets::Character::PlayerLogin 
         return;
     }
 
-    LoginQueryHolder* holder = new LoginQueryHolder(GetAccountId(), packet.guid);
+    LoginQueryHolder* holder = new LoginQueryHolder(GetSessionKey(), packet.guid);   // session key (== account for real sessions)
     if (!holder->Initialize())
     {
         delete holder;                                      // delete all unprocessed queries
@@ -397,7 +400,11 @@ void WorldSession::HandlePlayerLoginOpcode(WorldPackets::Character::PlayerLogin 
 void WorldSession::LoginPlayer(ObjectGuid loginPlayerGuid)
 {
     ASSERT(loginPlayerGuid.IsPlayer());
-    LoginQueryHolder* holder = new LoginQueryHolder(GetAccountId(), loginPlayerGuid);
+    // The holder carries the SESSION KEY, not the account id: the load callback
+    // finds its session with it, and a companion (SuiCompanion.h) shares its
+    // owner's account while living under a synthetic key. Same value for every
+    // ordinary session.
+    LoginQueryHolder* holder = new LoginQueryHolder(GetSessionKey(), loginPlayerGuid);
     if (!holder->Initialize())
     {
         delete holder;                                      // delete all unprocessed queries
@@ -444,6 +451,22 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder *holder)
         {
             sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL, "[CRASH] Dangling map pointer during login on character guid %u", playerGuid.GetCounter());
             KickPlayer();
+            delete holder;
+            m_playerLoading = false;
+            return;
+        }
+
+        // [COMPANION] The character is still in the world as this account's own
+        // companion (its bot session has not finished logging out — the owner
+        // logged out and clicked it within the same tick). Adopting that body
+        // would leave the companion AI dangling on it; dismiss it and let the
+        // player retry in a moment.
+        if (pCurrChar->IsBot())
+        {
+            sPlayerBotMgr.DeleteBot(playerGuid.GetCounter());
+            WorldPacket data(SMSG_CHARACTER_LOGIN_FAILED, 1);
+            data << uint8(1);
+            SendPacket(&data);
             delete holder;
             m_playerLoading = false;
             return;

@@ -98,6 +98,7 @@ ChatCommand * ChatHandler::getCommandTable()
         { "release",    SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiReleaseCommand,          "", nullptr },
         { "worldstate", SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiWorldStateCommand,       "", nullptr },
         { "rts",        SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiRtsCommand,              "", nullptr },
+        { "companion",  SEC_ADMINISTRATOR,      false, &ChatHandler::HandleSuiCompanionCommand,        "", nullptr },
         { nullptr,      0,                      false, nullptr,                                        "", nullptr },
     };
 

@@ -254,7 +254,7 @@ void World::AddSession(WorldSession* s)
 
 void World::AddSessionToSessionsMap(WorldSession* sess)
 {
-    m_sessions[sess->GetAccountId()] = sess;
+    m_sessions[sess->GetSessionKey()] = sess;
 }
 
 void World::AddSession_(WorldSession* s)
@@ -265,7 +265,7 @@ void World::AddSession_(WorldSession* s)
 
     // kick already loaded player with same account (if any) and remove session
     // if player is in loading and want to load again, return
-    if (!RemoveSession(s->GetAccountId()))
+    if (!RemoveSession(s->GetSessionKey()))
     {
         s->KickPlayer();
         delete s;                                           // session not added yet in session list, so not listed in queue
@@ -278,7 +278,7 @@ void World::AddSession_(WorldSession* s)
     // if session already exist, prepare to it deleting at next world update
     // NOTE - KickPlayer() should be called on "old" in RemoveSession()
     {
-        SessionMap::const_iterator old = m_sessions.find(s->GetAccountId());
+        SessionMap::const_iterator old = m_sessions.find(s->GetSessionKey());
 
         if (old != m_sessions.end())
         {
@@ -306,7 +306,7 @@ void World::AddSession_(WorldSession* s)
         }
     }
 
-    m_sessions[s->GetAccountId()] = s;
+    m_sessions[s->GetSessionKey()] = s;
 
     uint32 activeSessions = GetActiveSessionCount();
     uint32 playerLimit = GetPlayerAmountLimit();
@@ -3111,7 +3111,7 @@ void World::InvalidatePlayerDataToAllClient(ObjectGuid guid)
 
 void World::SetSessionDisconnected(WorldSession* sess)
 {
-    SessionMap::iterator itr = m_sessions.find(sess->GetAccountId());
+    SessionMap::iterator itr = m_sessions.find(sess->GetSessionKey());
     ASSERT(itr != m_sessions.end());
 
     AccountPlayHistory& history = m_accountsPlayHistory[sess->GetAccountId()];

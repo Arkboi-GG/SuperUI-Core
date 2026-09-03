@@ -319,6 +319,28 @@ namespace WorldPackets
             }
         };
 
+        /// Companions: summon / dismiss one of the requester's OWN characters, or
+        /// ask for the account list. Exactly 9 bytes; the guid is 0 for a list.
+        class Companion final : public ClientPacket
+        {
+        public:
+            uint8 action = 0;               // SuiCompanion::Action
+            ObjectGuid guid;
+            bool exactSize = false;         // wire discipline: reject sloppy lengths
+
+            explicit Companion() : ClientPacket(CMSG_SUI_COMPANION) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() != 9)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                recv_data >> action >> guid;
+                exactSize = true;
+            }
+        };
+
         class ForceRoster final : public ClientPacket
         {
         public:

@@ -64,7 +64,9 @@ DoctrineKind ResolveDoctrine(AiBotAI const& bot)
     // still) when nobody is, combat assist either way, and — because the branch stands the
     // whole task machinery down — no grind, no patrol, no wander. CMSG_SUI_ORDER injections
     // remain the only thing that moves it deliberately, exactly as the decree says.
-    if (bot.IsUnattendedRealCharacter())
+    // [COMPANION] The same hold covers a summoned companion: out of its owner's
+    // group it stands, never grinds (personal party never autonomous).
+    if (bot.IsRealCharacter())
     {
         CB_HIT(CbGuid(bot), "cpp-doctrine: resolve, player party hold, unattended real character");
         return DoctrineKind::PlayerParty;

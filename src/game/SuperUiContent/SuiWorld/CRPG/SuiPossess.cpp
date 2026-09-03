@@ -25,6 +25,7 @@
 #include "PlayerBotMgr.h"
 #include "Server/WorldSession.h"
 #include "SuiFactionControl.h"
+#include "SuiCompanion.h"
 #include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 #include "SuiWorldState.h"
 #include "World.h"
@@ -191,6 +192,9 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
         return DENY_NOT_BOT;
     AiBotAI* ai = BotAiOf(bot);
     if (!ai)
+        return DENY_NOT_BOT;
+    // [COMPANION] Another human's summoned alt is a real player to you.
+    if (!SuiCompanion::MayCommand(possessor, bot))
         return DENY_NOT_BOT;
     Group* group = possessor->GetGroup();
     bool factionAuthorized = SuiFactionControl::CanControl(possessor, bot);
@@ -744,6 +748,10 @@ void HandleOrder(WorldSession* session, uint8 orderType,
         AiBotAI* ai = dynamic_cast<AiBotAI*>(pMember->AI());
         if (!ai)
             return;
+        // [COMPANION] Ownership closure: another human's character — attended,
+        // unattended, or a summoned alt — takes no orders from you.
+        if (!SuiCompanion::MayCommand(player, pMember))
+            return;
         if (ai->IsPossessed())
         {
             // Normally excluded: possession makes the CLIENT the bot's mover, and a
@@ -900,6 +908,7 @@ void OnPlayerRemovedFromGroup(Player* player)
 {
     if (!player)
         return;
+    SuiCompanion::OnPlayerRemovedFromGroup(player);   // out of the owner's party = dismissed
     if (Player* possessor = GetPossessor(player))
         ForceRelease(possessor->GetSession(), RELEASED_GROUP);
     else if (player->GetSession() && !player->GetSession()->GetSuiControlledGuid().IsEmpty())
@@ -970,8 +979,11 @@ void SendRoster(Player* realPlayer)
         if (!member || !member->IsInWorld())
             continue;
         uint8 flags = 0;
-        if (member->GetSession() && member->GetSession()->GetBot() && BotAiOf(member))
+        if (member->GetSession() && member->GetSession()->GetBot() && BotAiOf(member) &&
+            SuiCompanion::MayCommand(realPlayer, member))
             flags |= ROSTER_CONTROLLABLE;
+        if (SuiCompanion::IsOwnedBy(realPlayer, member))
+            flags |= ROSTER_COMPANION;
         if (IsSuiPossessed(member))
             flags |= ROSTER_POSSESSED;
         if (AiBotAI* memberAi = dynamic_cast<AiBotAI*>(member->AI()))
@@ -1151,7 +1163,8 @@ static bool IsMemberFactsSubject(Player* requester, Player* member)
     Group* group = requester->GetGroup();
     if (!group || member->GetGroup() != group)
         return false;
-    return member->GetSession() && member->GetSession()->GetBot() && BotAiOf(member);
+    return member->GetSession() && member->GetSession()->GetBot() && BotAiOf(member) &&
+        SuiCompanion::MayCommand(requester, member);   // [COMPANION] owner-only alts
 }
 
 /// u64 guid, u16 count, u32 spellIds[] — the active spellbook under the same

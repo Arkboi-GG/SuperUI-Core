@@ -216,6 +216,12 @@ class WorldSession
         uint32 GetGUID() const { return m_guid; }
         AccountTypes GetSecurity() const { return m_security; }
         uint32 GetAccountId() const { return m_accountId; }
+        // World keys m_sessions by THIS, not by the account id. Equal to the
+        // account id for every ordinary session; a companion bot session gets a
+        // synthetic key so it can coexist with its owner's live session while
+        // still saving under the real account (SuiCompanion.h).
+        uint32 GetSessionKey() const { return m_worldMapKey; }
+        void SetSessionKey(uint32 key) { m_worldMapKey = key; }
         std::string GetUsername() const { return m_username; }
         void SetUsername(std::string const& s) { m_username = s; }
         uint32 GetLatency() const { return m_latency; }
@@ -530,6 +536,7 @@ class WorldSession
         void HandleSuiGiverStatusOpcode(WorldPackets::SuiControl::GiverStatus const& packet);
         void HandleSuiGiverQuestsOpcode(WorldPackets::SuiControl::GiverQuests const& packet);
         void HandleSuiPartyLeadOpcode(WorldPackets::SuiControl::PartyLead const& packet);
+        void HandleSuiCompanionOpcode(WorldPackets::SuiControl::Companion const& packet);
         void HandleSuiPortalPrepareOpcode(WorldPackets::SuiPortal::Prepare const& packet);
         void HandleSuiPortalReadyOpcode(WorldPackets::SuiPortal::Ready const& packet);
 
@@ -893,6 +900,7 @@ class WorldSession
         uint32 m_latency;
 
         uint32 m_accountId;
+        uint32 m_worldMapKey;                               // == m_accountId unless SetSessionKey (companions)
         std::string m_username;
         AccountTypes m_security;
         uint32 m_accountFlags;

@@ -37,6 +37,10 @@ namespace SuiPortal
     // reward chosen per member. Also the id-addressed abandon that the vanilla
     // slot-indexed CMSG_QUESTLOG_REMOVE_QUEST cannot express.
     constexpr uint32 CAPABILITY_PARTY_QUEST_ACTS_V1 = 1u << 6;
+    // Companions v1: CMSG/SMSG_SUI_COMPANION (summon/dismiss/list the owner's
+    // own alts) and roster flag 0x08. The client must not send the opcode
+    // until this bit is observed.
+    constexpr uint32 CAPABILITY_COMPANIONS_V1 = 1u << 7;
     // Bit 7 is reserved for PLAN_20 P4 (party-vendor-v1) and left unclaimed even
     // though P5 shipped first.
     // PLAN_20 P5: per-member questgiver dialog status, so a world marker can wear
