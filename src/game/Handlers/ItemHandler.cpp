@@ -888,20 +888,23 @@ void WorldSession::SendListInventory(ObjectGuid vendorguid, uint8 menu_type)
 
 void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBagItem const& packet)
 {
-    Item *pItem = _player->GetItemByPos(packet.srcbag, packet.srcslot);
+    // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
+    Player* pActor = GetSuiActor();
+
+    Item *pItem = pActor->GetItemByPos(packet.srcbag, packet.srcslot);
     if (!pItem)
         return;
 
-    if (!_player->IsValidPos(packet.dstbag, NULL_SLOT, false))     // can be autostore pos
+    if (!pActor->IsValidPos(packet.dstbag, NULL_SLOT, false))     // can be autostore pos
     {
         _player->SendEquipError(EQUIP_ERR_ITEM_DOESNT_GO_TO_SLOT, nullptr, nullptr);
         return;
     }
 
     // cheating: check if source bag / item or destination bag is in bank and player can't use bank
-    if (_player->IsBankPos(packet.srcbag, packet.srcslot) || (packet.dstbag >= BANK_SLOT_BAG_START && packet.dstbag < BANK_SLOT_BAG_END))
+    if (pActor->IsBankPos(packet.srcbag, packet.srcslot) || (packet.dstbag >= BANK_SLOT_BAG_START && packet.dstbag < BANK_SLOT_BAG_END))
     {
-        if (!_player->CanUseBank())
+        if (!pActor->CanUseBank())
         {
             _player->SendEquipError(EQUIP_ERR_TOO_FAR_AWAY_FROM_BANK, pItem, nullptr);
             return;
@@ -911,9 +914,9 @@ void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBag
     uint16 src = pItem->GetPos();
 
     // check unequip potability for equipped items and bank bags
-    if (_player->IsEquipmentPos(src) || _player->IsBagPos(src))
+    if (pActor->IsEquipmentPos(src) || pActor->IsBagPos(src))
     {
-        InventoryResult msg = _player->CanUnequipItem(src, !_player->IsBagPos(src));
+        InventoryResult msg = pActor->CanUnequipItem(src, !pActor->IsBagPos(src));
         if (msg != EQUIP_ERR_OK)
         {
             _player->SendEquipError(msg, pItem, nullptr);
@@ -922,7 +925,7 @@ void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBag
     }
 
     ItemPosCountVec dest;
-    InventoryResult msg = _player->CanStoreItem(packet.dstbag, NULL_SLOT, dest, pItem, false);
+    InventoryResult msg = pActor->CanStoreItem(packet.dstbag, NULL_SLOT, dest, pItem, false);
     if (msg != EQUIP_ERR_OK)
     {
         _player->SendEquipError(msg, pItem, nullptr);
@@ -937,15 +940,22 @@ void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBag
         return;
     }
 
-    _player->RemoveItem(packet.srcbag, packet.srcslot, true);
-    _player->StoreItem(dest, pItem, true);
+    pActor->RemoveItem(packet.srcbag, packet.srcslot, true);
+    pActor->StoreItem(dest, pItem, true);
+
+    // [SUI] Bank/bag/purse edits of the driven bot live in owner-only fields: re-push.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 
 bool WorldSession::CheckBanker(ObjectGuid guid)
 {
+    // [SUI] The banker must be reachable from the DRIVEN body; the GM ".bank" waiver
+    // stays keyed to the session's own security.
+    Player* pActor = GetSuiActor();
     // GM case
-    if (guid == GetPlayer()->GetObjectGuid())
+    if (guid == pActor->GetObjectGuid())
     {
         // command case will return only if player have real access to command
         if (!ChatHandler(GetPlayer()).FindCommand("bank"))
@@ -957,7 +967,7 @@ bool WorldSession::CheckBanker(ObjectGuid guid)
     // banker case
     else
     {
-        if (!GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_BANKER))
+        if (!pActor->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_BANKER))
         {
             sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "Banker %s not found or you can't interact with him.", guid.GetString().c_str());
             return false;
@@ -969,6 +979,9 @@ bool WorldSession::CheckBanker(ObjectGuid guid)
 
 void WorldSession::HandleBuyBankSlotOpcode(WorldPackets::Item::BuyBankSlot const& packet)
 {
+    // [SUI] the driven bot buys ITS bank slot with ITS coin
+    Player* pActor = GetSuiActor();
+
     WorldPacket data(SMSG_BUY_BANK_SLOT_RESULT, 4);
 
     if (!CheckBanker(packet.guid))
@@ -978,7 +991,7 @@ void WorldSession::HandleBuyBankSlotOpcode(WorldPackets::Item::BuyBankSlot const
         return;
     }
 
-    uint32 slot = _player->GetBankBagSlotCount();
+    uint32 slot = pActor->GetBankBagSlotCount();
 
     // next slot
     ++slot;
@@ -994,31 +1007,38 @@ void WorldSession::HandleBuyBankSlotOpcode(WorldPackets::Item::BuyBankSlot const
 
     uint32 price = slotEntry->price;
 
-    if (_player->GetMoney() < price)
+    if (pActor->GetMoney() < price)
     {
         data << uint32(ERR_BANKSLOT_INSUFFICIENT_FUNDS);
         SendPacket(&data);
         return;
     }
 
-    _player->SetBankBagSlotCount(slot);
-    _player->ModifyMoney(-int32(price));
+    pActor->SetBankBagSlotCount(slot);
+    pActor->ModifyMoney(-int32(price));
+
+    // [SUI] Bank/bag/purse edits of the driven bot live in owner-only fields: re-push.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleAutoBankItemOpcode(WorldPackets::Item::AutoBankItem const& packet)
 {
-    Item *pItem = _player->GetItemByPos(packet.srcbag, packet.srcslot);
+    // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
+    Player* pActor = GetSuiActor();
+
+    Item *pItem = pActor->GetItemByPos(packet.srcbag, packet.srcslot);
     if (!pItem)
         return;
 
-    if (!_player->CanUseBank())
+    if (!pActor->CanUseBank())
     {
         _player->SendEquipError(EQUIP_ERR_TOO_FAR_AWAY_FROM_BANK, pItem, nullptr);
         return;
     }
 
     ItemPosCountVec dest;
-    InventoryResult msg = _player->CanBankItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
+    InventoryResult msg = pActor->CanBankItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
     if (msg != EQUIP_ERR_OK)
     {
         _player->SendEquipError(msg, pItem, nullptr);
@@ -1033,50 +1053,61 @@ void WorldSession::HandleAutoBankItemOpcode(WorldPackets::Item::AutoBankItem con
         return;
     }
 
-    _player->RemoveItem(packet.srcbag, packet.srcslot, true);
-    _player->BankItem(dest, pItem, true);
+    pActor->RemoveItem(packet.srcbag, packet.srcslot, true);
+    pActor->BankItem(dest, pItem, true);
+
+    // [SUI] Bank/bag/purse edits of the driven bot live in owner-only fields: re-push.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleAutoStoreBankItemOpcode(WorldPackets::Item::AutoStoreBankItem const& packet)
 {
-    Item *pItem = _player->GetItemByPos(packet.srcbag, packet.srcslot);
+    // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
+    Player* pActor = GetSuiActor();
+
+    Item *pItem = pActor->GetItemByPos(packet.srcbag, packet.srcslot);
     if (!pItem)
         return;
 
-    if (!_player->CanUseBank())
+    if (!pActor->CanUseBank())
     {
         _player->SendEquipError(EQUIP_ERR_TOO_FAR_AWAY_FROM_BANK, pItem, nullptr);
         return;
     }
 
-    if (_player->IsBankPos(packet.srcbag, packet.srcslot))  // moving from bank to inventory
+    if (pActor->IsBankPos(packet.srcbag, packet.srcslot))  // moving from bank to inventory
     {
         ItemPosCountVec dest;
-        InventoryResult msg = _player->CanStoreItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
+        InventoryResult msg = pActor->CanStoreItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
         if (msg != EQUIP_ERR_OK)
         {
             _player->SendEquipError(msg, pItem, nullptr);
             return;
         }
 
-        _player->RemoveItem(packet.srcbag, packet.srcslot, true);
-        Item const* storedItem = _player->StoreItem(dest, pItem, true);
+        pActor->RemoveItem(packet.srcbag, packet.srcslot, true);
+        Item const* storedItem = pActor->StoreItem(dest, pItem, true);
         if (storedItem)
-            _player->ItemAddedQuestCheck(storedItem->GetEntry(), 0);
+            pActor->ItemAddedQuestCheck(storedItem->GetEntry(), 0);
     }
     else                                                    // moving from inventory to bank
     {
         ItemPosCountVec dest;
-        InventoryResult msg = _player->CanBankItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
+        InventoryResult msg = pActor->CanBankItem(NULL_BAG, NULL_SLOT, dest, pItem, false);
         if (msg != EQUIP_ERR_OK)
         {
             _player->SendEquipError(msg, pItem, nullptr);
             return;
         }
 
-        _player->RemoveItem(packet.srcbag, packet.srcslot, true);
-        _player->BankItem(dest, pItem, true);
+        pActor->RemoveItem(packet.srcbag, packet.srcslot, true);
+        pActor->BankItem(dest, pItem, true);
     }
+
+    // [SUI] Bank/bag/purse edits of the driven bot live in owner-only fields: re-push.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleSetAmmoOpcode(WorldPackets::Item::SetAmmo const& packet)

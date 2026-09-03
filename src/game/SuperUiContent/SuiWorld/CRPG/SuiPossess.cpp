@@ -358,6 +358,12 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
     Player* possessor = session->GetPlayer();
     if (Player* bot = sObjectMgr.GetPlayer(botGuid))
     {
+        // A loot window the commander opened AS the bot must not outlive the
+        // possession (the AI would inherit a half-open loot session). Release it
+        // while the possessor is still set so the release frame mirrors back.
+        if (ObjectGuid lootGuid = bot->GetLootGuid())
+            if (bot->GetSession())
+                bot->GetSession()->DoLootRelease(lootGuid);
         bot->SetPossessorGuid(ObjectGuid());
         if (AiBotAI* ai = BotAiOf(bot))
             ai->SetPossessed(false);
@@ -389,6 +395,10 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
         botGuid.GetString().c_str(), uint32(reason));
 
     SendAck(session, possessor ? possessor->GetObjectGuid() : ObjectGuid(), reason, possessor);
+    // The client resets its pet bar on the release ack; hand the own character's
+    // pet bar back after it (no pet → nothing sent, bar stays empty).
+    if (possessor && possessor->IsInWorld())
+        possessor->PetSpellInitialize();
     if (possessor && possessor->GetGroup())
         BroadcastRoster(possessor->GetGroup());
     return true;
@@ -410,6 +420,10 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
         if (MasterPlayer* master = bot->GetSession()->GetMasterPlayer())
             master->SendInitialActionButtons();
         SendSnapshot(session, bot);
+        // The driven body's pet bar (hunter/warlock companions): SMSG_PET_SPELLS on
+        // the bot's session mirrors through the proxy. No pet → nothing is sent and
+        // the client's control-change reset leaves the bar empty.
+        bot->PetSpellInitialize();
         if (Group* group = session->GetPlayer()->GetGroup())
             BroadcastRoster(group);
     }
@@ -1074,6 +1088,30 @@ static void SendSnapshot(WorldSession* to, Player* bot)
             AppendSnapshotItem(data, 255, i, item);
             ++count;
         }
+    // Snapshot v4: the bank. PLAYER_BANK_SLOT_1.. / PLAYER_BANK_BAG_SLOT_1.. are
+    // owner-only fields, so the commander's BankFrame drew a driven bot's bank
+    // empty. Same contiguous slot numbering (bank items 39-62, bank bags 63-68);
+    // bank-bag contents follow below with bag = that bank bag slot. Rows, not a
+    // trailer, so any client that files bag-255 rows by slot gets them for free.
+    for (uint8 i = BANK_SLOT_ITEM_START; i < BANK_SLOT_BAG_END; ++i)
+        if (Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+        {
+            AppendSnapshotItem(data, 255, i, item);
+            ++count;
+        }
+    for (uint8 bagSlot = BANK_SLOT_BAG_START; bagSlot < BANK_SLOT_BAG_END; ++bagSlot)
+        if (Item* bagItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot))
+            if (ItemPrototype const* proto = bagItem->GetProto())
+                if (proto->Class == ITEM_CLASS_CONTAINER)
+                {
+                    Bag* pBag = (Bag*)bagItem;
+                    for (uint32 j = 0; j < pBag->GetBagSize(); ++j)
+                        if (Item* item = pBag->GetItemByPos((uint8)j))
+                        {
+                            AppendSnapshotItem(data, bagSlot, (uint8)j, item);
+                            ++count;
+                        }
+                }
     for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
         if (Item* bagItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, bagSlot))
             if (ItemPrototype const* proto = bagItem->GetProto())
@@ -2281,6 +2319,23 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         // mailbox verbs themselves run as GetSuiActor() on the commander's session.
         case SMSG_RECEIVED_MAIL:
         case MSG_QUERY_NEXT_MAIL_TIME:
+        // [SUI] loot: LootHandler runs as GetSuiActor(), and Player::SendLoot /
+        // SendLootRelease / SendNotifyLootItemRemoved / SendNotifyLootMoneyRemoved /
+        // SendLootMoneyNotify all emit on the LOOTER's session — the bot's. Item
+        // pushes: Player::SendNewItem skips the possessor in its group broadcast so
+        // this mirrored copy is the commander's only one.
+        case SMSG_LOOT_RESPONSE:
+        case SMSG_LOOT_RELEASE_RESPONSE:
+        case SMSG_LOOT_REMOVED:
+        case SMSG_LOOT_CLEAR_MONEY:
+        case SMSG_LOOT_MONEY_NOTIFY:
+        case SMSG_ITEM_PUSH_RESULT:
+        // [SUI] pet: PetHandler runs as GetSuiActor(); the pet bar, mode, feedback and
+        // cast-fail frames address the pet OWNER's session — the bot's.
+        case SMSG_PET_SPELLS:
+        case SMSG_PET_MODE:
+        case SMSG_PET_ACTION_FEEDBACK:
+        case SMSG_PET_CAST_FAILED:
             break;
         default:
             return;

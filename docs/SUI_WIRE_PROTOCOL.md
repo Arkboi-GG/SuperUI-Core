@@ -202,9 +202,35 @@ The client routes the inner body through its normal parser into the per-guid
 store and **drops proxies whose sourceGuid ≠ its current controlled guid**
 (possession-boundary stragglers).
 
+Mirrored families (the `MirrorOwnerPacket` whitelist), each paired with the
+handler family that runs as `GetSuiActor()`:
+
+| Family | Inner opcodes |
+|---|---|
+| spells / bars / cooldowns | SMSG_ACTION_BUTTONS, SMSG_INITIAL_SPELLS, SMSG_LEARNED_SPELL, SMSG_SUPERCEDED_SPELL, SMSG_REMOVED_SPELL, SMSG_SPELL_COOLDOWN, SMSG_COOLDOWN_EVENT, SMSG_CLEAR_COOLDOWN, SMSG_CAST_RESULT |
+| quests / gossip | SMSG_GOSSIP_MESSAGE, SMSG_GOSSIP_COMPLETE, SMSG_QUESTGIVER_* |
+| vendor / trainer | SMSG_LIST_INVENTORY, SMSG_SELL_ITEM, SMSG_BUY_ITEM, SMSG_BUY_FAILED, SMSG_TRAINER_LIST, SMSG_TRAINER_BUY_SUCCEEDED, SMSG_TRAINER_BUY_FAILED |
+| trade | SMSG_TRADE_STATUS, SMSG_TRADE_STATUS_EXTENDED |
+| mail | SMSG_RECEIVED_MAIL, MSG_QUERY_NEXT_MAIL_TIME |
+| loot (2026-09-03) | SMSG_LOOT_RESPONSE, SMSG_LOOT_RELEASE_RESPONSE, SMSG_LOOT_REMOVED, SMSG_LOOT_CLEAR_MONEY, SMSG_LOOT_MONEY_NOTIFY, SMSG_ITEM_PUSH_RESULT |
+| pet (2026-09-03) | SMSG_PET_SPELLS, SMSG_PET_MODE, SMSG_PET_ACTION_FEEDBACK, SMSG_PET_CAST_FAILED |
+
+Loot notes: `Player::SendNewItem`'s group broadcast skips the bot's possessor,
+so the mirrored copy is the commander's only SMSG_ITEM_PUSH_RESULT. Group loot
+rolls are NOT mirrored: the driven bot's AI keeps auto-passing its own roll and
+the commander rolls with its own character's copy. A possessed bot's loot
+window is force-released on grant AND on release. The driven body's pet bar
+(SMSG_PET_SPELLS) is pushed after the grant snapshot; the own character's pet
+bar is re-sent after the release ack.
+
 ## SMSG_SUI_SNAPSHOT (M4)
 Read-only bags/talents for the possessed bot, pushed once after a grant.
-Layout finalized in M4. Under PARTY_MEMBER_FACTS (capability bit 3) the same
+Layout finalized in M4. Item rows are `u8 bag, u8 slot, u64 guid, u32 entry,
+u32 stack, u8 bagSlots`; bag 255 = character-held with the contiguous
+PLAYER_FIELD_INV_SLOT numbering (equipment 0-18, bag slots 19-22, backpack
+23-38, **bank items 39-62 and bank bags 63-68 since 2026-09-03**, keyring 81+);
+any other bag value is the slot of the equipped/bank bag the row sits in. Bag
+rows precede their contents. Under PARTY_MEMBER_FACTS (capability bit 3) the same
 byte-identical packet is also pushed for every party/raid AiBot member — no
 possession required — on every roster edge and in answer to
 `CMSG_SUI_MEMBER_FACTS` (see below).

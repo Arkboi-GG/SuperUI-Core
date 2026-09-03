@@ -72,12 +72,16 @@ void WorldSession::SendTabardVendorActivate(ObjectGuid guid)
 
 void WorldSession::HandleBankerActivateOpcode(WorldPackets::Npc::BankerActivate const& packet)
 {
+    // [SUI] The driven bot opens ITS bank: CheckBanker ranges from the actor and
+    // SendShowBank latches the banker on the actor (Player::CanUseBank reads it).
+    // The bank contents ride the snapshot (bank rows), the frame opens on this socket.
+    Player* pActor = GetSuiActor();
     if (!CheckBanker(packet.guid))
         return;
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pActor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pActor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     SendShowBank(packet.guid);
 }
@@ -86,7 +90,7 @@ void WorldSession::SendShowBank(ObjectGuid guid)
 {
     WorldPacket data(SMSG_SHOW_BANK, 8);
     data << ObjectGuid(guid);
-    GetPlayer()->m_currentBankerGuid = guid;
+    GetSuiActor()->m_currentBankerGuid = guid;   // [SUI] the driven bot is the one at the banker
     SendPacket(&data);
 }
 

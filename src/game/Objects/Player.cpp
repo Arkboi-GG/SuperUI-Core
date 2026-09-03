@@ -12083,8 +12083,12 @@ void Player::SendNewItem(Item const* item, uint32 count, bool received, bool cre
     data << uint32(count);                                  // count of items
 #endif
 
+    // [SUI] A possessed bot's commander is a group member too: skip its direct copy
+    // here, because the bot's own copy (this session, socket-less) is mirrored to the
+    // commander as SMSG_SUI_PROXY — one "You receive loot" line, not two. Unpossessed
+    // the ignore guid is empty and this is the stock broadcast.
     if (broadcast && GetGroup())
-        GetGroup()->BroadcastPacket(&data, true);
+        GetGroup()->BroadcastPacket(&data, true, -1, GetPossessorGuid());
     else
         GetSession()->SendPacket(&data);
 }

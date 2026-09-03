@@ -38,10 +38,19 @@
 #include "ScriptMgr.h"
 #include "Util.h"
 #include "Anticheat.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: loot as the driven bot
+
+// [SUI] Loot routing: every verb below acts as GetSuiActor() (the possessed bot while
+// driving one, else _player). Loot is player-scoped server-side (GetLootGuid, the
+// looter list, UNIT_FLAG_LOOTING), so the DRIVEN body opens, takes and releases; the
+// reply frames Player::SendLoot* emit on the bot's socket-less session are mirrored
+// to the commander by SuiPossess::MirrorOwnerPacket. Equip errors stay on _player
+// (the commander's own socket), the ItemHandler convention.
 
 void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLootItem const& packet)
 {
-    Player*    player = GetPlayer();
+    Player*    player = GetSuiActor();
+    bool const suiActing = player != _player;
     ObjectGuid lguid = player->GetLootGuid();
     Loot*      loot;
     Item*      pItem = nullptr;
@@ -56,7 +65,7 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
             GameObject* go = player->GetMap()->GetGameObject(lguid);
 
             // not check distance for GO in case owned GO (fishing bobber case, for example) or Fishing hole GO
-            auto ShouldCheckDistance = [go, player = _player]()
+            auto ShouldCheckDistance = [go, player]()
             {
                 if (go->GetOwnerGuid() == player->GetObjectGuid())
                     return false;
@@ -69,7 +78,7 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
                 return true;
             };
 
-            if (!go || (ShouldCheckDistance() && !go->IsWithinDistInMap(_player, INTERACTION_DISTANCE)))
+            if (!go || (ShouldCheckDistance() && !go->IsWithinDistInMap(player, INTERACTION_DISTANCE)))
             {
                 player->SendLootRelease(lguid);
                 return;
@@ -104,7 +113,7 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
         }
         case HIGHGUID_UNIT:
         {
-            Creature* pCreature = GetPlayer()->GetMap()->GetCreature(lguid);
+            Creature* pCreature = player->GetMap()->GetCreature(lguid);
 
             bool ok_loot = pCreature && pCreature->IsAlive() == (player->GetClass() == CLASS_ROGUE && pCreature->lootForPickPocketed);
 
@@ -125,7 +134,7 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
             }
             else
             {
-                if (!pCreature->IsWithinDistInMap(_player, _player->GetMaxLootDistance(pCreature), true, SizeFactor::None))
+                if (!pCreature->IsWithinDistInMap(player, player->GetMaxLootDistance(pCreature), true, SizeFactor::None))
                 {
                     player->SendLootError(lguid, LOOT_ERROR_TOO_FAR);
                     return;
@@ -150,7 +159,7 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
 
     if (!item)
     {
-        player->SendEquipError(EQUIP_ERR_ALREADY_LOOTED, nullptr, nullptr);
+        _player->SendEquipError(EQUIP_ERR_ALREADY_LOOTED, nullptr, nullptr);
         return;
     }
 
@@ -225,17 +234,22 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
         --loot->unlootedCount;
 
 
-        sLog.Player(this, LOG_LOOTS, LOG_LVL_MINIMAL, "%s loots %ux%u [loot from %s]", _player->GetShortDescription().c_str(), item->count, item->itemid, lguid.GetString().c_str());
+        sLog.Player(this, LOG_LOOTS, LOG_LVL_MINIMAL, "%s loots %ux%u [loot from %s]", player->GetShortDescription().c_str(), item->count, item->itemid, lguid.GetString().c_str());
         player->SendNewItem(newitem, uint32(item->count), false, false, true);
         player->OnReceivedItem(newitem);
+        // [SUI] The bot's bags changed and its private item fields never stream to
+        // the commander: re-push the snapshot so the loot shows up in its bags.
+        if (suiActing)
+            SuiPossess::ResnapshotControlled(this);
     }
     else
-        player->SendEquipError(msg, nullptr, nullptr, item->itemid);
+        _player->SendEquipError(msg, nullptr, nullptr, item->itemid);
 }
 
 void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
 {
-    Player* player = GetPlayer();
+    Player* player = GetSuiActor();   // [SUI] the driven bot takes the coin
+    bool const suiActing = player != _player;
     if (!player || !player->IsInWorld())
         return;
     ObjectGuid guid = player->GetLootGuid();
@@ -250,26 +264,26 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
     {
         case HIGHGUID_GAMEOBJECT:
         {
-            GameObject* pGameObject = GetPlayer()->GetMap()->GetGameObject(guid);
+            GameObject* pGameObject = player->GetMap()->GetGameObject(guid);
 
             // not check distance for GO in case owned GO (fishing bobber case, for example)
-            if (pGameObject && (pGameObject->GetOwnerGuid() == _player->GetObjectGuid() || pGameObject->IsWithinDistInMap(_player, INTERACTION_DISTANCE)))
+            if (pGameObject && (pGameObject->GetOwnerGuid() == player->GetObjectGuid() || pGameObject->IsWithinDistInMap(player, INTERACTION_DISTANCE)))
                 pLoot = &pGameObject->loot;
 
             break;
         }
         case HIGHGUID_CORPSE:                               // remove insignia ONLY in BG
         {
-            Corpse* bones = _player->GetMap()->GetCorpse(guid);
+            Corpse* bones = player->GetMap()->GetCorpse(guid);
 
-            if (bones && bones->IsWithinDistInMap(_player, INTERACTION_DISTANCE))
+            if (bones && bones->IsWithinDistInMap(player, INTERACTION_DISTANCE))
                 pLoot = &bones->loot;
 
             break;
         }
         case HIGHGUID_ITEM:
         {
-            pItem = GetPlayer()->GetItemByGuid(guid);
+            pItem = player->GetItemByGuid(guid);
             if (!pItem || !pItem->HasGeneratedLoot())
                 return;
 
@@ -279,13 +293,13 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
         }
         case HIGHGUID_UNIT:
         {
-            Creature* pCreature = GetPlayer()->GetMap()->GetCreature(guid);
+            Creature* pCreature = player->GetMap()->GetCreature(guid);
 
             if (player->GetClass() == CLASS_ROGUE && pCreature && pCreature->lootForPickPocketed)
                 shareMoneyWithGroup = false;
             bool ok_loot = pCreature && pCreature->IsAlive() == (player->GetClass() == CLASS_ROGUE && pCreature->lootForPickPocketed);
 
-            if (ok_loot && pCreature->IsWithinDistInMap(_player, _player->GetMaxLootDistance(pCreature), true, SizeFactor::None))
+            if (ok_loot && pCreature->IsWithinDistInMap(player, player->GetMaxLootDistance(pCreature), true, SizeFactor::None))
                 pLoot = &pCreature->loot ;
 
             break;
@@ -334,57 +348,68 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
 
         if (pItem)
             pItem->SetLootState(ITEM_LOOT_CHANGED);
+
+        // [SUI] Coinage is an owner-only field; the commander sees it via the snapshot.
+        if (suiActing)
+            SuiPossess::ResnapshotControlled(this);
     }
 }
 
 void WorldSession::HandleLootOpcode(WorldPackets::Loot::LootUnit const& packet)
 {
+    // [SUI] The driven bot kneels at the corpse: state gates, the loot window and
+    // the looter registration are all ITS. Its SendLoot reply frames mirror back.
+    Player* actor = GetSuiActor();
+
     if (!packet.guid.IsAnyTypeCreature() && !packet.guid.IsPlayer() && !packet.guid.IsCorpse())
     {
-        _player->SendLootError(packet.guid, LOOT_ERROR_DIDNT_KILL);
+        actor->SendLootError(packet.guid, LOOT_ERROR_DIDNT_KILL);
         ProcessAnticheatAction("ItemsCheck", "CMSG_LOOT on non-unit guid", CHEAT_ACTION_LOG);
         return;
     }
 
     // Check possible cheat
-    if (!_player->IsAlive() || !_player->IsInWorld())
+    if (!actor->IsAlive() || !actor->IsInWorld())
     {
-        _player->SendLootError(packet.guid, LOOT_ERROR_PLAYER_NOT_FOUND);
+        actor->SendLootError(packet.guid, LOOT_ERROR_PLAYER_NOT_FOUND);
         return;
     }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_7_1
-    if (_player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_NO_PLAY_TIME))
+    if (actor->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_NO_PLAY_TIME))
     {
-        _player->SendLootError(packet.guid, LOOT_ERROR_PLAY_TIME_EXCEEDED);
+        actor->SendLootError(packet.guid, LOOT_ERROR_PLAY_TIME_EXCEEDED);
         return;
     }
 #endif
 
-    if (_player->GetStandState() != UNIT_STAND_STATE_STAND)
+    if (actor->GetStandState() != UNIT_STAND_STATE_STAND)
     {
-        _player->SendLootError(packet.guid, LOOT_ERROR_NOTSTANDING);
+        actor->SendLootError(packet.guid, LOOT_ERROR_NOTSTANDING);
         return;
     }
 
-    if (_player->HasUnitState(UNIT_STATE_STUNNED))
+    if (actor->HasUnitState(UNIT_STATE_STUNNED))
     {
-        _player->SendLootError(packet.guid, LOOT_ERROR_STUNNED);
+        actor->SendLootError(packet.guid, LOOT_ERROR_STUNNED);
         return;
     }
 
-    if (_player->IsNonMeleeSpellCasted())
-        _player->InterruptNonMeleeSpells(false);
+    if (actor->IsNonMeleeSpellCasted())
+        actor->InterruptNonMeleeSpells(false);
 
-    GetPlayer()->SendLoot(packet.guid, LOOT_CORPSE);
+    actor->SendLoot(packet.guid, LOOT_CORPSE);
 }
 
 void WorldSession::HandleLootReleaseOpcode(WorldPackets::Loot::LootRelease const& /*packet*/)
 {
     // cheaters can modify lguid to prevent correct apply loot release code and re-loot
     // use internal stored guid
-    if (ObjectGuid lootGuid = GetPlayer()->GetLootGuid())
-        DoLootRelease(lootGuid);
+    // [SUI] DoLootRelease works on ITS session's player, so a driven bot releases
+    // through its own (socket-less) session; the release frame mirrors back.
+    Player* actor = GetSuiActor();
+    if (ObjectGuid lootGuid = actor->GetLootGuid())
+        actor->GetSession()->DoLootRelease(lootGuid);
 }
 
 void WorldSession::DoLootRelease(ObjectGuid lguid)
@@ -615,39 +640,44 @@ void WorldSession::DoLootRelease(ObjectGuid lguid)
 
 void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive const& packet)
 {
-    if (!_player->GetGroup() || _player->GetGroup()->GetLootMethod() != MASTER_LOOT || _player->GetGroup()->GetLooterGuid() != _player->GetObjectGuid())
+    // [SUI] The master looter is whoever holds the loot window open: the driven bot
+    // while possessing. Its loot-error frames mirror back to the commander.
+    Player* actor = GetSuiActor();
+    bool const suiActing = actor != _player;
+
+    if (!actor->GetGroup() || actor->GetGroup()->GetLootMethod() != MASTER_LOOT || actor->GetGroup()->GetLooterGuid() != actor->GetObjectGuid())
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
         return;
     }
 
     Player* target = ObjectAccessor::FindPlayer(packet.playerGuid);
     if (!target || !target->IsInWorld())
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_PLAYER_NOT_FOUND);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_PLAYER_NOT_FOUND);
         return;
     }
 
     // No loot for a player on another map, or not in the raid.
-    if (!_player->IsInRaidWith(target) || !_player->IsInMap(target))
+    if (!actor->IsInRaidWith(target) || !actor->IsInMap(target))
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
         return;
     }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_7_1
     if (target->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_NO_PLAY_TIME))
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
         return;
     }
 #endif
 
     sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WorldSession::HandleLootMasterGiveOpcode (CMSG_LOOT_MASTER_GIVE, 0x02A3) Target = %s [%s].", packet.playerGuid.GetString().c_str(), target->GetName());
 
-    if (_player->GetLootGuid() != packet.lootGuid)
+    if (actor->GetLootGuid() != packet.lootGuid)
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
         return;
     }
 
@@ -655,16 +685,16 @@ void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive
 
     if (packet.lootGuid.IsCreature())
     {
-        Creature* creature = GetPlayer()->GetMap()->GetCreature(packet.lootGuid);
+        Creature* creature = actor->GetMap()->GetCreature(packet.lootGuid);
         if (!creature)
         {
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
             return;
         }
 
-        if (!_player->IsAtGroupRewardDistance(creature))
+        if (!actor->IsAtGroupRewardDistance(creature))
         {
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_TOO_FAR);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_TOO_FAR);
             return;
         }
 
@@ -672,16 +702,16 @@ void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive
     }
     else if (packet.lootGuid.IsGameObject())
     {
-        GameObject* go = GetPlayer()->GetMap()->GetGameObject(packet.lootGuid);
+        GameObject* go = actor->GetMap()->GetGameObject(packet.lootGuid);
         if (!go)
         {
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
             return;
         }
 
-        if (!_player->IsAtGroupRewardDistance(go))
+        if (!actor->IsAtGroupRewardDistance(go))
         {
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_TOO_FAR);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_TOO_FAR);
             return;
         }
 
@@ -689,23 +719,23 @@ void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive
     }
     else
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_DIDNT_KILL);
         return;
     }
 
     if (packet.slotId >= pLoot->items.size())
     {
-        _player->SendLootRelease(packet.lootGuid);
+        actor->SendLootRelease(packet.lootGuid);
         _player->SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, nullptr, nullptr);
         sLog.Player(this, LOG_BASIC, LOG_LVL_BASIC,
             "AutoLootItem: Player %s might be using a hack! (slot %d, size %lu)",
-            GetPlayer()->GetName(), packet.slotId, (unsigned long)pLoot->items.size());
+            actor->GetName(), packet.slotId, (unsigned long)pLoot->items.size());
         return;
     }
 
     if (!pLoot->IsAllowedLooter(packet.playerGuid, false))
     {
-        _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
+        actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
         return;
     }
 
@@ -719,11 +749,11 @@ void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive
 
         // send duplicate of error massage to master looter
         if (msg == EQUIP_ERR_BAG_FULL || msg == EQUIP_ERR_INVENTORY_FULL)
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_INV_FULL);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_INV_FULL);
         else if (msg == EQUIP_ERR_CANT_CARRY_MORE_OF_THIS)
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_UNIQUE_ITEM);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_UNIQUE_ITEM);
         else
-            _player->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
+            actor->SendLootError(packet.lootGuid, LOOT_ERROR_MASTER_OTHER);
         return;
     }
 
@@ -732,10 +762,13 @@ void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive
     {
         sLog.Player(this, LOG_LOOTS, LOG_LVL_BASIC,
             "Master loot %s gives %ux%u to %s [loot from %s]",
-            _player->GetShortDescription().c_str(), item.count, item.itemid,
+            actor->GetShortDescription().c_str(), item.count, item.itemid,
             target->GetShortDescription().c_str(), packet.lootGuid.GetString().c_str());
         target->SendNewItem(newitem, uint32(item.count), false, false, true);
         target->OnReceivedItem(newitem);
+        // [SUI] The driven bot handed itself the item: its bags changed, re-push them.
+        if (suiActing && target == actor)
+            SuiPossess::ResnapshotControlled(this);
     }
 
     // mark as looted
