@@ -889,5 +889,10 @@ enum OpcodesList
     // party members for the session. See SuiCompanion.h.
     CMSG_SUI_COMPANION                     = 866,      // 0x0362
     SMSG_SUI_COMPANION                     = 867,      // 0x0363
-    NUM_MSG_TYPES                          = 868
+    // Party flight (owner 2026-09-03): the Command View flies the whole
+    // commanded party from a flight master, asking first when someone cannot
+    // board. See SuiTaxi.h.
+    CMSG_SUI_PARTY_TAXI                    = 868,      // 0x0364
+    SMSG_SUI_PARTY_TAXI_RESULT             = 869,      // 0x0365
+    NUM_MSG_TYPES                          = 870
 };

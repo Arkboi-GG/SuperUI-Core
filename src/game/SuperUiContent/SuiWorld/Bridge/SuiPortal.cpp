@@ -342,7 +342,8 @@ void SuiPortal::WriteCapabilityTrailer(WorldPacket& data)
         CAPABILITY_PARTY_GIVER_STATUS_V1 |
         CAPABILITY_PARTY_LEAD_V1 |
         CAPABILITY_PARTY_GIVER_QUESTS_V1 |
-        CAPABILITY_COMPANIONS_V1;
+        CAPABILITY_COMPANIONS_V1 |
+        CAPABILITY_PARTY_TAXI_V1;
     if (catalogComplete)
         capabilities |= CAPABILITY_PORTAL_CAST_PREWARM_V1;
 

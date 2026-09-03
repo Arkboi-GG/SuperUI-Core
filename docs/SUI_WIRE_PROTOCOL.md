@@ -214,6 +214,8 @@ handler family that runs as `GetSuiActor()`:
 | mail | SMSG_RECEIVED_MAIL, MSG_QUERY_NEXT_MAIL_TIME |
 | loot (2026-09-03) | SMSG_LOOT_RESPONSE, SMSG_LOOT_RELEASE_RESPONSE, SMSG_LOOT_REMOVED, SMSG_LOOT_CLEAR_MONEY, SMSG_LOOT_MONEY_NOTIFY, SMSG_ITEM_PUSH_RESULT |
 | pet (2026-09-03) | SMSG_PET_SPELLS, SMSG_PET_MODE, SMSG_PET_ACTION_FEEDBACK, SMSG_PET_CAST_FAILED |
+| taxi (2026-09-03) | SMSG_ACTIVATETAXIREPLY, SMSG_SHOWTAXINODES, SMSG_TAXINODE_STATUS, SMSG_NEW_TAXI_PATH (the last three reach the bot's session through a gossip "I need a ride") |
+| gossip-answered (2026-09-03) | SMSG_SHOW_BANK, MSG_LIST_STABLED_PETS, MSG_TALENT_WIPE_CONFIRM, SMSG_BINDER_CONFIRM, SMSG_PLAYERBOUND, MSG_AUCTION_HELLO — Player::OnGossipSelect runs as the bot and answers these on its session; stable master, innkeeper bind and talent wipe handlers run as GetSuiActor() too. SMSG_BINDPOINTUPDATE is not mirrored (the client keeps one hearth). |
 
 Loot notes: `Player::SendNewItem`'s group broadcast skips the bot's possessor,
 so the mirrored copy is the commander's only SMSG_ITEM_PUSH_RESULT. Group loot
@@ -698,7 +700,7 @@ the stock `CMSG_GAMEOBJ_USE` range and eligibility checks.
 | `CMSG_SUI_COMPANION` | 866 (0x0362) | C → S |
 | `SMSG_SUI_COMPANION` | 867 (0x0363) | S → C |
 
-`NUM_MSG_TYPES` is 868. Advertised by capability bit 7 (`COMPANIONS_V1`) in the
+`NUM_MSG_TYPES` is 870 (see the party-flight section below). Advertised by capability bit 7 (`COMPANIONS_V1`) in the
 `SUI1` trailer; the client must not send `CMSG_SUI_COMPANION` until it has seen it.
 
 A **companion** is one of the requester's OWN characters (same account, verified
@@ -787,3 +789,62 @@ converts). Arrival lands in formation behind the owner's driven body (slot ring,
 dead party member); otherwise the ghost waits at its corpse for the graveyard
 run time (floored by the reclaim delay) and pops in place at 50% once the party
 is out of combat.
+
+## Party flight — CMSG_SUI_PARTY_TAXI / SMSG_SUI_PARTY_TAXI_RESULT (owner decision 2026-09-03)
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_PARTY_TAXI` | 868 (0x0364) | C → S |
+| `SMSG_SUI_PARTY_TAXI_RESULT` | 869 (0x0365) | S → C |
+
+`NUM_MSG_TYPES` is 870. Advertised by capability bit 11 (`PARTY_TAXI_V1`) in the
+`SUI1` trailer; the client must not send the request until it has seen it.
+Server implementation: `src/game/SuperUiContent/SuiWorld/CRPG/SuiTaxi.{h,cpp}`.
+
+**Two taxi laws (owner 2026-09-03):**
+
+1. **Direct control rides along.** While possessing, the stock taxi handlers
+   (`TaxiHandler.cpp`) run as `GetSuiActor()`: the flight master is ranged from
+   the driven bot, the map shows ITS discovered nodes, ITS purse pays, IT
+   flies, and the human stays in control — the flight spline is the bot's
+   public monster-move and the client lets it drive the controller. A flight
+   never releases possession. The rest of the party HOLDS (DoPartyFollow: a
+   same-map boss on a taxi is no longer chased) and the human may hop to
+   another member with Ctrl+Tab / Ctrl+Click; the follow anchor re-points to
+   the new driven body on the next tick and the flyer lands under its own AI
+   (cargo: the AI runs nothing but the bridge tick while `IsTaxiFlying()`).
+   Once landed and far behind, the ordinary catch-up rule brings it back.
+2. **Command View flies the party.** From the sky the taxi map's destination
+   click becomes `CMSG_SUI_PARTY_TAXI`; the whole party the commander commands
+   takes the flight. Nothing flies unless everyone can board or the commander
+   confirmed.
+
+### CMSG_SUI_PARTY_TAXI (10 + 4·count bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | bit 0 CONFIRMED: fly the eligible members even if some cannot board |
+| flightMaster | u64 | the NPC; must be interactable from the requester's driven body |
+| count | u8 | 2..8 |
+| nodes | u32 × count | the CMSG_ACTIVATETAXIEXPRESS chain: source first, destination last |
+
+Flight party = the requester's own character + every group member that is a
+bot for the requester (`SuiCompanion::MayCommand`; other humans' characters
+and companions are never touched). Per member the server applies the gates of
+`Player::ActivateTaxiPathTo`: alive / not in combat / not casting / not
+teleporting (BUSY), not already flying (IN_FLIGHT), same map (OTHER_MAP),
+within the boarding cube of the source node (TOO_FAR), every node of the chain
+discovered (UNKNOWN_NODE), first-hop fare after reputation discount
+(NO_MONEY). If anyone fails and the request is not CONFIRMED, nobody flies.
+Boarding bots are dismounted, their motion cleared and their journey abandoned
+first; a member the stock activation still refuses is reported REFUSED (7).
+
+### SMSG_SUI_PARTY_TAXI_RESULT (14 + 9·count bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| result | u8 | 0 FLYING (rows = left behind) · 1 CONFIRM_NEEDED (rows = cannot board, nobody flew) · 2 DENIED · 3 NO_PATH |
+| flightMaster | u64 | echoed |
+| destination | u32 | last node of the chain |
+| count | u8 | |
+| rows | count × { u64 guid, u8 reason } | reason 1 UNKNOWN_NODE · 2 NO_MONEY · 3 TOO_FAR · 4 BUSY · 5 IN_FLIGHT · 6 OTHER_MAP · 7 REFUSED |

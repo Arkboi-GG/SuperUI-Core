@@ -1354,6 +1354,14 @@ void AiBotAI::DoPartyFollow()
         return;
     }
 
+    // [SUI-TAXI] Cargo: a bot on a flight (party flight, or driven onto one and then
+    // left) never pushes a follow generator over the flight generator.
+    if (me->IsTaxiFlying())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: on a taxi, no follow");
+        return;
+    }
+
     Player* pBoss = FindEscortBoss();
     if (!pBoss || !pBoss->IsInWorld() || !pBoss->IsAlive())
     {
@@ -1392,6 +1400,17 @@ void AiBotAI::DoPartyFollow()
     }
 
     m_bossOffMapMs = 0;   // same map — a fresh crossing starts a fresh dwell
+
+    // [SUI-TAXI] Owner 2026-09-03: in direct control the rest of the party STAYS when the
+    // driven body takes a flight. A same-map boss on a taxi used to be chased (the cross-map
+    // branch above waits, this branch did not) — the escort ran under the gryphon and, past
+    // the catch-up distance, teleported after it. Hold instead; the follow re-anchors the
+    // moment the human hops to another body (SuiDrivenBodyOf is read live every tick).
+    if (pBoss->IsTaxiFlying())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: boss on a taxi, holding");
+        return;
+    }
 
     float const dist = me->GetDistance(pBoss);
 
@@ -1846,6 +1865,17 @@ void AiBotAI::UpdateAI(uint32 const diff)
     if (m_possessed && !SuiPossess::IsCommandedFromFreeView(me))
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: possessed, autonomy suspended, bridge only");
+        UpdateBridgeTick();
+        return;
+    }
+
+    // [SUI-TAXI] A bot on a flight is cargo until it lands: the flight generator owns
+    // its motion, hostile refs are offline, and nothing autonomous may push a movement
+    // generator over it (party flight, or a possessed flyer whose human hopped away).
+    // The bridge stays alive so the brain keeps seeing STATE.
+    if (me->IsTaxiFlying())
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: on a taxi, autonomy suspended, bridge only");
         UpdateBridgeTick();
         return;
     }

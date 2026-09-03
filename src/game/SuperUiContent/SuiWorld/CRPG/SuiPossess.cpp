@@ -2336,6 +2336,30 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_PET_MODE:
         case SMSG_PET_ACTION_FEEDBACK:
         case SMSG_PET_CAST_FAILED:
+        // [SUI] taxi: TaxiHandler runs as GetSuiActor(); the activation verdict
+        // leaves on the FLYER's session (Player::ActivateTaxiPathTo). The map,
+        // node status and discovery frames answer on the commander's socket from
+        // the direct handlers, but a gossip "I need a ride" (Player::OnGossipSelect
+        // → GetSession()->SendTaxiMenu / SendLearnNewTaxiNode) builds them on the
+        // BOT's session — without these the option silently did nothing.
+        case SMSG_ACTIVATETAXIREPLY:
+        case SMSG_SHOWTAXINODES:
+        case SMSG_TAXINODE_STATUS:
+        case SMSG_NEW_TAXI_PATH:
+        // [SUI] gossip-answered frames of the routed families (owner 2026-09-03:
+        // "a gossip reply that lands nowhere doesn't count as functioning").
+        // Player::OnGossipSelect runs as the driven bot and answers on ITS session:
+        // banker → SendShowBank, stable master → SendStablePet, trainer "unlearn
+        // talents" → SendTalentWipeConfirm, innkeeper → the Bind spell's confirm,
+        // auctioneer → SendAuctionHello. The direct frame requests already answer
+        // on the commander's socket. SMSG_BINDPOINTUPDATE is deliberately NOT
+        // mirrored: it is the bot's hearth data and the client keeps one hearth.
+        case SMSG_SHOW_BANK:
+        case MSG_LIST_STABLED_PETS:
+        case MSG_TALENT_WIPE_CONFIRM:
+        case SMSG_BINDER_CONFIRM:
+        case SMSG_PLAYERBOUND:
+        case MSG_AUCTION_HELLO:
             break;
         default:
             return;

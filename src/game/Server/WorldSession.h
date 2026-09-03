@@ -537,6 +537,7 @@ class WorldSession
         void HandleSuiGiverQuestsOpcode(WorldPackets::SuiControl::GiverQuests const& packet);
         void HandleSuiPartyLeadOpcode(WorldPackets::SuiControl::PartyLead const& packet);
         void HandleSuiCompanionOpcode(WorldPackets::SuiControl::Companion const& packet);
+        void HandleSuiPartyTaxiOpcode(WorldPackets::SuiControl::PartyTaxi const& packet);
         void HandleSuiPortalPrepareOpcode(WorldPackets::SuiPortal::Prepare const& packet);
         void HandleSuiPortalReadyOpcode(WorldPackets::SuiPortal::Ready const& packet);
 

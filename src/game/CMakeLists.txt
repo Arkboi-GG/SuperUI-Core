@@ -218,6 +218,7 @@ set (game_SRCS
     SuperUiContent/SuiWorld/Shared/SuiWorldState.cpp
     SuperUiContent/SuiWorld/CRPG/SuiPossess.cpp
     SuperUiContent/SuiWorld/CRPG/SuiCompanion.cpp
+    SuperUiContent/SuiWorld/CRPG/SuiTaxi.cpp
     SuperUiContent/SuiWorld/RTS/SuiFactionControl.cpp
     SuperUiContent/SuiWorld/RTS/SuiHonor.cpp
     SuperUiContent/SuiWorld/RTS/SuiHero.cpp

@@ -55,6 +55,10 @@ namespace SuiPortal
     // quests plus a per-member eligibility verdict, so the free-view quest window
     // can draw each member's card without possession or the main at the NPC.
     constexpr uint32 CAPABILITY_PARTY_GIVER_QUESTS_V1 = 1u << 10;
+    // Party flight (owner 2026-09-03): CMSG_SUI_PARTY_TAXI / SMSG_SUI_PARTY_TAXI_RESULT.
+    // The Command View flies the whole commanded party from a flight master; the
+    // client must not send the opcode until this bit is observed.
+    constexpr uint32 CAPABILITY_PARTY_TAXI_V1 = 1u << 11;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

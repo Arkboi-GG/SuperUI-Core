@@ -341,6 +341,40 @@ namespace WorldPackets
             }
         };
 
+        /// Party flight (owner 2026-09-03, Command View): the commander's whole
+        /// commanded party takes a taxi from a flight master. u8 flags, u64
+        /// flightMaster, u8 count, u32 × count nodes (source first, destination
+        /// last) — exactly 10 + 4·count bytes, 2..8 nodes. See SuiTaxi.h.
+        class PartyTaxi final : public ClientPacket
+        {
+        public:
+            uint8 flags = 0;                // SuiTaxi::Flags
+            ObjectGuid flightMaster;
+            std::vector<uint32> nodes;
+            bool exactSize = false;         // wire discipline: reject sloppy lengths
+
+            explicit PartyTaxi() : ClientPacket(CMSG_SUI_PARTY_TAXI) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                if (recv_data.size() < 10)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> flags >> flightMaster >> count;
+                if (count < 2 || count > 8 || recv_data.size() != 10u + 4u * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                nodes.resize(count);
+                for (uint8 i = 0; i < count; ++i)
+                    recv_data >> nodes[i];
+                exactSize = true;
+            }
+        };
+
         class ForceRoster final : public ClientPacket
         {
         public:
