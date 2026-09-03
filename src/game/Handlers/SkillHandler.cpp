@@ -28,10 +28,18 @@
 #include "WorldSession.h"
 #include "UpdateMask.h"
 #include "Anticheat.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: talents for a possessed companion
 
 void WorldSession::HandleLearnTalentOpcode(WorldPackets::Skill::LearnTalent const& packet)
 {
-    _player->LearnTalent(packet.talent_id, packet.requested_rank);
+    // [SUI] While the commander drives a possessed companion the talent goes to THAT body
+    // (owner feedback 2026-09-03: "modify talent builds without logging out/in to other
+    // characters"). The bot has no client session, so its new spell and remaining points
+    // are re-pushed to the commander the same way a bag edit is (ItemHandler).
+    Player* pActor = GetSuiActor();
+    pActor->LearnTalent(packet.talent_id, packet.requested_rank);
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleTalentWipeConfirmOpcode(WorldPackets::Skill::TalentWipeConfirm const& packet)
