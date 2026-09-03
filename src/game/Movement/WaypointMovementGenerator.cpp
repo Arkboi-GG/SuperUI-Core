@@ -28,6 +28,7 @@
 #include "MoveSpline.h"
 #include "CreatureGroups.h"
 #include "Map.h"
+#include "SuiPossess.h"      // [SUI-TAXI] OnTaxiLanded: a bot that flew alone holds where it landed
 
 #include <cassert>
 
@@ -365,6 +366,7 @@ void FlightPathMovementGenerator::Finalize(Player & player)
 
     if (player.GetTaxi().empty())
     {
+        SuiPossess::OnTaxiLanded(&player);
         player.GetHostileRefManager().setOnlineOfflineState(true);
         if (player.pvpInfo.inPvPEnforcedArea)
         {

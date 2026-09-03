@@ -8370,6 +8370,30 @@ void ObjectMgr::LoadCorpses()
             continue;
         }
 
+        // [SUI] Two live corpses for one player is a recoverable data state - a corpse
+        // conversion whose delayed row delete never ran before a shutdown - not a reason to
+        // refuse to boot (AddCorpse asserted on it and the world never opened, 2026-09-03).
+        // Keep the newer corpse, drop the older row, and say so.
+        if (Corpse* existing = sObjectAccessor.GetCorpseForPlayerGUID(corpse->GetOwnerGuid()))
+        {
+            bool const loadedIsOlder = corpse->GetGhostTime() <= existing->GetGhostTime();
+            Corpse* older = loadedIsOlder ? corpse : existing;
+            sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+                "LoadCorpses: player %u has two live corpses (guid %u @%lu, guid %u @%lu) - keeping the newer, deleting row %u",
+                corpse->GetOwnerGuid().GetCounter(),
+                existing->GetGUIDLow(), (unsigned long)existing->GetGhostTime(),
+                corpse->GetGUIDLow(), (unsigned long)corpse->GetGhostTime(),
+                older->GetGUIDLow());
+            CharacterDatabase.PExecute("DELETE FROM `corpse` WHERE `guid` = %u", older->GetGUIDLow());
+            if (loadedIsOlder)
+            {
+                delete corpse;
+                continue;
+            }
+            sObjectAccessor.RemoveCorpse(existing);
+            delete existing;
+        }
+
         sObjectAccessor.AddCorpse(corpse);
 
         ++count;

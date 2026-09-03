@@ -53,14 +53,25 @@ struct PlayerBotEntry
     bool customBot; // Enabled even if PlayerBot system disabled (AutoTesting system for example)
     bool requestRemoval;
     std::unique_ptr<PlayerBotAI> ai;
+    // [COMPANION] Non-zero = this entry is a real account's own character
+    // summoned for the owner's session (SuiCompanion.h). Never persisted,
+    // never random-cycled, never bridge-connected.
+    uint32 ownerAccountId;
+    ObjectGuid ownerGuid;
+    // World session-map key of this bot's session (WorldSession::GetSessionKey).
+    // == accountId for every fleet bot; a companion lives under a synthetic key
+    // while keeping the owner's real accountId. PlayerBotMgr must find bot
+    // sessions by THIS, never by accountId, or a companion's login lands on its
+    // owner's live session.
+    uint32 sessionKey;
 
     PlayerBotEntry(uint64 guid, uint32 account, uint32 chance_)
         : playerGUID(guid), accountId(account), specTab(255), activeRole(ROLE_INVALID), talentProfileState(PB_TALENT_PROFILE_UNCHECKED),
-          chance(chance_), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
+          chance(chance_), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr), ownerAccountId(0), sessionKey(account)
     {}
     PlayerBotEntry()
         : playerGUID(0), accountId(0), specTab(255), activeRole(ROLE_INVALID), talentProfileState(PB_TALENT_PROFILE_UNCHECKED),
-          chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr)
+          chance(100.0f), state(PB_STATE_OFFLINE), isChatBot(false), customBot(false), requestRemoval(false), ai(nullptr), ownerAccountId(0), sessionKey(0)
     {}
 };
 
@@ -98,6 +109,12 @@ class PlayerBotMgr
 
         bool AddBot(PlayerBotAI* ai);
         bool AddBot(uint32 playerGuid, bool chatBot = false, PlayerBotAI* pAI = nullptr);
+        // [COMPANION] Log one of `ownerAccount`'s own characters in on a bot
+        // session that keeps the REAL account id (synthetic session key only).
+        // Takes ownership of `ai` whether or not it succeeds.
+        bool AddCompanion(uint32 playerGuid, uint32 ownerAccount, ObjectGuid ownerGuid, PlayerBotAI* ai);
+        // Drop a registry entry without touching its session (companion logout).
+        void ForgetBot(uint32 playerGuid);
         bool DeleteBot(std::map<uint64, std::shared_ptr<PlayerBotEntry>>::iterator iter);
         bool DeleteBot(uint32 playerGuid);
 

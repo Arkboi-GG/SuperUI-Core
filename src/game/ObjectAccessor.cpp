@@ -266,6 +266,11 @@ void ObjectAccessor::ConvertCorpseForPlayer(ObjectGuid player_guid, Player const
     // causing a crash.
     if (map)
     {
+        // [SUI] The row goes now, on the caller's thread, in order ahead of any new corpse the
+        // same death is about to save. Only the in-world object waits for the corpse map's
+        // queue (grid safety). Before, the delete rode that queue too: a queue that never ran
+        // before a shutdown left the old row behind and the next boot refused to start.
+        corpse->DeleteFromDB();
         map->AddCorpseToRemove(corpse, looter ? looter->GetObjectGuid() : ObjectGuid());
     }
     else

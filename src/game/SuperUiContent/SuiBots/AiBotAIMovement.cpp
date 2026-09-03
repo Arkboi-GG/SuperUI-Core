@@ -171,10 +171,13 @@ void AiBotAI::ConsumePendingSuiRtsMove()
         return;
     }
     SuiClearWaypoints();
+    float dx = m_suiPendingMoveX, dy = m_suiPendingMoveY, dz = m_suiPendingMoveZ;
+    if (!SuiValidateOrderDest(dx, dy, dz))
+        return;
     char json[192];
     snprintf(json, sizeof(json),
         "{\"type\":\"MOVE_TO\",\"payload\":{\"mapId\":%u,\"x\":%.2f,\"y\":%.2f,\"z\":%.2f}}",
-        me->GetMapId(), m_suiPendingMoveX, m_suiPendingMoveY, m_suiPendingMoveZ);
+        me->GetMapId(), dx, dy, dz);
     SuiInjectCommandLine(json);
 }
 

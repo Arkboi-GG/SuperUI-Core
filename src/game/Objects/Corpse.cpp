@@ -150,8 +150,13 @@ void Corpse::DeleteFromDB()
     // all corpses (not bones)
     static SqlStatementID id;
 
-    SqlStatement stmt = CharacterDatabase.CreateStatement(id, "DELETE FROM `corpse` WHERE `player_guid` = ? AND `corpse_type` <> '0'");
-    stmt.PExecute(GetOwnerGuid().GetCounter());
+    // [SUI] This corpse's OWN row, not every live row of the owner: the delete is issued
+    // the instant the corpse is converted, microseconds before the same death may REPLACE a
+    // new corpse row, and the async character DB only guarantees order with one worker
+    // thread. By guid it can never take the new row with it whatever the order; corpse guids
+    // are not recycled at runtime, and stray duplicates are settled by ObjectMgr::LoadCorpses.
+    SqlStatement stmt = CharacterDatabase.CreateStatement(id, "DELETE FROM `corpse` WHERE `guid` = ?");
+    stmt.PExecute(GetGUIDLow());
 }
 
 bool Corpse::LoadFromDB(uint32 lowguid, Field* fields)

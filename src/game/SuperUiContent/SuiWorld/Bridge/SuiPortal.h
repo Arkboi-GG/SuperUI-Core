@@ -37,6 +37,10 @@ namespace SuiPortal
     // reward chosen per member. Also the id-addressed abandon that the vanilla
     // slot-indexed CMSG_QUESTLOG_REMOVE_QUEST cannot express.
     constexpr uint32 CAPABILITY_PARTY_QUEST_ACTS_V1 = 1u << 6;
+    // Companions v1: CMSG/SMSG_SUI_COMPANION (summon/dismiss/list the owner's
+    // own alts) and roster flag 0x08. The client must not send the opcode
+    // until this bit is observed.
+    constexpr uint32 CAPABILITY_COMPANIONS_V1 = 1u << 7;
     // Bit 7 is reserved for PLAN_20 P4 (party-vendor-v1) and left unclaimed even
     // though P5 shipped first.
     // PLAN_20 P5: per-member questgiver dialog status, so a world marker can wear
@@ -51,6 +55,10 @@ namespace SuiPortal
     // quests plus a per-member eligibility verdict, so the free-view quest window
     // can draw each member's card without possession or the main at the NPC.
     constexpr uint32 CAPABILITY_PARTY_GIVER_QUESTS_V1 = 1u << 10;
+    // Party flight (owner 2026-09-03): CMSG_SUI_PARTY_TAXI / SMSG_SUI_PARTY_TAXI_RESULT.
+    // The Command View flies the whole commanded party from a flight master; the
+    // client must not send the opcode until this bit is observed.
+    constexpr uint32 CAPABILITY_PARTY_TAXI_V1 = 1u << 11;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

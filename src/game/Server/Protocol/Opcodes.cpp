@@ -966,6 +966,10 @@ Handlers BuildOpcodeList()
     INVALID_PACKET(SMSG_SUI_GIVER_STATUS,             UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_PARTY_LEAD_RESULT,        UnhandleReason::SendByServer);
     INVALID_PACKET(SMSG_SUI_GIVER_QUESTS,             UnhandleReason::SendByServer);
+    DEFINE_HANDLER(CMSG_SUI_COMPANION,                STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiCompanionOpcode);
+    INVALID_PACKET(SMSG_SUI_COMPANION,                UnhandleReason::SendByServer);
+    DEFINE_HANDLER(CMSG_SUI_PARTY_TAXI,               STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiPartyTaxiOpcode);
+    INVALID_PACKET(SMSG_SUI_PARTY_TAXI_RESULT,        UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_PREPARE,            STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalPrepareOpcode);
     INVALID_PACKET(SMSG_SUI_PORTAL_DESCRIPTOR,         UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_READY,              STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalReadyOpcode);

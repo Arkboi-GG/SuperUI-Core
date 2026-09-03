@@ -63,7 +63,7 @@ Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,
 | `SMSG_SUI_PARTY_QUEST_RESULT` | 857 (0x0359) | S -> C |
 
 858-859 stay RESERVED for the PLAN_20 P4 vendor pair, so a half-deployed server
-can never renumber them out from under a client. `NUM_MSG_TYPES` is 858.
+can never renumber them out from under a client. `NUM_MSG_TYPES` is 868 (see the Companions section at the end).
 
 Values 835-843 are the camera, zone-intel, and RTS extensions.
 The portal values are intentionally fixed above that range so those branches
@@ -131,7 +131,13 @@ begin/end. Lists **all** current group members.
 |---|---|---|
 | count | u8 | |
 | per member: guid | u64 | |
-| per member: flags | u8 | 0x01 controllable (AiBot), 0x02 currently possessed |
+| per member: flags | u8 | 0x01 controllable (AiBot), 0x02 currently possessed, 0x04 conscripted, 0x08 your companion |
+| per member: chain | u8 | row v2 (2026-09-03): 0 linked · 1 unlinked by the human (holds until re-linked) · 2 world hold (landed alone / human hopped far / boss flew off; clears when the anchor is back in range) |
+| per member: anchor | u64 | row v2: the body this member's formation keys on (`FindEscortBoss`), 0 for a real player |
+
+Rows are 18 bytes since 2026-09-03 (were 9). Re-pushed on every chain edge
+(`SuiPossess::NotifyChainChanged`: hold set/cleared, ORDER_LINK) so the client's
+chain UI is server truth. ORDER_LINK with x >= 0.5 also lifts a world hold.
 
 ## SMSG_SUI_CONTROL_ACK
 Answers requests/releases AND arrives **unsolicited** on forced release — the
@@ -202,9 +208,37 @@ The client routes the inner body through its normal parser into the per-guid
 store and **drops proxies whose sourceGuid ≠ its current controlled guid**
 (possession-boundary stragglers).
 
+Mirrored families (the `MirrorOwnerPacket` whitelist), each paired with the
+handler family that runs as `GetSuiActor()`:
+
+| Family | Inner opcodes |
+|---|---|
+| spells / bars / cooldowns | SMSG_ACTION_BUTTONS, SMSG_INITIAL_SPELLS, SMSG_LEARNED_SPELL, SMSG_SUPERCEDED_SPELL, SMSG_REMOVED_SPELL, SMSG_SPELL_COOLDOWN, SMSG_COOLDOWN_EVENT, SMSG_CLEAR_COOLDOWN, SMSG_CAST_RESULT |
+| quests / gossip | SMSG_GOSSIP_MESSAGE, SMSG_GOSSIP_COMPLETE, SMSG_QUESTGIVER_* |
+| vendor / trainer | SMSG_LIST_INVENTORY, SMSG_SELL_ITEM, SMSG_BUY_ITEM, SMSG_BUY_FAILED, SMSG_TRAINER_LIST, SMSG_TRAINER_BUY_SUCCEEDED, SMSG_TRAINER_BUY_FAILED |
+| trade | SMSG_TRADE_STATUS, SMSG_TRADE_STATUS_EXTENDED |
+| mail | SMSG_RECEIVED_MAIL, MSG_QUERY_NEXT_MAIL_TIME |
+| loot (2026-09-03) | SMSG_LOOT_RESPONSE, SMSG_LOOT_RELEASE_RESPONSE, SMSG_LOOT_REMOVED, SMSG_LOOT_CLEAR_MONEY, SMSG_LOOT_MONEY_NOTIFY, SMSG_ITEM_PUSH_RESULT |
+| pet (2026-09-03) | SMSG_PET_SPELLS, SMSG_PET_MODE, SMSG_PET_ACTION_FEEDBACK, SMSG_PET_CAST_FAILED |
+| taxi (2026-09-03) | SMSG_ACTIVATETAXIREPLY, SMSG_SHOWTAXINODES, SMSG_TAXINODE_STATUS, SMSG_NEW_TAXI_PATH (the last three reach the bot's session through a gossip "I need a ride") |
+| gossip-answered (2026-09-03) | SMSG_SHOW_BANK, MSG_LIST_STABLED_PETS, MSG_TALENT_WIPE_CONFIRM, SMSG_BINDER_CONFIRM, SMSG_PLAYERBOUND, MSG_AUCTION_HELLO — Player::OnGossipSelect runs as the bot and answers these on its session; stable master, innkeeper bind and talent wipe handlers run as GetSuiActor() too. SMSG_BINDPOINTUPDATE is not mirrored (the client keeps one hearth). |
+
+Loot notes: `Player::SendNewItem`'s group broadcast skips the bot's possessor,
+so the mirrored copy is the commander's only SMSG_ITEM_PUSH_RESULT. Group loot
+rolls are NOT mirrored: the driven bot's AI keeps auto-passing its own roll and
+the commander rolls with its own character's copy. A possessed bot's loot
+window is force-released on grant AND on release. The driven body's pet bar
+(SMSG_PET_SPELLS) is pushed after the grant snapshot; the own character's pet
+bar is re-sent after the release ack.
+
 ## SMSG_SUI_SNAPSHOT (M4)
 Read-only bags/talents for the possessed bot, pushed once after a grant.
-Layout finalized in M4. Under PARTY_MEMBER_FACTS (capability bit 3) the same
+Layout finalized in M4. Item rows are `u8 bag, u8 slot, u64 guid, u32 entry,
+u32 stack, u8 bagSlots`; bag 255 = character-held with the contiguous
+PLAYER_FIELD_INV_SLOT numbering (equipment 0-18, bag slots 19-22, backpack
+23-38, **bank items 39-62 and bank bags 63-68 since 2026-09-03**, keyring 81+);
+any other bag value is the slot of the equipped/bank bag the row sits in. Bag
+rows precede their contents. Under PARTY_MEMBER_FACTS (capability bit 3) the same
 byte-identical packet is also pushed for every party/raid AiBot member — no
 possession required — on every roster edge and in answer to
 `CMSG_SUI_MEMBER_FACTS` (see below).
@@ -664,3 +698,159 @@ Version 1 grants a 5-second Ready lease. A portal that remains open is renewed
 by another PREPARE/DESCRIPTOR/READY cycle; the generation/ticket may be reused
 while the previous correlation is still live. This lease still does not bypass
 the stock `CMSG_GAMEOBJ_USE` range and eligibility checks.
+
+## Companions — CMSG_SUI_COMPANION / SMSG_SUI_COMPANION (owner decision 2026-09-02)
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_COMPANION` | 866 (0x0362) | C → S |
+| `SMSG_SUI_COMPANION` | 867 (0x0363) | S → C |
+
+`NUM_MSG_TYPES` is 870 (see the party-flight section below). Advertised by capability bit 7 (`COMPANIONS_V1`) in the
+`SUI1` trailer; the client must not send `CMSG_SUI_COMPANION` until it has seen it.
+
+A **companion** is one of the requester's OWN characters (same account, verified
+server-side from the character cache — never from anything the client claims)
+logged in on a socket-less AiBot session for the length of the owner's session.
+The session keeps the **real account id**; only the World session-map key is
+synthetic (`WorldSession::GetSessionKey`), so the owner's live session and the
+companion coexist and `SaveToDB` never re-stamps `characters.account`. It is the
+single owner-verified exception to the real-account wall in
+`AiBotAI::OnSessionLoaded`; it never opens the brain bridge and is never written
+to `characters.playerbot`. Server implementation:
+`src/game/SuperUiContent/SuiWorld/CRPG/SuiCompanion.{h,cpp}`.
+
+**Authority law:** a companion counts as a bot ONLY for its owner. To every
+other human it is a real player — no possession (`DENY_NOT_BOT`), no orders,
+no bag/spell/quest facts, no item moves, no faction control, no force-roster
+row. The same closure now applies to an unattended own character: real
+sessions other than the actor's own are never commandable
+(`SuiCompanion::MayCommand`, the one predicate every site funnels through).
+
+**Follow law (multi-human):** every unit keeps formation on *the driven body of
+its human* — the bot that human possesses, else that human's own character.
+A bound unit (companion → owner, unattended own character → its own session,
+conscript → conscriptor) follows nobody else and HOLDS when its human is
+outside the group or drives nothing else. Shared fleet bots keep the group
+rules (real leader, else the deterministic split / follow override) and then
+follow that human's driven body.
+
+### CMSG_SUI_COMPANION (9 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| action | u8 | 1 summon · 2 dismiss · 3 list |
+| guid | u64 | character guid; 0 for list |
+
+Summon requires the requester in the world, alive, outdoors (non-instanceable
+map), not on a taxi/transport, not teleporting, not a bot session. Possessing a
+bot is allowed: the companion arrives beside the driven body. On its first AI
+tick the companion leaves any stale saved group, joins the owner's group
+(created with the owner as leader if there is none; a full party converts to a
+raid), and teleports beside the owner's driven body. Max 9 companions.
+
+Dismissal (explicit, or the owner's session logging its player out) drops the
+companion out of the party, then logs it out with a save. A character login
+that finds its own companion still logging out answers
+`SMSG_CHARACTER_LOGIN_FAILED` and dismisses it; retry a moment later.
+
+### SMSG_SUI_COMPANION
+
+| Field | Type | Notes |
+|---|---|---|
+| kind | u8 | 1 result · 2 list |
+
+kind 1 (result): `u8 action`, `u64 guid`, `u8 result` — 0 OK · 1 DENIED (not a
+character on your account / unknown) · 2 ALREADY_IN_WORLD · 3 OWNER_STATE ·
+4 LIMIT · 5 NOT_A_COMPANION · 6 FAILED.
+
+kind 2 (list): `u8 count`, then per row `u64 guid, u8 race, u8 class, u8 gender,
+u8 level, u8 state, cstring name` — state 0 offline/summonable · 1 online as your
+companion · 2 loading · 3 the character you are playing · 4 unavailable. Pushed
+after every result, when a companion enters the world and again on arrival,
+when one leaves, and in answer to action 3.
+
+### Roster flag
+
+`SMSG_SUI_CONTROL_ROSTER` member flags gain `0x08` = this member is YOUR
+companion (set only for its owner, who also sees 0x01; other humans see 0).
+
+### GM command (stock-client testable)
+
+`.sui companion summon <name>` · `.sui companion dismiss <name>` ·
+`.sui companion list` — same rules and result codes as the wire.
+
+**Group removal = dismissal (owner 2026-09-02):** a companion kicked from the
+party, its owner leaving or being kicked, or a disband dismisses the companion
+(party drop, logout with save, owner window refreshed, chat notice). Park a
+companion with Hold instead. The companion arrival step (leaving a stale saved
+group) is exempt.
+
+**Feel pass (owner 2026-09-02):** result code **7 PARTY_FULL** — a full 5-man
+party refuses the summon; convert to a raid on purpose first (arrival never
+converts). Arrival lands in formation behind the owner's driven body (slot ring,
+2.5 yd per ring, same fan as move orders) with the teleport-in visual (spell
+7141) and a chat line. Death: the party gets first call on a resurrection
+(healer out of combat, druid Rebirth in combat — fleet AI now casts these for any
+dead party member); otherwise the ghost waits at its corpse for the graveyard
+run time (floored by the reclaim delay) and pops in place at 50% once the party
+is out of combat.
+
+## Party flight — CMSG_SUI_PARTY_TAXI / SMSG_SUI_PARTY_TAXI_RESULT (owner decision 2026-09-03)
+
+| Opcode | Value | Direction |
+|---|---|---|
+| `CMSG_SUI_PARTY_TAXI` | 868 (0x0364) | C → S |
+| `SMSG_SUI_PARTY_TAXI_RESULT` | 869 (0x0365) | S → C |
+
+`NUM_MSG_TYPES` is 870. Advertised by capability bit 11 (`PARTY_TAXI_V1`) in the
+`SUI1` trailer; the client must not send the request until it has seen it.
+Server implementation: `src/game/SuperUiContent/SuiWorld/CRPG/SuiTaxi.{h,cpp}`.
+
+**Two taxi laws (owner 2026-09-03):**
+
+1. **Direct control rides along.** While possessing, the stock taxi handlers
+   (`TaxiHandler.cpp`) run as `GetSuiActor()`: the flight master is ranged from
+   the driven bot, the map shows ITS discovered nodes, ITS purse pays, IT
+   flies, and the human stays in control — the flight spline is the bot's
+   public monster-move and the client lets it drive the controller. A flight
+   never releases possession. The rest of the party HOLDS (DoPartyFollow: a
+   same-map boss on a taxi is no longer chased) and the human may hop to
+   another member with Ctrl+Tab / Ctrl+Click; the follow anchor re-points to
+   the new driven body on the next tick and the flyer lands under its own AI
+   (cargo: the AI runs nothing but the bridge tick while `IsTaxiFlying()`).
+   Once landed and far behind, the ordinary catch-up rule brings it back.
+2. **Command View flies the party.** From the sky the taxi map's destination
+   click becomes `CMSG_SUI_PARTY_TAXI`; the whole party the commander commands
+   takes the flight. Nothing flies unless everyone can board or the commander
+   confirmed.
+
+### CMSG_SUI_PARTY_TAXI (10 + 4·count bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| flags | u8 | bit 0 CONFIRMED: fly the eligible members even if some cannot board |
+| flightMaster | u64 | the NPC; must be interactable from the requester's driven body |
+| count | u8 | 2..8 |
+| nodes | u32 × count | the CMSG_ACTIVATETAXIEXPRESS chain: source first, destination last |
+
+Flight party = the requester's own character + every group member that is a
+bot for the requester (`SuiCompanion::MayCommand`; other humans' characters
+and companions are never touched). Per member the server applies the gates of
+`Player::ActivateTaxiPathTo`: alive / not in combat / not casting / not
+teleporting (BUSY), not already flying (IN_FLIGHT), same map (OTHER_MAP),
+within the boarding cube of the source node (TOO_FAR), every node of the chain
+discovered (UNKNOWN_NODE), first-hop fare after reputation discount
+(NO_MONEY). If anyone fails and the request is not CONFIRMED, nobody flies.
+Boarding bots are dismounted, their motion cleared and their journey abandoned
+first; a member the stock activation still refuses is reported REFUSED (7).
+
+### SMSG_SUI_PARTY_TAXI_RESULT (14 + 9·count bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| result | u8 | 0 FLYING (rows = left behind) · 1 CONFIRM_NEEDED (rows = cannot board, nobody flew) · 2 DENIED · 3 NO_PATH |
+| flightMaster | u64 | echoed |
+| destination | u32 | last node of the chain |
+| count | u8 | |
+| rows | count × { u64 guid, u8 reason } | reason 1 UNKNOWN_NODE · 2 NO_MONEY · 3 TOO_FAR · 4 BUSY · 5 IN_FLIGHT · 6 OTHER_MAP · 7 REFUSED |

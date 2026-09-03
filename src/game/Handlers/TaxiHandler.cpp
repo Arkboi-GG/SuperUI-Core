@@ -29,6 +29,18 @@
 #include "Player.h"
 #include "Path.h"
 #include "WaypointMovementGenerator.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor: the driven bot takes the flight, the human rides along
+
+// [SUI] Taxi routing (owner 2026-09-03: "if I'm driving the bot, I follow the bot on
+// taxi — I stay in control"). The node queries, the map and both activations act as
+// GetSuiActor(): the flight master is ranged from the driven body, the map shows ITS
+// discovered nodes, ITS purse pays and IT flies. SMSG_ACTIVATETAXIREPLY leaves on the
+// flyer's session (Player::ActivateTaxiPathTo) and is mirrored to the commander; the
+// flight spline is a public monster-move the commander's client already receives, and
+// it now lets that spline drive the controller while possessing. Possession is NOT
+// released by a flight — the human may still hop to another member (Ctrl+Tab /
+// Ctrl+Click) and the flyer lands under its own AI. SendDoFlight stays session-scoped:
+// ActivateTaxiPathTo calls it on the FLYER's session, which is the right player.
 
 void WorldSession::HandleTaxiNodeStatusQueryOpcode(WorldPackets::Taxi::TaxiNodeStatusQuery const& packet)
 {
@@ -37,15 +49,18 @@ void WorldSession::HandleTaxiNodeStatusQueryOpcode(WorldPackets::Taxi::TaxiNodeS
 
 void WorldSession::SendTaxiStatus(ObjectGuid guid)
 {
+    // [SUI] the driven bot's team and discovered nodes
+    Player* actor = GetSuiActor();
+
     // cheating checks
-    Creature* unit = GetPlayer()->GetMap()->GetCreature(guid);
+    Creature* unit = actor->GetMap()->GetCreature(guid);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WorldSession::SendTaxiStatus - %s not found or you can't interact with it.", guid.GetString().c_str());
         return;
     }
 
-    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), GetPlayer()->GetTeam());
+    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), actor->GetTeam());
 
     // not found nearest
     if (curloc == 0)
@@ -53,14 +68,17 @@ void WorldSession::SendTaxiStatus(ObjectGuid guid)
 
     WorldPacket data(SMSG_TAXINODE_STATUS, 9);
     data << ObjectGuid(guid);
-    data << uint8(GetPlayer()->m_taxi.IsTaximaskNodeKnown(curloc) ? 1 : 0);
+    data << uint8(actor->m_taxi.IsTaximaskNodeKnown(curloc) ? 1 : 0);
     SendPacket(&data);
 }
 
 void WorldSession::HandleTaxiQueryAvailableNodes(WorldPackets::Taxi::TaxiQueryAvailableNodes const& packet)
 {
+    // [SUI] the driven bot must reach the flight master
+    Player* actor = GetSuiActor();
+
     // cheating checks
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_FLIGHTMASTER);
+    Creature* unit = actor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_FLIGHTMASTER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleTaxiQueryAvailableNodes - %s not found or you can't interact with him.", packet.guid.GetString().c_str());
@@ -68,8 +86,8 @@ void WorldSession::HandleTaxiQueryAvailableNodes(WorldPackets::Taxi::TaxiQueryAv
     }
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (actor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        actor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     // unknown taxi node case
     if (SendLearnNewTaxiNode(unit))
@@ -81,8 +99,11 @@ void WorldSession::HandleTaxiQueryAvailableNodes(WorldPackets::Taxi::TaxiQueryAv
 
 void WorldSession::SendTaxiMenu(Creature* unit)
 {
+    // [SUI] the driven bot's taximask
+    Player* actor = GetSuiActor();
+
     // find current node
-    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), GetPlayer()->GetTeam());
+    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), actor->GetTeam());
 
     if (curloc == 0)
         return;
@@ -91,7 +112,7 @@ void WorldSession::SendTaxiMenu(Creature* unit)
     data << uint32(1);
     data << unit->GetObjectGuid();
     data << uint32(curloc);
-    GetPlayer()->m_taxi.AppendTaximaskTo(data, GetPlayer()->IsTaxiCheater());
+    actor->m_taxi.AppendTaximaskTo(data, actor->IsTaxiCheater());
     SendPacket(&data);
 }
 
@@ -116,13 +137,16 @@ void WorldSession::SendDoFlight(uint32 mountDisplayId, uint32 path, uint32 pathN
 
 bool WorldSession::SendLearnNewTaxiNode(Creature* unit)
 {
+    // [SUI] the driven bot discovers the node
+    Player* actor = GetSuiActor();
+
     // find current node
-    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), GetPlayer()->GetTeam());
+    uint32 curloc = sObjectMgr.GetNearestTaxiNode(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ(), unit->GetMapId(), actor->GetTeam());
 
     if (curloc == 0)
         return true;                                        // `true` send to avoid WorldSession::SendTaxiMenu call with one more curlock seartch with same false result.
 
-    if (GetPlayer()->m_taxi.SetTaximaskNode(curloc))
+    if (actor->m_taxi.SetTaximaskNode(curloc))
     {
         WorldPacket msg(SMSG_NEW_TAXI_PATH, 0);
         SendPacket(&msg);
@@ -141,7 +165,10 @@ bool WorldSession::SendLearnNewTaxiNode(Creature* unit)
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_9_4
 void WorldSession::HandleActivateTaxiExpressOpcode(WorldPackets::Taxi::ActivateTaxiExpress const& packet)
 {
-    Creature* npc = GetPlayer()->GetNPCIfCanInteractWith(packet.flightmasterGuid, UNIT_NPC_FLAG_FLIGHTMASTER);
+    // [SUI] the driven bot flies; the commander rides along
+    Player* actor = GetSuiActor();
+
+    Creature* npc = actor->GetNPCIfCanInteractWith(packet.flightmasterGuid, UNIT_NPC_FLAG_FLIGHTMASTER);
     if (!npc)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleActivateTaxiExpressOpcode - %s not found or you can't interact with it.", packet.flightmasterGuid.GetString().c_str());
@@ -151,20 +178,23 @@ void WorldSession::HandleActivateTaxiExpressOpcode(WorldPackets::Taxi::ActivateT
     if (packet.nodes.empty())
         return;
 
-    GetPlayer()->ActivateTaxiPathTo(packet.nodes, npc);
+    actor->ActivateTaxiPathTo(packet.nodes, npc);
 }
 #endif
 
 void WorldSession::HandleActivateTaxiOpcode(WorldPackets::Taxi::ActivateTaxi const& packet)
 {
+    // [SUI] the driven bot flies; the commander rides along
+    Player* actor = GetSuiActor();
+
     std::vector<uint32> nodes { packet.node1, packet.node2 };
 
-    Creature* npc = GetPlayer()->GetNPCIfCanInteractWith(packet.flightmasterGuid, UNIT_NPC_FLAG_FLIGHTMASTER);
+    Creature* npc = actor->GetNPCIfCanInteractWith(packet.flightmasterGuid, UNIT_NPC_FLAG_FLIGHTMASTER);
     if (!npc)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleActivateTaxiOpcode - %s not found or you can't interact with it.", packet.flightmasterGuid.GetString().c_str());
         return;
     }
 
-    GetPlayer()->ActivateTaxiPathTo(nodes, npc);
+    actor->ActivateTaxiPathTo(nodes, npc);
 }

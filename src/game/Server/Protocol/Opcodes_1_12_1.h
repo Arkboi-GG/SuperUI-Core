@@ -885,5 +885,14 @@ enum OpcodesList
     // otherwise, which is why this is a wire and not a client derivation.
     CMSG_SUI_GIVER_QUESTS                  = 864,      // 0x0360
     SMSG_SUI_GIVER_QUESTS                  = 865,      // 0x0361
-    NUM_MSG_TYPES                          = 866
+    // Companions (owner 2026-09-02): the owner's own alts summoned as AiBot
+    // party members for the session. See SuiCompanion.h.
+    CMSG_SUI_COMPANION                     = 866,      // 0x0362
+    SMSG_SUI_COMPANION                     = 867,      // 0x0363
+    // Party flight (owner 2026-09-03): the Command View flies the whole
+    // commanded party from a flight master, asking first when someone cannot
+    // board. See SuiTaxi.h.
+    CMSG_SUI_PARTY_TAXI                    = 868,      // 0x0364
+    SMSG_SUI_PARTY_TAXI_RESULT             = 869,      // 0x0365
+    NUM_MSG_TYPES                          = 870
 };

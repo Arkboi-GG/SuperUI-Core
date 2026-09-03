@@ -28,15 +28,26 @@
 #include "WorldSession.h"
 #include "UpdateMask.h"
 #include "Anticheat.h"
+#include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: talents for a possessed companion
 
 void WorldSession::HandleLearnTalentOpcode(WorldPackets::Skill::LearnTalent const& packet)
 {
-    _player->LearnTalent(packet.talent_id, packet.requested_rank);
+    // [SUI] While the commander drives a possessed companion the talent goes to THAT body
+    // (owner feedback 2026-09-03: "modify talent builds without logging out/in to other
+    // characters"). The bot has no client session, so its new spell and remaining points
+    // are re-pushed to the commander the same way a bag edit is (ItemHandler).
+    Player* pActor = GetSuiActor();
+    pActor->LearnTalent(packet.talent_id, packet.requested_rank);
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleTalentWipeConfirmOpcode(WorldPackets::Skill::TalentWipeConfirm const& packet)
 {
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_TRAINER);
+    // [SUI] the driven bot's talents are wiped and ITS purse pays; the confirm frame mirrors back from a gossip pick
+    Player* pActor = GetSuiActor();
+
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_TRAINER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleTalentWipeConfirmOpcode - %s not found or you can't interact with him.", packet.guid.GetString().c_str());
@@ -44,10 +55,10 @@ void WorldSession::HandleTalentWipeConfirmOpcode(WorldPackets::Skill::TalentWipe
     }
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pActor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pActor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
-    if (!(_player->ResetTalents()))
+    if (!(pActor->ResetTalents()))
     {
         WorldPacket data(MSG_TALENT_WIPE_CONFIRM, 8 + 4);   //you have not any talent
         data << uint64(0);
@@ -57,6 +68,10 @@ void WorldSession::HandleTalentWipeConfirmOpcode(WorldPackets::Skill::TalentWipe
     }
 
     unit->CastSpell(_player, 14867, true);                  //spell: "Untalent Visual Effect"
+
+    // [SUI] Owner-only facts of the driven bot changed: re-push the snapshot.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleUnlearnSkillOpcode(WorldPackets::Skill::UnlearnSkill const& packet)

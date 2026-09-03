@@ -91,6 +91,17 @@ namespace SuiPossess
         ROSTER_CONTROLLABLE = 0x01,    // AiBot in your group you may possess
         ROSTER_POSSESSED    = 0x02,    // currently driven by a real player
         ROSTER_CONSCRIPTED  = 0x04,    // enlisted in someone's RTS army (brain off)
+        ROSTER_COMPANION    = 0x08,    // one of YOUR summoned alts (owner sees this; others see 0)
+    };
+
+    // Chain state per roster row (owner 2026-09-03: "green or red chain, and WHO it's
+    // chained to"). Server truth: the client draws exactly this.
+    enum ChainState : uint8
+    {
+        CHAIN_LINKED     = 0,   // follows its anchor
+        CHAIN_UNLINKED   = 1,   // broken by the human (ORDER_LINK 0): holds until re-linked
+        CHAIN_WORLD_HOLD = 2,   // left behind by the world (landed alone, human hopped far,
+                                // boss flew off): clears when the anchor is back in range
     };
 
     /// Attempt possession. Sends the ACK (grant or deny) itself.
@@ -124,7 +135,10 @@ namespace SuiPossess
 
     // ── Hooks (called from core seams) ────────────────────────────────────────
     void OnPlayerRemovedFromGroup(Player* player);   // Group::RemoveMember / Disband
-    void OnPlayerTeleport(Player* player);           // Player::TeleportTo (either side of the pair)
+    /// Player::TeleportTo (either side of the pair). farTeleport=false is a same-map near
+    /// teleport, which the possessed BOT survives (the possessor's client adopts it through the
+    /// mirrored MSG_MOVE_TELEPORT_ACK); every other case breaks the pair.
+    void OnPlayerTeleport(Player* player, bool farTeleport = true);
     void OnPlayerDeath(Player* player);              // Player::SetDeathState(JUST_DIED)
     void OnLogout(WorldSession* session);            // WorldSession::LogoutPlayer
 
@@ -142,6 +156,9 @@ namespace SuiPossess
     /// The bot this session is driving, or nullptr.
     Player* GetControlledBot(WorldSession const* session);
     bool IsSuiPossessed(Unit const* unit);
+    /// FlightPathMovementGenerator::Finalize, final landing: a bot that flew without
+    /// its human aboard holds where it landed (AiBotAI::m_suiLandedHold).
+    void OnTaxiLanded(Player* player);
     // Re-push the driven bot's bags/facts to the commander after an inventory edit (ItemHandler).
     void ResnapshotControlled(WorldSession* session);
 
@@ -158,6 +175,9 @@ namespace SuiPossess
     /// era roster edge also re-pushes every party AiBot's bags + known spells
     /// to each real SUI member (party = full facts, faction = orders).
     void BroadcastRoster(Group* group);
+    /// A chain edge (hold set/cleared, link toggled): re-push the roster so every SUI
+    /// client in the group redraws the chain from server truth.
+    void NotifyChainChanged(Player* member);
 
     // ── Party member facts (owner decision 2026-08-25) ────────────────────────
     /// CMSG_SUI_MEMBER_FACTS: push the inventory snapshot + known spells of

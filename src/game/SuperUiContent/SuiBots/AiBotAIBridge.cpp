@@ -1479,7 +1479,7 @@ void AiBotAI::BridgeHandleApplyCombatLoadout(const char* json)
         sendAck("error", "stale_revision", 0);
         return;
     }
-    if (!me || !botEntry || m_ownedDummyEntry || !m_initialized)
+    if (!me || !botEntry || IsRealCharacter() || !m_initialized)
     {
         CB_HIT(me ? me->GetGUIDLow() : 0u, "cpp-combatcfg: bot not managed, error ack");
         sendAck("error", "not_managed", 0);

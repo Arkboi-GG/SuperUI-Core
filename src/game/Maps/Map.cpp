@@ -3673,7 +3673,8 @@ void Map::RemoveCorpses(bool unload)
         if (owner && !IsBattleGround() && !owner->GetSession()->PlayerLogoutWithSave())
             owner->SaveToDB();
 
-        corpse->DeleteFromDB();
+        // [SUI] The DB row was already deleted at conversion time (ObjectAccessor). Deleting
+        // here again is by player, so late enough it would take a NEWER corpse row with it.
         delete corpse;
 
         iter = m_corpseToRemove.erase(iter);

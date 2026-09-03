@@ -72,12 +72,16 @@ void WorldSession::SendTabardVendorActivate(ObjectGuid guid)
 
 void WorldSession::HandleBankerActivateOpcode(WorldPackets::Npc::BankerActivate const& packet)
 {
+    // [SUI] The driven bot opens ITS bank: CheckBanker ranges from the actor and
+    // SendShowBank latches the banker on the actor (Player::CanUseBank reads it).
+    // The bank contents ride the snapshot (bank rows), the frame opens on this socket.
+    Player* pActor = GetSuiActor();
     if (!CheckBanker(packet.guid))
         return;
 
     // remove fake death
-    if (GetPlayer()->HasUnitState(UNIT_STATE_FEIGN_DEATH))
-        GetPlayer()->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
+    if (pActor->HasUnitState(UNIT_STATE_FEIGN_DEATH))
+        pActor->RemoveSpellsCausingAura(SPELL_AURA_FEIGN_DEATH);
 
     SendShowBank(packet.guid);
 }
@@ -86,7 +90,7 @@ void WorldSession::SendShowBank(ObjectGuid guid)
 {
     WorldPacket data(SMSG_SHOW_BANK, 8);
     data << ObjectGuid(guid);
-    GetPlayer()->m_currentBankerGuid = guid;
+    GetSuiActor()->m_currentBankerGuid = guid;   // [SUI] the driven bot is the one at the banker
     SendPacket(&data);
 }
 
@@ -511,58 +515,70 @@ void WorldSession::SendSpiritResurrect()
 
 void WorldSession::HandleBinderActivateOpcode(WorldPackets::Npc::BinderActivate const& packet)
 {
-    if (!GetPlayer()->IsInWorld() || !GetPlayer()->IsAlive())
+    // [SUI] the driven bot binds ITS hearth at the innkeeper
+    Player* pActor = GetSuiActor();
+
+    if (!pActor->IsInWorld() || !pActor->IsAlive())
         return;
 
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_INNKEEPER);
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_INNKEEPER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleBinderActivateOpcode - %s not found or you can't interact with him.", packet.npcGuid.GetString().c_str());
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
     SendBindPoint(unit);
 }
 
 void WorldSession::SendBindPoint(Creature* npc)
 {
+    // [SUI] the Bind spell targets the driven bot; its confirm/bound frames mirror back
+    Player* pActor = GetSuiActor();
+
     // prevent set homebind to instances in any case
-    if (GetPlayer()->GetMap()->Instanceable())
+    if (pActor->GetMap()->Instanceable())
         return;
 
     // send spell for bind 3286 bind magic
     npc->CastSpell(_player, 3286, true);                    // Bind
 
-    _player->PlayerTalkClass->CloseGossip();
+    pActor->PlayerTalkClass->CloseGossip();
 }
 
 void WorldSession::HandleListStabledPetsOpcode(WorldPackets::Npc::ListStabledPets const& packet)
 {
-    Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_STABLEMASTER);
+    // [SUI] the driven bot's stable
+    Player* pActor = GetSuiActor();
+
+    Creature* unit = pActor->GetNPCIfCanInteractWith(packet.npcGuid, UNIT_NPC_FLAG_STABLEMASTER);
     if (!unit)
     {
         sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: HandleListStabledPetsOpcode - %s not found or you can't interact with him.", packet.npcGuid.GetString().c_str());
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
     SendStablePet(packet.npcGuid);
 }
 
 void WorldSession::SendStablePet(ObjectGuid guid)
 {
+    // [SUI] the driven bot's pets; the list answers on this socket (or mirrors from a gossip pick)
+    Player* pActor = GetSuiActor();
+
     WorldPacket data(MSG_LIST_STABLED_PETS, 200);           // guess size
     data << guid;
 
-    Pet* pet = _player->GetPet();
+    Pet* pet = pActor->GetPet();
 
     size_t wpos = data.wpos();
     data << uint8(0);                                       // place holder for slot show number
 
-    data << uint8(GetPlayer()->m_stableSlots);
+    data << uint8(pActor->m_stableSlots);
 
     uint8 num = 0;                                          // counter for place holder
 
@@ -578,7 +594,7 @@ void WorldSession::SendStablePet(ObjectGuid guid)
         ++num;
     }
     // Pet may be despawned if owner went far away from pet for example.
-    else if (CharacterPetCache const* currentPetData = sCharacterDatabaseCache.GetCharacterPetByOwner(_player->GetGUIDLow()))
+    else if (CharacterPetCache const* currentPetData = sCharacterDatabaseCache.GetCharacterPetByOwner(pActor->GetGUIDLow()))
     {
         data << uint32(currentPetData->id);
         data << uint32(currentPetData->entry);
@@ -589,7 +605,7 @@ void WorldSession::SendStablePet(ObjectGuid guid)
         ++num;
     }
     CharPetMap const& pets = sCharacterDatabaseCache.GetCharPetsMap();
-    CharPetMap::const_iterator myPets = pets.find(GetPlayer()->GetGUIDLow());
+    CharPetMap::const_iterator myPets = pets.find(pActor->GetGUIDLow());
     if (myPets != pets.end())
         for (const auto it : myPets->second)
             if (it->slot >= PET_SAVE_FIRST_STABLE_SLOT && it->slot <= PET_SAVE_LAST_STABLE_SLOT)
@@ -641,7 +657,10 @@ bool WorldSession::CheckStableMaster(ObjectGuid guid)
 
 void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
 {
-    if (!GetPlayer()->IsAlive())
+    // [SUI] the driven bot stables ITS pet
+    Player* pActor = GetSuiActor();
+
+    if (!pActor->IsAlive())
     {
         SendStableResult(STABLE_ERR_STABLE);
         return;
@@ -653,10 +672,10 @@ void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    Pet* pet = _player->GetPet();
+    Pet* pet = pActor->GetPet();
 
     // can't place in stable dead pet
     if (!pet || !pet->IsAlive() || pet->GetPetType() != HUNTER_PET)
@@ -670,7 +689,7 @@ void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
     // Find free slot for pet
     bool usedSlots[PET_SAVE_LAST_STABLE_SLOT - PET_SAVE_FIRST_STABLE_SLOT + 1] = {false};
     CharPetMap const& pets = sCharacterDatabaseCache.GetCharPetsMap();
-    CharPetMap::const_iterator myPets = pets.find(GetPlayer()->GetGUIDLow());
+    CharPetMap::const_iterator myPets = pets.find(pActor->GetGUIDLow());
     if (myPets != pets.end())
         for (const auto it : myPets->second)
             if (it->slot >= PET_SAVE_FIRST_STABLE_SLOT && it->slot <= PET_SAVE_LAST_STABLE_SLOT)
@@ -678,27 +697,34 @@ void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
 
     for (free_slot = PET_SAVE_FIRST_STABLE_SLOT; free_slot <= PET_SAVE_LAST_STABLE_SLOT && usedSlots[free_slot - PET_SAVE_FIRST_STABLE_SLOT]; ++free_slot);
 
-    if (free_slot <= GetPlayer()->m_stableSlots)
+    if (free_slot <= pActor->m_stableSlots)
     {
         pet->Unsummon(PetSaveMode(free_slot), _player);
         SendStableResult(STABLE_SUCCESS_STABLE);
     }
     else
         SendStableResult(STABLE_ERR_STABLE);
+
+    // [SUI] Owner-only facts of the driven bot changed: re-push the snapshot.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleUnstablePet(WorldPackets::Npc::UnstablePet const& packet)
 {
+    // [SUI] the driven bot takes ITS pet out
+    Player* pActor = GetSuiActor();
+
     if (!CheckStableMaster(packet.npcGuid))
     {
         SendStableResult(STABLE_ERR_STABLE);
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    CharacterPetCache const* petData = sCharacterDatabaseCache.GetCharacterPetCacheByOwnerAndId(_player->GetGUIDLow(), packet.petNumber);
+    CharacterPetCache const* petData = sCharacterDatabaseCache.GetCharacterPetCacheByOwnerAndId(pActor->GetGUIDLow(), packet.petNumber);
 
     if (!petData || petData->slot < PET_SAVE_FIRST_STABLE_SLOT || petData->slot > PET_SAVE_LAST_STABLE_SLOT)
     {
@@ -715,8 +741,8 @@ void WorldSession::HandleUnstablePet(WorldPackets::Npc::UnstablePet const& packe
     }
 
     // Player may have a pet, but unsummoned currently (too far away from owner ...). Do not erase this pet!
-    Pet* pet = _player->GetPet();
-    if (pet || sCharacterDatabaseCache.GetCharacterPetByOwner(_player->GetGUIDLow()))
+    Pet* pet = pActor->GetPet();
+    if (pet || sCharacterDatabaseCache.GetCharacterPetByOwner(pActor->GetGUIDLow()))
     {
         SendStableResult(STABLE_ERR_STABLE);
         return;
@@ -732,26 +758,33 @@ void WorldSession::HandleUnstablePet(WorldPackets::Npc::UnstablePet const& packe
     }
 
     SendStableResult(STABLE_SUCCESS_UNSTABLE);
+
+    // [SUI] Owner-only facts of the driven bot changed: re-push the snapshot.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleBuyStableSlot(WorldPackets::Npc::BuyStableSlot const& packet)
 {
+    // [SUI] the driven bot buys ITS stable slot with ITS coin
+    Player* pActor = GetSuiActor();
+
     if (!CheckStableMaster(packet.npcGuid))
     {
         SendStableResult(STABLE_ERR_STABLE);
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    if (GetPlayer()->m_stableSlots < MAX_PET_STABLES)
+    if (pActor->m_stableSlots < MAX_PET_STABLES)
     {
-        StableSlotPricesEntry const* SlotPrice = sStableSlotPricesStore.LookupEntry(GetPlayer()->m_stableSlots + 1);
-        if (_player->GetMoney() >= SlotPrice->Price)
+        StableSlotPricesEntry const* SlotPrice = sStableSlotPricesStore.LookupEntry(pActor->m_stableSlots + 1);
+        if (pActor->GetMoney() >= SlotPrice->Price)
         {
-            ++GetPlayer()->m_stableSlots;
-            _player->ModifyMoney(-int32(SlotPrice->Price));
+            ++pActor->m_stableSlots;
+            pActor->ModifyMoney(-int32(SlotPrice->Price));
             SendStableResult(STABLE_SUCCESS_BUY_SLOT);
         }
         else
@@ -759,24 +792,34 @@ void WorldSession::HandleBuyStableSlot(WorldPackets::Npc::BuyStableSlot const& p
     }
     else
         SendStableResult(STABLE_ERR_STABLE);
+
+    // [SUI] Owner-only facts of the driven bot changed: re-push the snapshot.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleStableRevivePet(NullClientPacket const& /*packet*/)
 {
+    // [SUI] the driven bot's pet
+    Player* pActor = GetSuiActor();
+
 }
 
 void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& packet)
 {
+    // [SUI] the driven bot swaps ITS pets
+    Player* pActor = GetSuiActor();
+
     if (!CheckStableMaster(packet.npcGuid))
     {
         SendStableResult(STABLE_ERR_STABLE);
         return;
     }
 
-    GetPlayer()->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
-    GetPlayer()->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->InterruptSpellsWithChannelFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
+    pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_INTERACTING_CANCELS);
 
-    Pet* pet = _player->GetPet();
+    Pet* pet = pActor->GetPet();
 
     if (!pet || !pet->IsAlive() || pet->GetPetType() != HUNTER_PET)
     {
@@ -785,7 +828,7 @@ void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& p
     }
 
     // find swapped pet slot in stable
-    CharacterPetCache const* swappedPet = sCharacterDatabaseCache.GetCharacterPetCacheByOwnerAndId(_player->GetGUIDLow(), packet.petNumber);
+    CharacterPetCache const* swappedPet = sCharacterDatabaseCache.GetCharacterPetCacheByOwnerAndId(pActor->GetGUIDLow(), packet.petNumber);
     if (!swappedPet)
     {
         SendStableResult(STABLE_ERR_STABLE);
@@ -819,6 +862,10 @@ void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& p
     }
     else
         SendStableResult(STABLE_SUCCESS_UNSTABLE);
+
+    // [SUI] Owner-only facts of the driven bot changed: re-push the snapshot.
+    if (pActor != _player)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 void WorldSession::HandleRepairItemOpcode(WorldPackets::Npc::RepairItem const& packet)

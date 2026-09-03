@@ -26,6 +26,7 @@
 #include "MoveSpline.h"
 #include "Opcodes.h"
 #include "WorldPacket.h"
+#include "SuiPossess.h"      // [SUI] IsSuiPossessed: the possessor acks near teleports
 
 bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 {
@@ -35,7 +36,10 @@ bool PlayerBotAI::OnSessionLoaded(PlayerBotEntry* entry, WorldSession* sess)
 
 void PlayerBotAI::UpdateAI(uint32 const diff)
 {
-    if (me->IsBeingTeleportedNear())
+    // [SUI] While a human drives this bot, ITS client answers the near-teleport ack (the
+    // packet is mirrored to the possessor); acking here would land the bot before the
+    // possessor's controller moved, and its next MSG_MOVE would drag the bot back.
+    if (me->IsBeingTeleportedNear() && !SuiPossess::IsSuiPossessed(me))
     {
         WorldPackets::Movement::MoveTeleportAck packet;
         packet.guid = me->GetObjectGuid();

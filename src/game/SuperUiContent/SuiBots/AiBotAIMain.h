@@ -535,6 +535,22 @@ public:
     std::deque<std::array<float, 3>> m_suiWaypoints;
     bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
     bool m_suiUnlinked = false;     // chain broken (ORDER_LINK): never formation-follows
+    // [SUI-TAXI] Landed a flight without its human aboard (the human hopped to another
+    // body mid-air): hold where it landed instead of catch-up teleporting back to the
+    // party (owner 2026-09-03). Cleared when the party arrives within catch-up range,
+    // when the human possesses it again, or by any RTS order task.
+    bool m_suiLandedHold = false;
+    // [SUI-TAXI] Who this bot followed last tick (and where it stood): a same-map gap
+    // beyond catch-up range is a PORT only when the SAME boss jumped; a different boss
+    // far away means the human hopped to a distant body — the rest stay (hold).
+    ObjectGuid m_suiLastBossGuid;
+    bool m_suiBossFlewAway = false; // the boss was on a taxi since we last stood near him
+    // [CHAIN] Explicit anchor (ORDER_FOLLOW to ANY group member — owner 2026-09-03: "chain
+    // 2 players and 2 others, not just main to main"). Empty = the group rules (the
+    // human's driven body). FindEscortBoss honours it first.
+    ObjectGuid m_suiChainAnchor;
+    void SuiStopFollowForHold();    // end an active FOLLOW leg when a hold begins
+    float m_suiLastBossX = 0.f, m_suiLastBossY = 0.f, m_suiLastBossZ = 0.f;
     // [SUI] RTS discipline. Any explicit RTS order stands the bot at attention:
     // the idle wander/stroll stays suppressed until the journey is abandoned
     // (doctrine change, possession). Formation orders also stamp a slot facing
@@ -545,6 +561,12 @@ public:
     // every autonomous decision (rotation, assist, grind, self-care, doctrine) is suspended and
     // brain errands are fenced like a conscript's. ORDER_AUTO or the free view coming down clears it.
     bool m_suiManual = false;
+    // [SUI] Commander orders are STRICT about the navmesh (owner, 2026-09-02): a destination must
+    // be a mesh point with a complete path, or the reachable end of a partial one; no seam
+    // crossing, nudging or ring-scanning toward a spot the commander mis-clicked (an exterior
+    // wall, a roof). Returns false and tells the commander when there is no path at all.
+    bool SuiValidateOrderDest(float& x, float& y, float& z);
+    WorldSession* SuiCommanderSession() const;
     bool m_suiOrderedAttackPass = false;   // an explicit ATTACK order passing the manual gate
     float m_suiFormationFacing = -1000.f;   // > -100 = face this way on arrival
     int8 m_suiSheathOverride = -1;          // -1 none; else the SheathState to keep
@@ -678,6 +700,33 @@ public:
     // the brain bridge entirely by the theft wall, so any "stand down" that travels as a
     // STATE echo is invisible to it — the non-autonomy decree has to be enforced locally.
     bool IsUnattendedRealCharacter() const { return m_ownedDummyEntry != nullptr; }
+    // [COMPANION] Any REAL account's character running this AI: the enrolled
+    // unattended own character OR a summoned companion. Every fabricated-bot
+    // mutation (spec/gear/skill repairs, whisper flag) and the brain bridge
+    // gate on this, not on m_ownedDummyEntry alone.
+    bool IsRealCharacter() const
+    {
+        return m_ownedDummyEntry != nullptr || (botEntry && botEntry->ownerAccountId != 0);
+    }
+    // [COMPANION] The ONE human this unit answers to, or nullptr for a shared
+    // fleet bot: a companion -> its owner, an unattended own character -> its
+    // own session's character (me), a conscript -> its conscriptor.
+    Player* SuiBoundHuman() const;
+    // The body a human is playing right now: the bot they possess, else themselves.
+    static Player* SuiDrivenBodyOf(Player* human);
+    // Set by SuiCompanion::Summon; consumed by TickArrival on the first map tick.
+    ObjectGuid m_suiCompanionOwner;
+    bool m_suiCompanionArrival = false;
+    // [COMPANION] Death rule (owner 2026-09-02): the party gets first call on a
+    // resurrection (healer out of combat, druid Rebirth in combat); failing that
+    // the corpse "runs itself": the ghost waits at the body for as long as the
+    // graveyard run would have taken (never less than the reclaim delay), then
+    // pops in place at 50% once the party is out of combat.
+    uint32 m_suiCompanionDeadMs = 0;
+    uint32 m_suiCompanionSelfRezAtMs = 0;
+    // Fleet-wide ally resurrection: healers rez a dead party member out of
+    // combat; a druid Rebirths one in combat. True when a cast was started.
+    bool SuiTryResurrectAlly();
     void    DoPartyFollow();
 
     // --- 18 pure virtual combat method overrides (verbatim from BattleBotAI) ---

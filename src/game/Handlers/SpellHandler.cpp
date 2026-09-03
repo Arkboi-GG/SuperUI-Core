@@ -243,11 +243,17 @@ void WorldSession::HandleOpenItemOpcode(WorldPackets::Spell::OpenItem const& pac
 
 void WorldSession::HandleGameObjectUseOpcode(WorldPackets::Misc::GameObjectUse const& packet)
 {
-    // ignore for remote control state
-    if (!_player->IsSelfMover())
+    // [SUI] The driven bot uses the object (chest/herb/vein loot, doors, spell focus…):
+    // range and permission gate at ITS body and GameObject::Use runs as it, so a chest
+    // opens into ITS bags via the mirrored loot frames. Unpossessed, identical to before.
+    Player* pActor = GetSuiActor();
+    bool const suiActing = pActor != _player;
+
+    // ignore for remote control state (SUI possession counts as self-control)
+    if (!_player->IsSelfMover() && !suiActing)
         return;
 
-    GameObject* obj = GetPlayer()->GetMap()->GetGameObject(packet.guid);
+    GameObject* obj = pActor->GetMap()->GetGameObject(packet.guid);
     if (!obj || obj->IsDeleted())
         return;
 
@@ -263,13 +269,13 @@ void WorldSession::HandleGameObjectUseOpcode(WorldPackets::Misc::GameObjectUse c
     if (obj->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_NO_INTERACT))
         return;
 
-    if (!obj->IsAtInteractDistance(_player))
+    if (!obj->IsAtInteractDistance(pActor))
         return;
 
-    if (obj->PlayerCanUse(_player))
+    if (obj->PlayerCanUse(pActor))
     {
-        _player->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_LOOTING_CANCELS);
-        obj->Use(_player);
+        pActor->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_LOOTING_CANCELS);
+        obj->Use(pActor);
     }
 }
 
