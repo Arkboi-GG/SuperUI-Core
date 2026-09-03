@@ -104,10 +104,10 @@ static void HoldIfLeftBehind(Player* body, Player* anchor)
     AiBotAI* ai = BotAiOf(body);
     if (!ai || !body || !anchor)
         return;
-    bool const far = body->GetMapId() != anchor->GetMapId() ||
+    bool const isFar = body->GetMapId() != anchor->GetMapId() ||
         body->GetInstanceId() != anchor->GetInstanceId() ||
         body->GetDistance(anchor) > AIBOT_PARTY_CATCHUP_TELEPORT;
-    if (!far)
+    if (!isFar)
         return;
     ai->m_suiLandedHold = true;
     sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s left behind by %s: holding here",
