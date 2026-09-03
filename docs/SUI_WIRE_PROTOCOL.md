@@ -131,7 +131,13 @@ begin/end. Lists **all** current group members.
 |---|---|---|
 | count | u8 | |
 | per member: guid | u64 | |
-| per member: flags | u8 | 0x01 controllable (AiBot), 0x02 currently possessed |
+| per member: flags | u8 | 0x01 controllable (AiBot), 0x02 currently possessed, 0x04 conscripted, 0x08 your companion |
+| per member: chain | u8 | row v2 (2026-09-03): 0 linked · 1 unlinked by the human (holds until re-linked) · 2 world hold (landed alone / human hopped far / boss flew off; clears when the anchor is back in range) |
+| per member: anchor | u64 | row v2: the body this member's formation keys on (`FindEscortBoss`), 0 for a real player |
+
+Rows are 18 bytes since 2026-09-03 (were 9). Re-pushed on every chain edge
+(`SuiPossess::NotifyChainChanged`: hold set/cleared, ORDER_LINK) so the client's
+chain UI is server truth. ORDER_LINK with x >= 0.5 also lifts a world hold.
 
 ## SMSG_SUI_CONTROL_ACK
 Answers requests/releases AND arrives **unsolicited** on forced release — the

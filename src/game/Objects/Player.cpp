@@ -1874,7 +1874,12 @@ bool Player::TeleportTo(uint32 mapId, float x, float y, float z, float orientati
     // Cross-map camera/mover state is undefined under SUI possession: break the
     // pair (either side) before the teleport machinery runs. Near teleports
     // release too — cheap, correct, and rare while possessed.
-    SuiPossess::OnPlayerTeleport(this);
+    // [SUI] A same-map (near) teleport of the possessed BOT keeps the pair: the client
+    // adopts it through the mirrored MSG_MOVE_TELEPORT_ACK. Anything else (map change,
+    // transport, the possessor's own teleport) still breaks the pair first.
+    bool const suiFarTeleport = !(FindMap() && GetMapId() == mapId && !m_transport &&
+        !(options & TELE_TO_FORCE_MAP_CHANGE));
+    SuiPossess::OnPlayerTeleport(this, suiFarTeleport);
 
     // if we were on a transport, leave
     if (!(options & TELE_TO_NOT_LEAVE_TRANSPORT) && m_transport)
@@ -22349,7 +22354,10 @@ void Player::TaxiStepFinished(bool lastPointReached)
     else
     {
         // When the player reaches the last flight point, teleport to destination taxi node location
-        if (lastPointReached)
+        // [SUI-TAXI] ...unless a human is driving this flyer: the spline already ended on the
+        // node, and Player::TeleportTo breaks possession (RELEASED_TELEPORT) — the owner was
+        // booted off the bot the moment it landed (2026-09-03).
+        if (lastPointReached && !SuiPossess::IsSuiPossessed(this))
             TeleportTo(curDestNode->map_id, curDestNode->x, curDestNode->y, curDestNode->z, GetOrientation());
         m_taxi.ClearTaxiDestinations();        // not destinations, clear source node
     }

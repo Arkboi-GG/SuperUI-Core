@@ -219,6 +219,11 @@ void WorldSession::HandleMoveTeleportAckOpcode(WorldPackets::Movement::MoveTelep
 #endif
 
     Unit* pMover = _player->GetMover();
+    // [SUI] While the session drives a bot, its OWN character may near-teleport under
+    // the unattended AI (the chain's catch-up after a port); the client acks that with
+    // the character's guid while the mover is still the bot. Accept it for _player.
+    if (pMover != _player && packet.guid == _player->GetObjectGuid() && _player->IsBeingTeleportedNear())
+        pMover = _player;
     Player* pPlayerMover = pMover->ToPlayer();
 
     if (!pPlayerMover || !pPlayerMover->IsBeingTeleportedNear())

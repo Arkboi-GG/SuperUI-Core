@@ -95,6 +95,41 @@ static AiBotAI* BotAiOf(Player* bot)
     return bot ? dynamic_cast<AiBotAI*>(bot->AI()) : nullptr;
 }
 
+/// A body whose human just moved to an anchor beyond catch-up range (another map, or
+/// far on this one) holds where it stands instead of catch-up teleporting after it
+/// (owner 2026-09-03: "the rest stay"). DoPartyFollow releases the hold when the
+/// anchor comes back within range.
+static void HoldIfLeftBehind(Player* body, Player* anchor)
+{
+    AiBotAI* ai = BotAiOf(body);
+    if (!ai || !body || !anchor)
+        return;
+    bool const far = body->GetMapId() != anchor->GetMapId() ||
+        body->GetInstanceId() != anchor->GetInstanceId() ||
+        body->GetDistance(anchor) > AIBOT_PARTY_CATCHUP_TELEPORT;
+    if (!far)
+        return;
+    ai->m_suiLandedHold = true;
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s left behind by %s: holding here",
+        body->GetName(), anchor->GetName());
+    NotifyChainChanged(body);
+}
+
+void OnTaxiLanded(Player* player)
+{
+    // A possessed flyer is driven; the human decides where it goes next. An
+    // unpossessed one (its human hopped away mid-air, or a party flight whose
+    // human did not board) stays put — the catch-up teleport in DoPartyFollow
+    // used to yank it straight back to the party the moment it landed.
+    AiBotAI* ai = BotAiOf(player);
+    if (!ai || IsSuiPossessed(player))
+        return;
+    ai->m_suiLandedHold = true;
+    sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI-TAXI] %s landed without its human: holding here",
+        player->GetName());
+    NotifyChainChanged(player);
+}
+
 // ── Own-character autonomy (M5, design corrected 2026-08-10) ─────────────────
 // While the human drives a bot or the free camera, their real character runs
 // the SAME fleet AI as every SuperUI bot (AiBotAI): it enrolls with the C#
@@ -211,7 +246,12 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     bool const sameMapInstance = bot->GetMapId() == possessor->GetMapId() &&
         bot->GetInstanceId() == possessor->GetInstanceId();
     bool const visible = sameMapInstance && possessor->IsInVisibleList(bot);
-    if (!visible)
+    // [SUI] A PARTY member out of streaming range on the SAME map is granted in place
+    // (owner 2026-09-03: hopping Stormwind → Westfall dragged the main along with a
+    // loading screen). Camera::SetView needs only the same map: far-sight streams the
+    // bot's surroundings to the client, whose grant handler waits for the entity and
+    // loads the destination tiles behind a curtain. Cross-map hops still relocate.
+    if (!visible && !(partyAuthorized && sameMapInstance))
     {
         if (!factionAuthorized)
             return DENY_NOT_FOUND;
@@ -254,6 +294,7 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     // The bot's brain-era journey does not survive a human taking the body: a
     // live TASK_MOVE_TO gates DoPartyFollow and resumes walking on release.
     ai->SuiAbandonJourney();
+    ai->m_suiLandedHold = false;     // the human is back on this body
     // A half-open loot window would strand the loot session (loot is
     // player-scoped); mirror ModPossess's force-release.
     if (ObjectGuid lootGuid = bot->GetLootGuid())
@@ -267,7 +308,10 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
 
     // The abandoned real character follows and assists whoever the human drives.
     if (partyAuthorized)
+    {
         AttachUnattendedAI(possessor, bot);
+        HoldIfLeftBehind(possessor, bot);   // a far hop: the main stays where it is
+    }
     else
         ParkUnattendedBody(possessor);
 
@@ -367,6 +411,8 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
         bot->SetPossessorGuid(ObjectGuid());
         if (AiBotAI* ai = BotAiOf(bot))
             ai->SetPossessed(false);
+        if (possessor)
+            HoldIfLeftBehind(bot, possessor);   // released far from the human: stays put
     }
     if (possessor)
     {
@@ -826,16 +872,26 @@ void HandleOrder(WorldSession* session, uint8 orderType,
             }
             case ORDER_FOLLOW:
             {
-                // Portrait drag chain: this bot escorts the named group member.
-                // Rides the [FOLLOW-CMD] escort override, whose resolution is
-                // case-insensitive and falls back to the auto split when the
-                // name never resolves — so an empty/unknown target just clears.
+                // Chain to ANY group member (owner 2026-09-03: "chain 2 players and 2
+                // others — not just main to main"). The anchor lives on the AI
+                // (FindEscortBoss honours it first: a real player anchors at their driven
+                // body, a bot at itself); an empty/unknown target clears back to the group
+                // rules. Following IS linking: an unlink or a world hold is lifted. The
+                // bridge escort override still names a REAL target so the brain agrees.
                 Player* followTarget = targetGuid.IsEmpty() ? nullptr
                     : sObjectMgr.GetPlayer(targetGuid);
+                bool const validTarget = followTarget && followTarget != pMember &&
+                    followTarget->IsInWorld() && followTarget->GetGroup() == pMember->GetGroup();
+                ai->m_suiChainAnchor = validTarget ? followTarget->GetObjectGuid() : ObjectGuid();
+                ai->m_suiUnlinked = false;
+                ai->m_suiLandedHold = false;
+                bool const realTarget = validTarget && followTarget->GetSession() &&
+                    !followTarget->GetSession()->GetBot();
                 snprintf(json, sizeof(json),
                     "{\"type\":\"SET_ESCORT\",\"payload\":{\"player_name\":\"%s\"}}",
-                    followTarget ? followTarget->GetName() : "");
+                    realTarget ? followTarget->GetName() : "");
                 ai->SuiInjectCommandLine(json);
+                NotifyChainChanged(pMember);
                 break;
             }
             case ORDER_LINK:
@@ -848,6 +904,11 @@ void HandleOrder(WorldSession* session, uint8 orderType,
                     pMember->GetMotionMaster()->Clear(false, true);
                     pMember->GetMotionMaster()->MoveIdle();
                 }
+                else
+                    // An explicit re-link is the human saying "come": it also lifts a
+                    // world hold (the catch-up rule then walks or ports it over).
+                    ai->m_suiLandedHold = false;
+                NotifyChainChanged(pMember);
                 break;
             case ORDER_PATROL:
             {
@@ -929,14 +990,36 @@ void OnPlayerRemovedFromGroup(Player* player)
         ForceRelease(player->GetSession(), RELEASED_GROUP);
 }
 
-void OnPlayerTeleport(Player* player)
+void OnPlayerTeleport(Player* player, bool farTeleport)
 {
     if (!player)
         return;
     if (Player* possessor = GetPossessor(player))
+    {
+        // The driven bot's near teleport (area-trigger portal, script, GM) rides the
+        // mirrored MSG_MOVE_TELEPORT_ACK: the possessor's client snaps its controller and
+        // acks for the bot (PlayerBotAI stands down its own ack while possessed).
+        if (!farTeleport)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s near-teleports while driven by %s: possession kept",
+                player->GetName(), possessor->GetName());
+            return;
+        }
         ForceRelease(possessor->GetSession(), RELEASED_TELEPORT);
+    }
     else if (player->GetSession() && !player->GetSession()->GetSuiControlledGuid().IsEmpty())
+    {
+        // The MAIN near-teleports while its human drives a bot: that is the chain's
+        // catch-up after a port of the driven body (POSSESS_LAW 4.3). The main's client
+        // adopts it on the streamed entity and acks (HandleMoveTeleportAck accepts the
+        // session player's own ack while the mover is the bot). Far teleports still break.
+        if (!farTeleport)
+        {
+            sLog.Out(LOG_BASIC, LOG_LVL_BASIC, "[SUI] %s (driving) near-teleports: possession kept", player->GetName());
+            return;
+        }
         ForceRelease(player->GetSession(), RELEASED_TELEPORT);
+    }
 }
 
 void OnPlayerDeath(Player* player)
@@ -975,7 +1058,7 @@ void SendRoster(Player* realPlayer)
     if (!session || session->GetBot() || !session->IsSuiCapable())
         return;
 
-    WorldPacket data(SMSG_SUI_CONTROL_ROSTER, 1 + 9 * MAX_RAID_SIZE);
+    WorldPacket data(SMSG_SUI_CONTROL_ROSTER, 1 + 18 * MAX_RAID_SIZE);
     Group* group = realPlayer->GetGroup();
     if (!group)
     {
@@ -1000,15 +1083,35 @@ void SendRoster(Player* realPlayer)
             flags |= ROSTER_COMPANION;
         if (IsSuiPossessed(member))
             flags |= ROSTER_POSSESSED;
+        uint8 chain = CHAIN_LINKED;
+        ObjectGuid anchor;
         if (AiBotAI* memberAi = dynamic_cast<AiBotAI*>(member->AI()))
+        {
             if (memberAi->IsSuiConscripted())
                 flags |= ROSTER_CONSCRIPTED;
+            // Chain truth (owner 2026-09-03): the human's unlink wins over a world hold,
+            // and the anchor is whoever the formation actually keys on right now.
+            if (memberAi->m_suiUnlinked)
+                chain = CHAIN_UNLINKED;
+            else if (memberAi->m_suiLandedHold)
+                chain = CHAIN_WORLD_HOLD;
+            if (Player* boss = memberAi->FindEscortBoss())
+                anchor = boss->GetObjectGuid();
+        }
         data << uint64(member->GetObjectGuid().GetRawValue());
         data << flags;
+        data << chain;                                    // row v2 (2026-09-03): 18 bytes
+        data << uint64(anchor.GetRawValue());
         ++count;
     }
     data.put<uint8>(countPos, count);
     session->SendPacket(&data);
+}
+
+void NotifyChainChanged(Player* member)
+{
+    if (member && member->IsInWorld())
+        BroadcastRoster(member->GetGroup());
 }
 
 void BroadcastRoster(Group* group)
@@ -2346,6 +2449,9 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_SHOWTAXINODES:
         case SMSG_TAXINODE_STATUS:
         case SMSG_NEW_TAXI_PATH:
+        // [SUI] near teleport of the driven bot (Player::TeleportTo same map): the
+        // possessor's client adopts it on its controller and answers the ack.
+        case MSG_MOVE_TELEPORT_ACK:
         // [SUI] gossip-answered frames of the routed families (owner 2026-09-03:
         // "a gossip reply that lands nowhere doesn't count as functioning").
         // Player::OnGossipSelect runs as the driven bot and answers on ITS session:

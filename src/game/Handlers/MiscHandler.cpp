@@ -624,7 +624,11 @@ void WorldSession::HandleResurrectResponseOpcode(WorldPackets::Misc::ResurrectRe
 
 void WorldSession::HandleAreaTriggerOpcode(WorldPackets::Misc::AreaTrigger const& packet)
 {
-    Player* const pPlayer = GetPlayer();
+    // [SUI] The trigger the client reports is the one the DRIVEN body crossed (owner
+    // 2026-09-03: the Stormwind mage-tower portal did nothing for a possessed bot — the
+    // range check ran against the parked main). Same-map teleport triggers keep the
+    // possession (SuiPossess::OnPlayerTeleport near case); a map change still releases.
+    Player* const pPlayer = GetSuiActor();
 
     if (pPlayer->HasCheatOption(PLAYER_CHEAT_IGNORE_TRIGGERS))
         return;
@@ -699,7 +703,7 @@ void WorldSession::HandleAreaTriggerOpcode(WorldPackets::Misc::AreaTrigger const
 
     if (ZoneScript* pZoneScript = pPlayer->GetZoneScript())
     {
-        if (pZoneScript->HandleAreaTrigger(_player, packet.triggerId))
+        if (pZoneScript->HandleAreaTrigger(pPlayer, packet.triggerId))
             return;
     }
 

@@ -1257,6 +1257,25 @@ Player* AiBotAI::FindEscortBoss() const
         return nullptr;
     }
 
+    // [CHAIN] Explicit anchor wins (owner 2026-09-03): a real player anchors at their
+    // driven body, a bot at itself. A stale or absent anchor falls through to the rules.
+    if (!m_suiChainAnchor.IsEmpty())
+    {
+        Player* target = sObjectMgr.GetPlayer(m_suiChainAnchor);
+        if (target && target != me && target->IsInWorld() && target->GetGroup() == pGroup)
+        {
+            bool const realTarget = target->GetSession() && !target->GetSession()->GetBot();
+            Player* body = realTarget ? SuiDrivenBodyOf(target) : target;
+            if (!body)
+                body = target;
+            if (body != me)
+            {
+                CB_HIT(me->GetGUIDLow(), "cpp-main: explicit chain anchor is boss");
+                return body;
+            }
+        }
+    }
+
     // [COMPANION] Bound units answer to one human's driven body (see SuiBoundBoss).
     // Shared fleet bots fall through to the assigned-human split below and then
     // escort THAT human's driven body.
@@ -1330,6 +1349,19 @@ Player* AiBotAI::FindEscortBoss() const
 //  - left far behind on the SAME map (boss took a port): NearTeleportTo the boss, grounded;
 //  - otherwise: (re)issue MoveFollow only when the follow generator is not already driving,
 //    with a per-guid angle so the escort fans out behind him instead of stacking.
+// [SUI-TAXI] A hold must also END the walk: the follow generator issued while the boss
+// stood beside us stays on the motion master and keeps chasing him under the gryphon
+// (owner 2026-09-03: "my character was moving towards Stormwind"). Only a FOLLOW leg is
+// stopped — an RTS order task keeps its own generator.
+void AiBotAI::SuiStopFollowForHold()
+{
+    if (!me || me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+        return;
+    me->StopMoving();
+    me->GetMotionMaster()->Clear(false, true);
+    me->GetMotionMaster()->MoveIdle();
+}
+
 void AiBotAI::DoPartyFollow()
 {
     // [MULTI-HUMAN] Formation keys on the ASSIGNED human (FindEscortBoss), not the single
@@ -1401,18 +1433,72 @@ void AiBotAI::DoPartyFollow()
 
     m_bossOffMapMs = 0;   // same map — a fresh crossing starts a fresh dwell
 
-    // [SUI-TAXI] Owner 2026-09-03: in direct control the rest of the party STAYS when the
-    // driven body takes a flight. A same-map boss on a taxi used to be chased (the cross-map
-    // branch above waits, this branch did not) — the escort ran under the gryphon and, past
-    // the catch-up distance, teleported after it. Hold instead; the follow re-anchors the
-    // moment the human hops to another body (SuiDrivenBodyOf is read live every tick).
+    float const dist = me->GetDistance(pBoss);
+
+    // [SUI-TAXI] Which gap is this? The same boss standing far from where he stood last
+    // tick took a port (hearth, summon, portal): catch up by teleport as always. A NEW boss
+    // (the human hopped to another body — a flyer that landed across the zone, say) far
+    // away is not a port: the rest of the party STAYS (owner 2026-09-03), and only walks
+    // once he comes back within catch-up range. First observation of a boss never holds.
+    // The position is recorded EVERY tick, flight included (a gryphon covers ~32 yd per
+    // tick, well under the port threshold) — recording only on non-flight ticks made the
+    // landing read as a 1872-yard port and the main catch-up teleported to Westfall,
+    // which in turn broke the possession (owner, 14:58).
+    ObjectGuid const bossGuid = pBoss->GetObjectGuid();
+    bool const bossChanged = !m_suiLastBossGuid.IsEmpty() && m_suiLastBossGuid != bossGuid;
+    bool const bossPorted = !bossChanged && !m_suiLastBossGuid.IsEmpty() &&
+        pBoss->GetDistance(m_suiLastBossX, m_suiLastBossY, m_suiLastBossZ) > AIBOT_PARTY_CATCHUP_TELEPORT;
+    m_suiLastBossGuid = bossGuid;
+    m_suiLastBossX = pBoss->GetPositionX();
+    m_suiLastBossY = pBoss->GetPositionY();
+    m_suiLastBossZ = pBoss->GetPositionZ();
+    if (bossChanged && !bossPorted && dist > AIBOT_PARTY_CATCHUP_TELEPORT && !m_suiLandedHold)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-main: human hopped to a far body, holding");
+        m_suiLandedHold = true;
+        SuiPossess::NotifyChainChanged(me);
+    }
+    // POSSESS_LAW 4.3: a PORT of the driven body (the mage-tower portal, a summon) is
+    // followed by the chain — every linked member, the unattended main included,
+    // catch-up teleports after it (owner 2026-09-03: "the non-main follow me through the
+    // portal ... at least it worked"). The main's own catch-up teleport no longer breaks
+    // the possession (SuiPossess::OnPlayerTeleport, possessor near case). Flights and
+    // hops are NOT ports: those hold (above / below).
+
+    // Owner 2026-09-03: in direct control the rest of the party STAYS when the driven
+    // body takes a flight. Hold while he flies; when he lands far away, keep holding
+    // (the left-behind latch) rather than catch-up teleporting after the gryphon.
     if (pBoss->IsTaxiFlying())
     {
         CB_HIT(me->GetGUIDLow(), "cpp-main: boss on a taxi, holding");
+        m_suiBossFlewAway = true;
+        SuiStopFollowForHold();
         return;
     }
+    if (m_suiBossFlewAway)
+    {
+        m_suiBossFlewAway = false;
+        if (dist > AIBOT_PARTY_CATCHUP_TELEPORT && !m_suiLandedHold)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: boss flew away, holding where we are");
+            m_suiLandedHold = true;
+            SuiPossess::NotifyChainChanged(me);
+        }
+    }
 
-    float const dist = me->GetDistance(pBoss);
+    // [SUI-TAXI] Left-behind hold (landed a flight alone, or the human hopped far away):
+    // hold here. The boss coming within catch-up range releases it and formation resumes.
+    if (m_suiLandedHold)
+    {
+        if (dist > AIBOT_PARTY_CATCHUP_TELEPORT)
+        {
+            CB_HIT(me->GetGUIDLow(), "cpp-main: left-behind hold, party not here yet");
+            SuiStopFollowForHold();
+            return;
+        }
+        m_suiLandedHold = false;              // the anchor is back in range: the chain re-forms
+        SuiPossess::NotifyChainChanged(me);
+    }
 
     if (dist > AIBOT_PARTY_CATCHUP_TELEPORT)
     {

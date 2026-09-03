@@ -535,6 +535,22 @@ public:
     std::deque<std::array<float, 3>> m_suiWaypoints;
     bool m_suiPatrolLoop = false;   // arrival re-queues the popped waypoint (ORDER_PATROL)
     bool m_suiUnlinked = false;     // chain broken (ORDER_LINK): never formation-follows
+    // [SUI-TAXI] Landed a flight without its human aboard (the human hopped to another
+    // body mid-air): hold where it landed instead of catch-up teleporting back to the
+    // party (owner 2026-09-03). Cleared when the party arrives within catch-up range,
+    // when the human possesses it again, or by any RTS order task.
+    bool m_suiLandedHold = false;
+    // [SUI-TAXI] Who this bot followed last tick (and where it stood): a same-map gap
+    // beyond catch-up range is a PORT only when the SAME boss jumped; a different boss
+    // far away means the human hopped to a distant body — the rest stay (hold).
+    ObjectGuid m_suiLastBossGuid;
+    bool m_suiBossFlewAway = false; // the boss was on a taxi since we last stood near him
+    // [CHAIN] Explicit anchor (ORDER_FOLLOW to ANY group member — owner 2026-09-03: "chain
+    // 2 players and 2 others, not just main to main"). Empty = the group rules (the
+    // human's driven body). FindEscortBoss honours it first.
+    ObjectGuid m_suiChainAnchor;
+    void SuiStopFollowForHold();    // end an active FOLLOW leg when a hold begins
+    float m_suiLastBossX = 0.f, m_suiLastBossY = 0.f, m_suiLastBossZ = 0.f;
     // [SUI] RTS discipline. Any explicit RTS order stands the bot at attention:
     // the idle wander/stroll stays suppressed until the journey is abandoned
     // (doctrine change, possession). Formation orders also stamp a slot facing
