@@ -255,20 +255,22 @@ void WorldSession::HandleAutoEquipItemOpcode(WorldPackets::Item::AutoEquipItem c
 
 void WorldSession::HandleDestroyItemOpcode(WorldPackets::Item::DestroyItem const& packet)
 {
+    Player* pActor = GetSuiActor();
+    bool suiActing = pActor != _player;
+
     uint16 pos = (packet.bag << 8) | packet.slot;
 
-    // prevent drop unequipable items (in combat, for example) and non-empty bags
-    if (_player->IsEquipmentPos(pos) || _player->IsBagPos(pos))
+    if (pActor->IsEquipmentPos(pos) || pActor->IsBagPos(pos))
     {
-        InventoryResult msg = _player->CanUnequipItem(pos, false);
+        InventoryResult msg = pActor->CanUnequipItem(pos, false);
         if (msg != EQUIP_ERR_OK)
         {
-            _player->SendEquipError(msg, _player->GetItemByPos(pos), nullptr);
+            _player->SendEquipError(msg, pActor->GetItemByPos(pos), nullptr);
             return;
         }
     }
 
-    Item *pItem  = _player->GetItemByPos(packet.bag, packet.slot);
+    Item* pItem = pActor->GetItemByPos(packet.bag, packet.slot);
     if (!pItem)
     {
         _player->SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, nullptr, nullptr);
@@ -285,10 +287,15 @@ void WorldSession::HandleDestroyItemOpcode(WorldPackets::Item::DestroyItem const
     if (packet.count)
     {
         uint32 i_count = packet.count;
-        _player->DestroyItemCount(pItem, i_count, true);
+        pActor->DestroyItemCount(pItem, i_count, true);
     }
     else
-        _player->DestroyItem(packet.bag, packet.slot, true);
+    {
+        pActor->DestroyItem(packet.bag, packet.slot, true);
+    }
+
+    if (suiActing)
+        SuiPossess::ResnapshotControlled(this);
 }
 
 // Only _static_ data send in this packet !!!
