@@ -659,7 +659,8 @@ void WorldSession::HandleChatMessageOpcode(WorldPackets::Chat::ChatMessage const
 
 void WorldSession::HandleEmoteOpcode(WorldPackets::Misc::Emote const& packet)
 {
-    if (!GetPlayer()->IsAlive() || GetPlayer()->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PREVENT_ANIM))
+    if (!GetPlayer()->IsAlive() || GetPlayer()->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PREVENT_ANIM) ||
+        GetPlayer()->IsSuiTacticallyFrozen())
         return;
 
     if (!GetPlayer()->CanSpeak())
@@ -726,6 +727,9 @@ void WorldSession::HandleTextEmoteOpcode(WorldPackets::Misc::TextEmote const& pa
     if (!em)
         return;
 
+    // Keep the social text path live, but never interrupt or replace the pose
+    // sampled when this actor entered a tactical field.
+    if (!GetPlayer()->IsSuiTacticallyFrozen())
     switch (em->textid)
     {
         case EMOTE_STATE_SLEEP:
@@ -750,7 +754,9 @@ void WorldSession::HandleTextEmoteOpcode(WorldPackets::Misc::TextEmote const& pa
     Cell::VisitWorldObjects(GetPlayer(), emote_worker,  sWorld.getConfig(CONFIG_FLOAT_LISTEN_RANGE_TEXTEMOTE));
 
     //Send scripted event call
-    if (unit && unit->IsCreature() && ((Creature*)unit)->AI())
+    // Social text remains live, but a frozen actor cannot drive a gameplay AI
+    // script through ReceiveEmote while its sampled pose/state is held.
+    if (!GetPlayer()->IsSuiTacticallyFrozen() && unit && !unit->IsSuiTacticallyFrozen() && unit->IsCreature() && ((Creature*)unit)->AI())
         ((Creature*)unit)->AI()->ReceiveEmote(GetPlayer(), packet.textEmote);
 }
 

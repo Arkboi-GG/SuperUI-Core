@@ -32,6 +32,7 @@
 #include "CreatureAI.h"
 #include "Util.h"
 #include "CharacterDatabaseCache.h"
+#include "SuiTacticalFreeze.h"
 
 //numbers represent minutes * 100 while happy (you get 100 loyalty points per min while happy)
 uint32 const Pet::LevelUpLoyalty[6] =
@@ -660,6 +661,9 @@ void Pet::SetDeathState(DeathState s)                       // overwrite virtual
 void Pet::Update(uint32 update_diff, uint32 diff)
 {
     if (m_removed || m_loading)                                           // pet already removed, just wait in remove queue, no updates
+        return;
+
+    if (IsSuiTacticallyFrozen())
         return;
 
     // Unsummon pets that lost owner

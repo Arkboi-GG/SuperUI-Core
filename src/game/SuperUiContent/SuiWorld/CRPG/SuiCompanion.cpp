@@ -10,6 +10,7 @@
 
 #include "SuiCompanion.h"
 #include "SuiPossess.h"
+#include "SuiTacticalFreeze.h"
 #include "AiBotAIMain.h"
 #include "PlayerBotMgr.h"
 #include "Player.h"
@@ -278,6 +279,24 @@ void SendList(WorldSession* owner)
 void HandleCompanion(WorldSession* session, uint8 action, ObjectGuid guid)
 {
     session->SetSuiCapable(true);
+    // Listing is read-only and remains live. Summon/dismiss change map
+    // membership and can remove a latched actor, so the session-level lock
+    // rejects both mutations until the authoritative thaw.
+    if ((action == ACTION_SUMMON || action == ACTION_DISMISS) &&
+        SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        SendResult(session, action, guid, RESULT_OWNER_STATE);
+        SendList(session);
+        return;
+    }
+    if (action == ACTION_DISMISS)
+        if (Player* companion = sObjectMgr.GetPlayer(guid))
+            if (companion->IsSuiTacticallyFrozen())
+            {
+                SendResult(session, action, guid, RESULT_OWNER_STATE);
+                SendList(session);
+                return;
+            }
     switch (action)
     {
         case ACTION_SUMMON:

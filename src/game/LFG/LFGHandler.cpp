@@ -27,9 +27,13 @@
 #include "World.h"
 #include "Group.h"
 #include "LFGMgr.h"
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleMeetingStoneJoinOpcode(WorldPackets::Misc::MeetingStoneJoin const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // ignore for remote control state
     if (!_player->IsSelfMover())
         return;
@@ -48,6 +52,14 @@ void WorldSession::HandleMeetingStoneJoinOpcode(WorldPackets::Misc::MeetingStone
 
     if (Group* grp = _player->GetGroup())
     {
+        for (GroupReference* itr = grp->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* member = itr->getSource();
+            if (member && (member->IsSuiTacticallyFrozen() ||
+                (member->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(member->GetSession()))))
+                return;
+        }
+
         if (!grp->IsLeader(_player->GetObjectGuid()))
         {
             SendMeetingstoneFailed(MEETINGSTONE_FAIL_PARTYLEADER);
@@ -76,6 +88,9 @@ void WorldSession::HandleMeetingStoneJoinOpcode(WorldPackets::Misc::MeetingStone
 
 void WorldSession::HandleMeetingStoneLeaveOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (Group* grp = _player->GetGroup())
     {
         if (grp->IsLeader(_player->GetObjectGuid()) && grp->IsInLFG())

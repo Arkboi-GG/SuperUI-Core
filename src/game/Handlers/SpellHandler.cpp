@@ -31,11 +31,15 @@
 #include "GameObject.h"
 #include "Map.h"
 #include "SuiPossess.h"      // [SUI] free-view facing help
+#include "SuiTacticalFreeze.h"
 
 using namespace Spells;
 
 void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* pUser = _player;
     // [SUI] While possessing, the item is used BY the possessed bot from ITS OWN bags — the item
     // twin of the GetSuiActor cast path (HandleCastSpellOpcode). Equip-error feedback below still
@@ -107,6 +111,11 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
         }
     }
 
+    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pActor);
+    if (Unit* target = packet.targets.getUnitTarget())
+        if (target->IsSuiTacticallyFrozen())
+            return;
+
     // check also  BIND_WHEN_PICKED_UP and BIND_QUEST_ITEM for .additem or .additemset case by GM (not binded at adding to inventory)
     if (pItem->GetProto()->Bonding == BIND_WHEN_USE || pItem->GetProto()->Bonding == BIND_WHEN_PICKED_UP || pItem->GetProto()->Bonding == BIND_QUEST_ITEM)
     {
@@ -117,7 +126,6 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
         }
     }
 
-    const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pActor);
     SpellCastResult itemCastCheckResult = SPELL_CAST_OK;
 
     if (!pItem->IsTargetValidForItemUse(packet.targets.getUnitTarget()))
@@ -155,6 +163,9 @@ void WorldSession::HandleUseItemOpcode(WorldPackets::Spell::UseItem const& packe
 
 void WorldSession::HandleOpenItemOpcode(WorldPackets::Spell::OpenItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* pUser = _player;
 
     // ignore for remote control state
@@ -243,6 +254,9 @@ void WorldSession::HandleOpenItemOpcode(WorldPackets::Spell::OpenItem const& pac
 
 void WorldSession::HandleGameObjectUseOpcode(WorldPackets::Misc::GameObjectUse const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] The driven bot uses the object (chest/herb/vein loot, doors, spell focus…):
     // range and permission gate at ITS body and GameObject::Use runs as it, so a chest
     // opens into ITS bags via the mirrored loot frames. Unpossessed, identical to before.
@@ -281,6 +295,9 @@ void WorldSession::HandleGameObjectUseOpcode(WorldPackets::Misc::GameObjectUse c
 
 void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(packet.spellId);
 
     if (!spellInfo)
@@ -300,6 +317,11 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
 
     // client provided targets
     const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pActor);
+    // Reject a newly-authored cast at the ingress boundary. Only explicit hits
+    // already launched before the target froze are eligible for delayed release.
+    if (Unit* target = packet.targets.getUnitTarget())
+        if (target->IsSuiTacticallyFrozen())
+            return;
     SpellEntry const* originalSpellInfo = spellInfo;
 
     // auto-selection buff level base at target level (in spellInfo)
@@ -352,6 +374,9 @@ void WorldSession::HandleCastSpellOpcode(WorldPackets::Spell::CastSpell const& p
 
 void WorldSession::HandleCancelCastOpcode(WorldPackets::Spell::CancelCast const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // ignore for remote control state (for player case) — except when the
     // remote player IS our SUI-possessed bot, whose casts we legitimately drive
     Player* pActor = GetSuiActor();
@@ -368,6 +393,9 @@ void WorldSession::HandleCancelCastOpcode(WorldPackets::Spell::CancelCast const&
 
 void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spell::CancelAura const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(packet.spellId);
     if (!spellInfo)
         return;
@@ -446,6 +474,9 @@ void WorldSession::HandleCancelAuraOpcode(WorldPackets::Spell::CancelAura const&
 
 void WorldSession::HandlePetCancelAuraOpcode(WorldPackets::Pet::PetCancelAura const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // ignore for remote control state
     if (!_player->IsSelfMover())
         return;
@@ -473,11 +504,17 @@ void WorldSession::HandlePetCancelAuraOpcode(WorldPackets::Pet::PetCancelAura co
 
 void WorldSession::HandleCancelGrowthAuraOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // nothing do
 }
 
 void WorldSession::HandleCancelAutoRepeatSpellOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // may be better send SMSG_CANCEL_AUTO_REPEAT?
     // cancel and prepare for deleting
     _player->GetMover()->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
@@ -485,6 +522,9 @@ void WorldSession::HandleCancelAutoRepeatSpellOpcode(NullClientPacket const& /*p
 
 void WorldSession::HandleCancelChanneling(WorldPackets::Spell::CancelChanneling const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // ignore for remote control state (for player case) — except our SUI bot
     Player* pActor = GetSuiActor();
     Unit* mover = _player->GetMover();
@@ -501,6 +541,9 @@ void WorldSession::HandleCancelChanneling(WorldPackets::Spell::CancelChanneling 
 
 void WorldSession::HandleSelfResOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
 // World of Warcraft Client Patch 1.6.0 (2005-07-12)
 // - Self-resurrection spells show their name on the button in the release spirit dialog.
 #if SUPPORTED_CLIENT_BUILD >= CLIENT_BUILD_1_6_1

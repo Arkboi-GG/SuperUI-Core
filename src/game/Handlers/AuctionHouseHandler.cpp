@@ -34,6 +34,7 @@
 #include "Chat.h"
 #include "Anticheat.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: the DRIVEN bot auctions, bids and cancels
+#include "SuiTacticalFreeze.h"
 
 // please DO NOT use iterator++, because it is slower than ++iterator!!!
 // post-incrementation is always slower than pre-incrementation !
@@ -41,6 +42,12 @@
 // void called when player click on auctioneer npc
 void WorldSession::HandleAuctionHelloOpcode(WorldPackets::AuctionHouse::AuctionHello const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.auctioneerGuid))
+        return;
+
     // [SUI] The auction house belongs to the body standing at the auctioneer: the possessed
     // bot while driving one (its purse, its bags, its auctions), else the session player.
     // Unpossessed, GetSuiActor() == _player and nothing below changes.
@@ -211,6 +218,9 @@ void WorldSession::SendAuctionCancelledToBidderMail(AuctionEntry* auction)
 
 AuctionHouseEntry const* WorldSession::GetCheckedAuctionHouseForAuctioneer(ObjectGuid guid)
 {
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, guid))
+        return nullptr;
+
     Unit* auctioneer = nullptr;
 
     // GM case
@@ -245,6 +255,9 @@ AuctionHouseEntry const* WorldSession::GetCheckedAuctionHouseForAuctioneer(Objec
 // this void creates new auction and adds auction to some auctionhouse
 void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSellItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!packet.bid || !packet.etime)
         return;                                             // check for cheaters
 
@@ -433,6 +446,9 @@ void WorldSession::HandleAuctionSellItem(WorldPackets::AuctionHouse::AuctionSell
 // this function is called when client bids or buys out auction
 void WorldSession::HandleAuctionPlaceBid(WorldPackets::AuctionHouse::AuctionPlaceBid const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!sWorld.getConfig(CONFIG_BOOL_GM_ALLOW_TRADES) && GetSecurity() > SEC_PLAYER)
     {
         SendAuctionCommandResult(nullptr, AUCTION_BID_PLACED, AUCTION_ERR_RESTRICTED_ACCOUNT);
@@ -595,6 +611,9 @@ void WorldSession::HandleAuctionPlaceBid(WorldPackets::AuctionHouse::AuctionPlac
 // this void is called when auction_owner cancels his auction
 void WorldSession::HandleAuctionRemoveItem(WorldPackets::AuctionHouse::AuctionRemoveItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     AuctionHouseEntry const* auctionHouseEntry = GetCheckedAuctionHouseForAuctioneer(packet.auctioneerGuid);
     if (!auctionHouseEntry)
         return;
@@ -740,6 +759,9 @@ public:
 // called when player lists his bids
 void WorldSession::HandleAuctionListBidderItems(WorldPackets::AuctionHouse::AuctionListBidderItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (ReceivedAHListRequest())
         return; // Only one AH request at a time is allowed
 
@@ -763,6 +785,9 @@ void WorldSession::HandleAuctionListBidderItems(WorldPackets::AuctionHouse::Auct
 // this void sends player info about his auctions
 void WorldSession::HandleAuctionListOwnerItems(WorldPackets::AuctionHouse::AuctionListOwnerItems const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (ReceivedAHListRequest())
         return;
 
@@ -784,6 +809,9 @@ void WorldSession::HandleAuctionListOwnerItems(WorldPackets::AuctionHouse::Aucti
 
 void WorldSession::HandleAuctionListItems(WorldPackets::AuctionHouse::AuctionListItems const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (ReceivedAHListRequest())
         return;
 

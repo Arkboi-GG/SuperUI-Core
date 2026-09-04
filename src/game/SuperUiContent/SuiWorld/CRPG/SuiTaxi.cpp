@@ -5,6 +5,7 @@
 #include "SuiTaxi.h"
 #include "SuiCompanion.h"
 #include "SuiPossess.h"
+#include "SuiTacticalFreeze.h"
 #include "AiBotAIMain.h"
 #include "Player.h"
 #include "Creature.h"
@@ -62,6 +63,8 @@ uint8 Eligibility(Player* member, Creature const* npc, TaxiNodesEntry const* sou
 {
     if (!member->IsInWorld() || !member->IsAlive())
         return REASON_BUSY;
+    if (member->IsSuiTacticallyFrozen())
+        return REASON_BUSY;
     if (member->IsTaxiFlying())
         return REASON_IN_FLIGHT;
     if (member->GetMapId() != npc->GetMapId())
@@ -98,6 +101,11 @@ void HandlePartyTaxi(WorldSession* session, uint8 flags, ObjectGuid flightMaster
 
     uint32 const dest = nodes.size() >= 2 ? nodes.back() : 0;
     std::vector<Row> rows;
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        SendResult(session, RESULT_DENIED, flightMaster, dest, rows);
+        return;
+    }
     if (nodes.size() < 2 || nodes.size() > MAX_NODES)
     {
         SendResult(session, RESULT_DENIED, flightMaster, dest, rows);

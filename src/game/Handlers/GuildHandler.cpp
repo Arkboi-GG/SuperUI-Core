@@ -22,6 +22,7 @@
 #include "Common.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "SuiTacticalFreeze.h"
 #include "World.h"
 #include "ObjectMgr.h"
 #include "Log.h"
@@ -683,6 +684,12 @@ void WorldSession::HandleGuildChangeInfoTextOpcode(WorldPackets::Guild::GuildCha
 
 void WorldSession::HandleSaveGuildEmblemOpcode(WorldPackets::Guild::SaveGuildEmblem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.vendorGuid))
+        return;
+
     Creature* pCreature = GetPlayer()->GetNPCIfCanInteractWith(packet.vendorGuid, UNIT_NPC_FLAG_TABARDDESIGNER);
     if (!pCreature)
     {

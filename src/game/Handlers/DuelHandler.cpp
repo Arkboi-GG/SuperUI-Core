@@ -26,14 +26,22 @@
 #include "Opcodes.h"
 #include "UpdateData.h"
 #include "Player.h"
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleDuelAcceptedOpcode(WorldPackets::Duel::DuelAccepted const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!GetPlayer()->m_duel)                                 // ignore accept from duel-sender
         return;
 
     Player* pl       = GetPlayer();
     Player* plTarget = pl->m_duel->opponent;
+
+    if (plTarget && (plTarget->IsSuiTacticallyFrozen() ||
+        (plTarget->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(plTarget->GetSession()))))
+        return;
 
     if (pl == pl->m_duel->initiator || !plTarget || !plTarget->m_duel || pl == plTarget || pl->m_duel->startTime != 0 || plTarget->m_duel->startTime != 0)
         return;

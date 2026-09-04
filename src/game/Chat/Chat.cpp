@@ -38,6 +38,7 @@
 #include "SpellMgr.h"
 #include "PoolManager.h"
 #include "GameEventMgr.h"
+#include "SuiTacticalFreeze.h"
 
 // Supported shift-links (client generated and server side)
 // |color|Harea:area_id|h[name]|h|r
@@ -2087,6 +2088,13 @@ ParseCommandResult ChatHandler::ParseCommands(char const* text)
                 {
                     if (session->GetPlayer() && session->GetPlayer()->IsInWorld())
                     {
+                        // Normal chat remains live.  Player-level dot commands
+                        // are gameplay and must be fenced at execution time too,
+                        // after this async hop onto the world thread.
+                        if (session->GetSecurity() == SEC_PLAYER &&
+                            SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+                            return;
+
                         ChatHandler handler(session);
                         handler.ExecuteCommand(txt.c_str());
                     }

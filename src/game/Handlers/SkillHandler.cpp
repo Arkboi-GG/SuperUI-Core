@@ -29,9 +29,13 @@
 #include "UpdateMask.h"
 #include "Anticheat.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: talents for a possessed companion
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleLearnTalentOpcode(WorldPackets::Skill::LearnTalent const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] While the commander drives a possessed companion the talent goes to THAT body
     // (owner feedback 2026-09-03: "modify talent builds without logging out/in to other
     // characters"). The bot has no client session, so its new spell and remaining points
@@ -44,6 +48,10 @@ void WorldSession::HandleLearnTalentOpcode(WorldPackets::Skill::LearnTalent cons
 
 void WorldSession::HandleTalentWipeConfirmOpcode(WorldPackets::Skill::TalentWipeConfirm const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     // [SUI] the driven bot's talents are wiped and ITS purse pays; the confirm frame mirrors back from a gossip pick
     Player* pActor = GetSuiActor();
 

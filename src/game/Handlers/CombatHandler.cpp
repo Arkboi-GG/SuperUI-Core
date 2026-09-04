@@ -29,9 +29,13 @@
 #include "Player.h"
 #include "Map.h"
 #include "SuiPossess.h"      // [SUI] free-view facing help
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!packet.targetGuid.IsUnit())
         return;
 
@@ -43,6 +47,14 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
     {
         // stop attack state at client
         SendAttackStop(nullptr);
+        return;
+    }
+
+    // A live actor outside somebody else's field must not seed an autoattack
+    // against a held target and have that intent silently resume on thaw.
+    if (pEnemy->IsSuiTacticallyFrozen())
+    {
+        SendAttackStop(pEnemy);
         return;
     }
 
@@ -72,6 +84,9 @@ void WorldSession::HandleAttackSwingOpcode(WorldPackets::Combat::AttackSwing con
 
 void WorldSession::HandleAttackStopOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     GetSuiActor()->AttackStop();
 
     /*
@@ -88,6 +103,9 @@ void WorldSession::HandleAttackStopOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleSetSheathedOpcode(WorldPackets::Combat::SetSheathed const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (packet.sheathed >= MAX_SHEATH_STATE)
         return;
 

@@ -27,6 +27,7 @@
 #include "InstanceData.h"
 #include "ObjectAccessor.h"
 #include "Map.h"
+#include "SuiTacticalFreeze.h"
 
 Totem::Totem() : Creature(CREATURE_SUBTYPE_TOTEM)
 {
@@ -65,6 +66,9 @@ bool Totem::Create(uint32 guidlow, CreatureCreatePos& cPos, CreatureInfo const* 
 
 void Totem::Update(uint32 update_diff, uint32 time)
 {
+    if (IsSuiTacticallyFrozen())
+        return;
+
     Unit* owner = GetOwner();
     if (!owner || 
         // Don't unsummon if owner is a creature - let them persist after creature death
@@ -81,6 +85,10 @@ void Totem::Update(uint32 update_diff, uint32 time)
 
     // Do final update before unsummon, or we lose ticks on the totem's spell
     Creature::Update(update_diff, time);
+
+    // Creature/Unit motion can latch the totem during the base call.
+    if (IsSuiTacticallyFrozen())
+        return;
 
     if (m_duration <= update_diff)
     {

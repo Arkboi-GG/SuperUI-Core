@@ -25,12 +25,22 @@
 #include "Log.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "SuiTacticalFreeze.h"
 #include "World.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "Group.h"
 #include "SocialMgr.h"
 #include "Util.h"
+
+namespace
+{
+    bool IsTacticalPartyTargetBlocked(Player* player)
+    {
+        return player && (player->IsSuiTacticallyFrozen() ||
+            (player->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(player->GetSession())));
+    }
+}
 
 /* differeces from off:
     -you can uninvite yourself - is is useful
@@ -55,6 +65,9 @@ void WorldSession::SendPartyResult(PartyOperation operation, std::string const& 
 
 void WorldSession::HandleGroupInviteOpcode(WorldPackets::Group::GroupInvite const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // Attempt add selected player
 
     // Cheating
@@ -70,6 +83,12 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Group::GroupInvite cons
     if (!player)
     {
         SendPartyResult(PARTY_OP_INVITE, packet.memberName, ERR_BAD_PLAYER_NAME_S);
+        return;
+    }
+
+    if (IsTacticalPartyTargetBlocked(player))
+    {
+        SendPartyResult(PARTY_OP_INVITE, packet.memberName, ERR_ALREADY_IN_GROUP_S);
         return;
     }
 
@@ -152,6 +171,9 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Group::GroupInvite cons
 
 void WorldSession::HandleGroupAcceptOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Group* group = GetPlayer()->GetGroupInvite();
     if (!group)
         return;
@@ -162,6 +184,10 @@ void WorldSession::HandleGroupAcceptOpcode(NullClientPacket const& /*packet*/)
                  GetPlayer()->GetGuidStr().c_str());
         return;
     }
+
+    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+    if (IsTacticalPartyTargetBlocked(leader))
+        return;
 
     // remove in from invites in any case
     group->RemoveInvite(GetPlayer());
@@ -175,8 +201,6 @@ void WorldSession::HandleGroupAcceptOpcode(NullClientPacket const& /*packet*/)
         SendPartyResult(PARTY_OP_INVITE, "", ERR_GROUP_FULL);
         return;
     }
-
-    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
 
     // forming a new group, create it
     if (!group->IsCreated())
@@ -218,6 +242,10 @@ void WorldSession::HandleGroupDeclineOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleGroupUninviteGuidOpcode(WorldPackets::Group::GroupUninviteGuid const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        IsTacticalPartyTargetBlocked(sObjectMgr.GetPlayer(packet.guid)))
+        return;
+
     // can't uninvite yourself
     if (packet.guid == GetPlayer()->GetObjectGuid())
     {
@@ -253,6 +281,9 @@ void WorldSession::HandleGroupUninviteGuidOpcode(WorldPackets::Group::GroupUninv
 
 void WorldSession::HandleGroupUninviteOpcode(WorldPackets::Group::GroupUninvite const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // player not found
     if (!normalizePlayerName(const_cast<std::string&>(packet.memberName)))
         return;
@@ -270,6 +301,9 @@ void WorldSession::HandleGroupUninviteOpcode(WorldPackets::Group::GroupUninvite 
 
     if (ObjectGuid guid = grp->GetMemberGuid(packet.memberName))
     {
+        if (IsTacticalPartyTargetBlocked(sObjectMgr.GetPlayer(guid)))
+            return;
+
         PartyResult res = GetPlayer()->CanUninviteFromGroup(guid);
         if (res != ERR_PARTY_RESULT_OK)
         {
@@ -282,6 +316,9 @@ void WorldSession::HandleGroupUninviteOpcode(WorldPackets::Group::GroupUninvite 
 
     if (Player* plr = grp->GetInvited(packet.memberName))
     {
+        if (IsTacticalPartyTargetBlocked(plr))
+            return;
+
         PartyResult res = GetPlayer()->CanUninviteFromGroup(plr->GetObjectGuid());
         if (res != ERR_PARTY_RESULT_OK)
         {
@@ -297,6 +334,9 @@ void WorldSession::HandleGroupUninviteOpcode(WorldPackets::Group::GroupUninvite 
 
 void WorldSession::HandleGroupSetLeaderOpcode(WorldPackets::Group::GroupSetLeader const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Group* group = GetPlayer()->GetGroup();
     if (!group)
         return;
@@ -308,7 +348,7 @@ void WorldSession::HandleGroupSetLeaderOpcode(WorldPackets::Group::GroupSetLeade
 #endif
 
     /** error handling **/
-    if (!player || player == GetPlayer() || !group->IsLeader(GetPlayer()->GetObjectGuid()) || player->GetGroup() != group)
+    if (!player || IsTacticalPartyTargetBlocked(player) || player == GetPlayer() || !group->IsLeader(GetPlayer()->GetObjectGuid()) || player->GetGroup() != group)
         return;
 
     // everything is fine, do it
@@ -317,6 +357,9 @@ void WorldSession::HandleGroupSetLeaderOpcode(WorldPackets::Group::GroupSetLeade
 
 void WorldSession::HandleGroupDisbandOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!GetPlayer()->GetGroup())
         return;
 
@@ -335,6 +378,10 @@ void WorldSession::HandleGroupDisbandOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleLootMethodOpcode(WorldPackets::Group::LootMethod const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        (packet.lootMaster && IsTacticalPartyTargetBlocked(sObjectMgr.GetPlayer(packet.lootMaster))))
+        return;
+
     // Impossible.
     if (packet.lootMethod > 4)
         return;
@@ -360,6 +407,12 @@ void WorldSession::HandleLootMethodOpcode(WorldPackets::Group::LootMethod const&
 
 void WorldSession::HandleLootRoll(WorldPackets::Loot::LootRoll const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.lootedTarget))
+        return;
+
     Group* group = GetPlayer()->GetGroup();
     if (!group)
         return;
@@ -439,6 +492,11 @@ void WorldSession::HandleRaidTargetUpdateOpcode(WorldPackets::Group::RaidTargetU
         group->SendTargetIconList(this);
     else // target icon update
     {
+        if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+            SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid) ||
+            IsTacticalPartyTargetBlocked(sObjectMgr.GetPlayer(packet.guid)))
+            return;
+
         if (!group->IsLeader(GetPlayer()->GetObjectGuid()) &&
             !group->IsAssistant(GetPlayer()->GetObjectGuid()))
             return;
@@ -450,6 +508,9 @@ void WorldSession::HandleRaidTargetUpdateOpcode(WorldPackets::Group::RaidTargetU
 
 void WorldSession::HandleGroupRaidConvertOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Group* group = GetPlayer()->GetGroup();
     if (!group)
         return;
@@ -469,6 +530,9 @@ void WorldSession::HandleGroupRaidConvertOpcode(NullClientPacket const& /*packet
 
 void WorldSession::HandleGroupChangeSubGroupOpcode(WorldPackets::Group::GroupChangeSubGroup const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (packet.groupNr >= MAX_RAID_SUBGROUPS)
         return;
 
@@ -488,7 +552,10 @@ void WorldSession::HandleGroupChangeSubGroupOpcode(WorldPackets::Group::GroupCha
 
     // everything is fine, do it
     if (Player* player = sObjectMgr.GetPlayer(packet.name.c_str()))
-        group->ChangeMembersGroup(player, packet.groupNr);
+    {
+        if (!IsTacticalPartyTargetBlocked(player))
+            group->ChangeMembersGroup(player, packet.groupNr);
+    }
     else
     {
         if (ObjectGuid guid = sObjectMgr.GetPlayerGuidByName(packet.name))
@@ -498,6 +565,9 @@ void WorldSession::HandleGroupChangeSubGroupOpcode(WorldPackets::Group::GroupCha
 
 void WorldSession::HandleGroupSwapSubGroupOpcode(WorldPackets::Group::GroupSwapSubGroup const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Group* group = GetPlayer()->GetGroup();
     if (!group)
         return;
@@ -515,6 +585,8 @@ void WorldSession::HandleGroupSwapSubGroupOpcode(WorldPackets::Group::GroupSwapS
 
     if (player && swapPlayer)
     {
+        if (IsTacticalPartyTargetBlocked(player) || IsTacticalPartyTargetBlocked(swapPlayer))
+            return;
         group->SwapMembersGroup(player, swapPlayer);
     }
     else
@@ -531,6 +603,9 @@ void WorldSession::HandleGroupSwapSubGroupOpcode(WorldPackets::Group::GroupSwapS
 
 void WorldSession::HandleGroupAssistantLeaderOpcode(WorldPackets::Group::GroupAssistantLeader const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Group* group = GetPlayer()->GetGroup();
     if (!group)
         return;
@@ -542,7 +617,7 @@ void WorldSession::HandleGroupAssistantLeaderOpcode(WorldPackets::Group::GroupAs
 #endif
 
     /** error handling **/
-    if (!player || player == GetPlayer() || !group->IsLeader(GetPlayer()->GetObjectGuid()) || player->GetGroup() != group)
+    if (!player || IsTacticalPartyTargetBlocked(player) || player == GetPlayer() || !group->IsLeader(GetPlayer()->GetObjectGuid()) || player->GetGroup() != group)
         return;
 
     // everything is fine, do it
@@ -552,6 +627,9 @@ void WorldSession::HandleGroupAssistantLeaderOpcode(WorldPackets::Group::GroupAs
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_10_2
 void WorldSession::HandleRaidReadyCheckOpcode(WorldPackets::Group::RaidReadyCheck const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!packet.state.has_value()) // request
     {
         Group* group = GetPlayer()->GetGroup();
@@ -579,6 +657,9 @@ void WorldSession::HandleRaidReadyCheckOpcode(WorldPackets::Group::RaidReadyChec
         // Forward to the raid leader
         if (Player* gleader = sObjectMgr.GetPlayer(group->GetLeaderGuid()))
         {
+            if (IsTacticalPartyTargetBlocked(gleader))
+                return;
+
             WorldPacket data(MSG_RAID_READY_CHECK, 9);
             data << GetPlayer()->GetObjectGuid();
             data << uint8(packet.state.value());

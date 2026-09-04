@@ -122,6 +122,11 @@ inline void MaNGOS::CreatureRelocationNotifier::Visit(CreatureMapType& m)
 
 inline void MaNGOS::DynamicObjectUpdater::VisitHelper(Unit* target)
 {
+    Unit* boundaryCaster = i_check->ToUnit();
+    if (target->IsSuiTacticallyFrozen() ||
+        (boundaryCaster && boundaryCaster->IsSuiTacticallyFrozen()))
+        return;
+
     if (!target->CanSeeInWorld(i_check))
         return;
 

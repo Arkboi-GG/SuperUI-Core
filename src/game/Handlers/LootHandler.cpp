@@ -39,6 +39,7 @@
 #include "Util.h"
 #include "Anticheat.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: loot as the driven bot
+#include "SuiTacticalFreeze.h"
 
 // [SUI] Loot routing: every verb below acts as GetSuiActor() (the possessed bot while
 // driving one, else _player). Loot is player-scoped server-side (GetLootGuid, the
@@ -49,6 +50,9 @@
 
 void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLootItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player*    player = GetSuiActor();
     bool const suiActing = player != _player;
     ObjectGuid lguid = player->GetLootGuid();
@@ -57,6 +61,12 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
 
     if (lguid.IsEmpty())
         return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, lguid))
+    {
+        player->GetSession()->DoLootRelease(lguid);
+        return;
+    }
 
     switch (lguid.GetHigh())
     {
@@ -248,6 +258,9 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPackets::Loot::AutoStoreLo
 
 void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* player = GetSuiActor();   // [SUI] the driven bot takes the coin
     bool const suiActing = player != _player;
     if (!player || !player->IsInWorld())
@@ -255,6 +268,12 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
     ObjectGuid guid = player->GetLootGuid();
     if (!guid)
         return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, guid))
+    {
+        player->GetSession()->DoLootRelease(guid);
+        return;
+    }
 
     Loot* pLoot = nullptr;
     Item* pItem = nullptr;
@@ -321,7 +340,7 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
             for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
             {
                 Player* playerGroup = itr->getSource();
-                if (!playerGroup)
+                if (!playerGroup || playerGroup->IsSuiTacticallyFrozen())
                     continue;
 
                 if (player->IsWithinLootXPDist(playerGroup))
@@ -357,9 +376,17 @@ void WorldSession::HandleLootMoneyOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleLootOpcode(WorldPackets::Loot::LootUnit const& packet)
 {
+    // A late loot-open packet must not interrupt the cast/pose sampled at lock.
+    // Loot release remains available as cleanup for a window opened beforehand.
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] The driven bot kneels at the corpse: state gates, the loot window and
     // the looter registration are all ITS. Its SendLoot reply frames mirror back.
     Player* actor = GetSuiActor();
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
 
     if (!packet.guid.IsAnyTypeCreature() && !packet.guid.IsPlayer() && !packet.guid.IsCorpse())
     {
@@ -640,10 +667,17 @@ void WorldSession::DoLootRelease(ObjectGuid lguid)
 
 void WorldSession::HandleLootMasterGiveOpcode(WorldPackets::Loot::LootMasterGive const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] The master looter is whoever holds the loot window open: the driven bot
     // while possessing. Its loot-error frames mirror back to the commander.
     Player* actor = GetSuiActor();
     bool const suiActing = actor != _player;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.lootGuid) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.playerGuid))
+        return;
 
     if (!actor->GetGroup() || actor->GetGroup()->GetLootMethod() != MASTER_LOOT || actor->GetGroup()->GetLooterGuid() != actor->GetObjectGuid())
     {

@@ -153,6 +153,10 @@ namespace SuiPossess
     /// driving client is parked on the camera then, so server-side facing help applies
     /// to whatever unit its casts act through (commanded bot or unattended own char).
     bool IsFreeViewUp(Player* player);
+    /// Exact identity test for the invisible, server-created streaming helper
+    /// registered to a live SUI free view.  Do not infer this from creature
+    /// entry 15384: ordinary world triggers remain gameplay Units.
+    bool IsFreecamEye(Unit const* unit);
     /// The bot this session is driving, or nullptr.
     Player* GetControlledBot(WorldSession const* session);
     bool IsSuiPossessed(Unit const* unit);

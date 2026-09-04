@@ -41,6 +41,7 @@
 #include "DynamicTree.h"
 #include "RegularGrid.h"
 #include "PathFinder.h"
+#include "SuiTacticalFreeze.h"
 #include "Detour/Include/DetourNavMesh.h"
 #include "Detour/Include/DetourNavMeshQuery.h"
 #include "MoveMap.h"
@@ -855,7 +856,9 @@ inline void Map::UpdateCells(uint32 map_diff)
     {
         for (std::unordered_set<Unit*>::iterator it = m_unitsMvtUpdate.begin(); it != m_unitsMvtUpdate.end(); it++)
             m_motionThreads << [it,diff](){
-                 if ((*it)->IsInWorld())
+                 // A synchronous spline step can latch a Unit after it queued
+                 // this async phase. Never advance that now-frozen actor.
+                 if ((*it)->IsInWorld() && !(*it)->IsSuiTacticallyFrozen())
                     (*it)->GetMotionMaster()->UpdateMotionAsync(diff);
             };
         m_motionThreads->processWorkload().wait();
@@ -874,7 +877,7 @@ void Map::ProcessSessionPackets(PacketProcessing type)
         Player* plr = m_mapRefIter->getSource();
         if (plr && plr->IsInWorld())
         {
-            if (type == PACKET_PROCESS_SPELLS)
+            if (type == PACKET_PROCESS_SPELLS && !plr->IsSuiTacticallyFrozen())
                 plr->UpdateCooldowns(beginTime);
 
             WorldSession* pSession = plr->GetSession();
@@ -898,12 +901,20 @@ void Map::UpdateSessionsMovementAndSpellsIfNeeded()
         return;
 
     ProcessSessionPackets(PACKET_PROCESS_MOVEMENT);
+    // A movement packet may have crossed a live field boundary. Latch that
+    // entrant before any spell or general MAP packet can act from the new
+    // position. UpdatePlayers retains its scan for creature/extra-loop edges.
+    SuiTacticalFreeze::UpdateMap(this);
     ProcessSessionPackets(PACKET_PROCESS_SPELLS);
     m_lastMvtSpellsUpdate = WorldTimer::getMSTime();
 }
 
 void Map::UpdatePlayers()
 {
+    // Every player-update opportunity first consumes the movement packets that
+    // may have crossed a fixed tactical boundary. This closes the small gap in
+    // the additional continent packet/player loops below.
+    SuiTacticalFreeze::UpdateMap(this);
     uint32 now = WorldTimer::getMSTime();
     uint32 diff = WorldTimer::getMSTimeDiff(m_lastPlayersUpdate, now);
 

@@ -38,6 +38,7 @@
 #include "CharacterDatabaseCache.h"
 #include "SuiHero.h"
 #include "SuiPossess.h"      // [SUI] P4b: GetSuiActor + ResnapshotControlled for possessed-bot trainer/repair
+#include "SuiTacticalFreeze.h"
 
 enum StableResultCode
 {
@@ -50,6 +51,11 @@ enum StableResultCode
 
 void WorldSession::HandleTabardVendorActivateOpcode(WorldPackets::Npc::TabardVendorActivate const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_TABARDDESIGNER);
     if (!unit)
     {
@@ -72,6 +78,11 @@ void WorldSession::SendTabardVendorActivate(ObjectGuid guid)
 
 void WorldSession::HandleBankerActivateOpcode(WorldPackets::Npc::BankerActivate const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     // [SUI] The driven bot opens ITS bank: CheckBanker ranges from the actor and
     // SendShowBank latches the banker on the actor (Player::CanUseBank reads it).
     // The bank contents ride the snapshot (bank rows), the frame opens on this socket.
@@ -96,6 +107,11 @@ void WorldSession::SendShowBank(ObjectGuid guid)
 
 void WorldSession::HandleTrainerListOpcode(WorldPackets::Npc::TrainerList const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     SendTrainerList(packet.guid);
 }
 
@@ -272,6 +288,14 @@ void WorldSession::SendTrainingFailure(ObjectGuid guid, uint32 serviceId, uint32
 
 void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpell const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+    {
+        SendTrainingFailure(packet.guid, packet.spellId, TRAIN_FAIL_UNAVAILABLE);
+        return;
+    }
+
     sLog.Out(LOG_BASIC, LOG_LVL_DEBUG, "WORLD: Received CMSG_TRAINER_BUY_SPELL Trainer: %s, learn spell id is: %u", packet.guid.GetString().c_str(), packet.spellId);
 
     // [SUI] P4b: the DRIVEN bot learns and pays. Acts on GetSuiActor(); the
@@ -372,6 +396,11 @@ void WorldSession::HandleTrainerBuySpellOpcode(WorldPackets::Npc::TrainerBuySpel
 
 void WorldSession::HandleGossipHelloOpcode(WorldPackets::Npc::GossipHello const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.npcGuid))
+        return;
+
     // [SUI] P4b: while driving a party bot, run the whole NPC interaction as the
     // BOT (its quest state, its bags, its trainer eligibility) and let the reply
     // ride the possession proxy back to the commander. Unpossessed, GetSuiActor()
@@ -402,6 +431,11 @@ void WorldSession::HandleGossipHelloOpcode(WorldPackets::Npc::GossipHello const&
 
 void WorldSession::HandleGossipSelectOptionOpcode(WorldPackets::Npc::GossipSelectOption const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b: the driven bot owns this menu
     bool const isCoded = actor->PlayerTalkClass->GossipOptionCoded(packet.gossipListId);
     if (isCoded && packet.code.empty())
@@ -449,6 +483,11 @@ void WorldSession::HandleGossipSelectOptionOpcode(WorldPackets::Npc::GossipSelec
 
 void WorldSession::HandleSpiritHealerActivateOpcode(WorldPackets::Npc::SpiritHealerActivate const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Creature* unit = GetPlayer()->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_SPIRITHEALER);
     if (!unit)
     {
@@ -515,6 +554,11 @@ void WorldSession::SendSpiritResurrect()
 
 void WorldSession::HandleBinderActivateOpcode(WorldPackets::Npc::BinderActivate const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.npcGuid))
+        return;
+
     // [SUI] the driven bot binds ITS hearth at the innkeeper
     Player* pActor = GetSuiActor();
 
@@ -550,6 +594,11 @@ void WorldSession::SendBindPoint(Creature* npc)
 
 void WorldSession::HandleListStabledPetsOpcode(WorldPackets::Npc::ListStabledPets const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.npcGuid))
+        return;
+
     // [SUI] the driven bot's stable
     Player* pActor = GetSuiActor();
 
@@ -632,6 +681,9 @@ void WorldSession::SendStableResult(uint8 res)
 
 bool WorldSession::CheckStableMaster(ObjectGuid guid)
 {
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, guid))
+        return false;
+
     // spell case or GM
     if (guid == GetPlayer()->GetObjectGuid())
     {
@@ -657,6 +709,11 @@ bool WorldSession::CheckStableMaster(ObjectGuid guid)
 
 void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.npcGuid))
+        return;
+
     // [SUI] the driven bot stables ITS pet
     Player* pActor = GetSuiActor();
 
@@ -712,6 +769,9 @@ void WorldSession::HandleStablePet(WorldPackets::Npc::StablePet const& packet)
 
 void WorldSession::HandleUnstablePet(WorldPackets::Npc::UnstablePet const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot takes ITS pet out
     Player* pActor = GetSuiActor();
 
@@ -766,6 +826,9 @@ void WorldSession::HandleUnstablePet(WorldPackets::Npc::UnstablePet const& packe
 
 void WorldSession::HandleBuyStableSlot(WorldPackets::Npc::BuyStableSlot const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot buys ITS stable slot with ITS coin
     Player* pActor = GetSuiActor();
 
@@ -800,6 +863,9 @@ void WorldSession::HandleBuyStableSlot(WorldPackets::Npc::BuyStableSlot const& p
 
 void WorldSession::HandleStableRevivePet(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot's pet
     Player* pActor = GetSuiActor();
 
@@ -807,6 +873,9 @@ void WorldSession::HandleStableRevivePet(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot swaps ITS pets
     Player* pActor = GetSuiActor();
 
@@ -870,6 +939,12 @@ void WorldSession::HandleStableSwapPet(WorldPackets::Npc::StableSwapPet const& p
 
 void WorldSession::HandleRepairItemOpcode(WorldPackets::Npc::RepairItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.npcGuid))
+        return;
+
     // [SUI] P4b: repair the DRIVEN bot's gear (its durability, its purse). Acts on
     // GetSuiActor(); re-snapshots the bot afterward so the commander sees the mended
     // durability and reduced coinage. Unpossessed, pActor == _player, unchanged.

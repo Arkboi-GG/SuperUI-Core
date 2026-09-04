@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <set>
 #include <cmath>
+#include <mutex>
 
 #include "AiBotAIMain.h"
 #include "Bag.h"
@@ -26,6 +27,7 @@
 #include "Server/WorldSession.h"
 #include "SuiFactionControl.h"
 #include "SuiCompanion.h"
+#include "SuiTacticalFreeze.h"
 #include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 #include "SuiWorldState.h"
 #include "World.h"
@@ -223,6 +225,11 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
     Player* bot = sObjectMgr.GetPlayer(targetGuid);
     if (!bot || !bot->IsInWorld())
         return DENY_NOT_FOUND;
+    // Authority is target-local as well as requester-local: an observer outside
+    // somebody else's field cannot seize a latched bot and rewrite its AI,
+    // motion, camera or control state behind that lock.
+    if (bot->IsSuiTacticallyFrozen())
+        return DENY_TARGET_STATE;
     if (!bot->GetSession() || !bot->GetSession()->GetBot())
         return DENY_NOT_BOT;
     AiBotAI* ai = BotAiOf(bot);
@@ -329,9 +336,11 @@ static AckResult TryBegin(WorldSession* session, ObjectGuid targetGuid, Player**
 // World Trigger summon (active object: keeps its grid ticking) that the client
 // repositions with CMSG_SUI_CAM. Torn down on every path that leaves the view.
 static std::unordered_map<uint64, uint64> s_freecamEyes;
+static std::recursive_mutex s_freecamEyesMutex;
 
 static Creature* FreecamEyeOf(Player* player)
 {
+    std::lock_guard<std::recursive_mutex> guard(s_freecamEyesMutex);
     auto it = s_freecamEyes.find(player->GetObjectGuid().GetRawValue());
     if (it == s_freecamEyes.end())
         return nullptr;
@@ -340,6 +349,7 @@ static Creature* FreecamEyeOf(Player* player)
 
 static void EnsureFreecamEye(Player* player)
 {
+    std::lock_guard<std::recursive_mutex> guard(s_freecamEyesMutex);
     if (!player || !player->IsInWorld())
         return;
     if (Creature* existing = FreecamEyeOf(player))
@@ -364,6 +374,7 @@ static void EnsureFreecamEye(Player* player)
 
 static void RemoveFreecamEye(Player* player)
 {
+    std::lock_guard<std::recursive_mutex> guard(s_freecamEyesMutex);
     if (!player)
         return;
     auto it = s_freecamEyes.find(player->GetObjectGuid().GetRawValue());
@@ -453,6 +464,11 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
 void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
 {
     session->SetSuiCapable(true);
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        SendAck(session, targetGuid, DENY_REQUESTER_STATE, nullptr);
+        return;
+    }
     Player* bot = nullptr;
     AckResult result = TryBegin(session, targetGuid, &bot);
     SendAck(session, targetGuid, result, bot);
@@ -486,6 +502,18 @@ bool IsFreeViewUp(Player* player)
     return player != nullptr && FreecamEyeOf(player) != nullptr;
 }
 
+bool IsFreecamEye(Unit const* unit)
+{
+    if (!unit)
+        return false;
+    std::lock_guard<std::recursive_mutex> guard(s_freecamEyesMutex);
+    uint64 const guid = unit->GetObjectGuid().GetRawValue();
+    for (auto const& pair : s_freecamEyes)
+        if (pair.second == guid)
+            return true;
+    return false;
+}
+
 bool PrepareForRelocation(Player* player)
 {
     bool const restoreFreeView = FreecamEyeOf(player) != nullptr;
@@ -508,6 +536,7 @@ void HandleCam(WorldSession* session, float x, float y, float z, bool active)
     // a possessed bot back to the client that is once again really driving it.
     if (!active)
     {
+        SuiTacticalFreeze::ReleaseOwnedBy(session, SuiTacticalFreeze::FREEZE_RELEASED_VIEW);
         // Landing. Tear the eye down FIRST so the commanded-remotely waiver is
         // already off when the stop below finalizes the bot's spline — otherwise
         // MovementInform still reads "commanded" and chains the next task leg
@@ -555,6 +584,14 @@ void HandleCam(WorldSession* session, float x, float y, float z, bool active)
 void HandleRelease(WorldSession* session, uint8 mode)
 {
     session->SetSuiCapable(true);
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        // The driven body is the field anchor and cannot change mid-lock. Command
+        // View exit calls ReleaseOwnedBy before it reaches this ordinary path.
+        SendAck(session, session->GetPlayer() ? session->GetPlayer()->GetObjectGuid() : ObjectGuid(),
+            DENY_REQUESTER_STATE, session->GetSuiActor());
+        return;
+    }
     AckResult reason = mode == RELEASE_TO_FREECAM ? RELEASED_FREECAM : RELEASED;
     if (!DoRelease(session, reason, false))
     {
@@ -742,6 +779,8 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     Player* player = session->GetPlayer();
     if (!player || session->GetBot())
         return;
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+        return; // only CMSG_SUI_TACTICAL_QUEUE may add actions while time is locked
     // Solo is legal: the unattended own character (freecam with no party) must
     // obey RTS orders too — a group only widens the orderable set. This gate
     // silently ate every order a partyless owner clicked from the free view.
@@ -753,6 +792,32 @@ void HandleOrder(WorldSession* session, uint8 orderType,
     if ((orderType == ORDER_CONSCRIPT || orderType == ORDER_DISMISS ||
          orderType == ORDER_MANUAL || orderType == ORDER_AUTO) && subjects.empty())
         return;
+
+    // Preflight the complete subject set before changing any AI so a
+    // multi-selection cannot partially apply when one commanded body is held
+    // by another real player's field. The typed tactical queue is the sole
+    // authoring path for a frozen subject.
+    if (!subjects.empty())
+    {
+        for (ObjectGuid guid : subjects)
+            if (Player* subject = sObjectMgr.GetPlayer(guid))
+                if (subject->IsSuiTacticallyFrozen())
+                    return;
+    }
+    else if (Group* subjectGroup = player->GetGroup())
+    {
+        for (GroupReference* itr = subjectGroup->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            Player* subject = itr->getSource();
+            if (subject && subject->IsSuiTacticallyFrozen() &&
+                SuiCompanion::MayCommand(player, subject))
+                return;
+        }
+    }
+    if (!targetGuid.IsEmpty())
+        if (Unit* target = player->GetMap()->GetUnit(targetGuid))
+            if (target->IsSuiTacticallyFrozen())
+                return;
 
     // Formation slots depend on the whole ordered set, so those subjects are
     // collected here and laid out after the expansion loop below.
@@ -780,7 +845,7 @@ void HandleOrder(WorldSession* session, uint8 orderType,
 
     auto orderBot = [&](Player* pMember)
     {
-        if (!pMember)
+        if (!pMember || pMember->IsSuiTacticallyFrozen())
             return;
         // Empty-list expansion retains the real party/own-character law. An
         // explicit non-group subject may additionally use the faction-control
@@ -994,6 +1059,11 @@ void OnPlayerTeleport(Player* player, bool farTeleport)
 {
     if (!player)
         return;
+    // A tactical field has a fixed body-sampled center.  Near teleports move
+    // that body just as surely as far teleports, so either kind must thaw an
+    // owned/anchored lock before normal possession teleport handling resumes.
+    SuiTacticalFreeze::ReleaseForPlayer(player,
+        SuiTacticalFreeze::FREEZE_RELEASED_MAP_CHANGE);
     if (Player* possessor = GetPossessor(player))
     {
         // The driven bot's near teleport (area-trigger portal, script, GM) rides the
@@ -1024,6 +1094,8 @@ void OnPlayerTeleport(Player* player, bool farTeleport)
 
 void OnPlayerDeath(Player* player)
 {
+    SuiTacticalFreeze::ReleaseForPlayer(player,
+        SuiTacticalFreeze::FREEZE_RELEASED_DEATH);
     // Only the possessed bot's death breaks possession; the possessor's own
     // character dying under AI is surfaced client-side, not force-released.
     if (Player* possessor = GetPossessor(player))
@@ -1032,10 +1104,14 @@ void OnPlayerDeath(Player* player)
 
 void OnLogout(WorldSession* session)
 {
+    SuiTacticalFreeze::ReleaseOwnedBy(session,
+        SuiTacticalFreeze::FREEZE_RELEASED_LOGOUT);
     // Session was possessing someone → clean release.
     DoRelease(session, RELEASED_LOGOUT, true);
     if (Player* player = session->GetPlayer())
     {
+        SuiTacticalFreeze::ReleaseForPlayer(player,
+            SuiTacticalFreeze::FREEZE_RELEASED_LOGOUT);
         // The commander leaves: the whole army musters out and the brain
         // resumes questing everyone in place. Group state is session-local on
         // the client, so logout is the release edge the server must own.
@@ -1634,6 +1710,11 @@ void HandlePartyLead(WorldSession* session, uint8 action, ObjectGuid subject)
 {
     // Only MSUIClient speaks this opcode -- same latch as HandleRequest.
     session->SetSuiCapable(true);
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_BAD_ACTION);
+        return;
+    }
     Player* requester = session->GetPlayer();
     if (!requester || session->GetBot())
         return;
@@ -1676,6 +1757,11 @@ void HandlePartyLead(WorldSession* session, uint8 action, ObjectGuid subject)
     if (!leader || !IsMemberFactsSubject(requester, leader))
     {
         SendPartyLeadResult(session, action, subject, SUI_LEAD_LEADER_IS_PLAYER);
+        return;
+    }
+    if (leader->IsSuiTacticallyFrozen())
+    {
+        SendPartyLeadResult(session, action, subject, SUI_LEAD_BAD_ACTION);
         return;
     }
 
@@ -2046,6 +2132,15 @@ void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
     Player* requester = session->GetPlayer();
     if (!requester || session->GetBot() || subjects.empty())
         return;
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        std::vector<std::pair<ObjectGuid, uint8>> denied;
+        denied.reserve(subjects.size());
+        for (PartyQuestSubject const& subject : subjects)
+            denied.push_back({ subject.guid, PARTY_QUEST_DENIED });
+        SendPartyQuestResult(session, action, questId, denied);
+        return;
+    }
 
     Quest const* pQuest = sObjectMgr.GetQuestTemplate(questId);
     if (!pQuest)
@@ -2078,6 +2173,11 @@ void HandlePartyQuest(WorldSession* session, uint8 action, uint32 questId,
         Player* subject = (entry.guid == requester->GetObjectGuid())
             ? requester : sObjectMgr.GetPlayer(entry.guid);
         if (!subject || !subject->IsInWorld() || !IsQuestFactsSubject(requester, subject))
+        {
+            outcomes.push_back({ entry.guid, PARTY_QUEST_DENIED });
+            continue;
+        }
+        if (subject->IsSuiTacticallyFrozen())
         {
             outcomes.push_back({ entry.guid, PARTY_QUEST_DENIED });
             continue;
@@ -2258,6 +2358,11 @@ void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
     Player* requester = session->GetPlayer();
     if (!requester || session->GetBot())
         return;
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(session))
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_UNAVAILABLE, fromGuid, toGuid);
+        return;
+    }
 
     Player* from = ResolveItemMoveEndpoint(requester, fromGuid);
 
@@ -2268,6 +2373,11 @@ void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
         if (!from)
         {
             SendMemberItemMoveResult(session, ITEM_MOVE_DENIED, fromGuid, toGuid);
+            return;
+        }
+        if (from->IsSuiTacticallyFrozen())
+        {
+            SendMemberItemMoveResult(session, ITEM_MOVE_UNAVAILABLE, fromGuid, toGuid);
             return;
         }
         if (from->GetTradeData())
@@ -2305,6 +2415,11 @@ void HandleMemberItemMove(WorldSession* session, ObjectGuid fromGuid,
     if (!from || !to || from == to)
     {
         SendMemberItemMoveResult(session, ITEM_MOVE_DENIED, fromGuid, toGuid);
+        return;
+    }
+    if (from->IsSuiTacticallyFrozen() || to->IsSuiTacticallyFrozen())
+    {
+        SendMemberItemMoveResult(session, ITEM_MOVE_UNAVAILABLE, fromGuid, toGuid);
         return;
     }
     // Same map only (no distance gate — party logistics is deliberately
@@ -2597,6 +2712,35 @@ void WorldSession::HandleSuiOrderOpcode(WorldPackets::SuiControl::Order const& p
 void WorldSession::HandleSuiCamOpcode(WorldPackets::SuiControl::Cam const& packet)
 {
     SuiPossess::HandleCam(this, packet.x, packet.y, packet.z, packet.active != 0);
+}
+
+void WorldSession::HandleSuiTacticalFreezeOpcode(
+    WorldPackets::SuiControl::TacticalFreeze const& packet)
+{
+    SuiTacticalFreeze::HandleFreeze(this, packet.exactSize, packet.version,
+        packet.requestId, packet.desiredActive, packet.lockId);
+}
+
+void WorldSession::HandleSuiTacticalQueueOpcode(
+    WorldPackets::SuiControl::TacticalQueue const& packet)
+{
+    std::vector<SuiTacticalFreeze::QueueRecord> records;
+    records.reserve(packet.records.size());
+    for (WorldPackets::SuiControl::TacticalQueue::Record const& wire : packet.records)
+    {
+        SuiTacticalFreeze::QueueRecord row;
+        row.actorGuid = wire.actorGuid;
+        row.actionId = wire.actionId;
+        row.actionKind = wire.actionKind;
+        row.targetGuid = wire.targetGuid;
+        row.x = wire.x;
+        row.y = wire.y;
+        row.z = wire.z;
+        row.spellId = wire.spellId;
+        records.push_back(row);
+    }
+    SuiTacticalFreeze::HandleQueue(this, packet.exactSize, packet.version,
+        packet.lockId, packet.requestId, packet.operation, records);
 }
 
 void WorldSession::HandleSuiZoneIntelOpcode(WorldPackets::SuiControl::ZoneIntel const& packet)

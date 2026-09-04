@@ -5,6 +5,7 @@
 #include "SuiHero.h"
 #include "SuiHonor.h"
 #include "SuiWorldState.h"
+#include "SuiTacticalFreeze.h"
 
 #include <algorithm>
 #include <atomic>
@@ -356,11 +357,15 @@ void HandleRtsAction(WorldSession* session, uint8 action, uint64 subjectGuid)
     Player* player = session->GetPlayer();
     uint8 team = player && player->GetTeam() == HORDE ? 1 : 0;
     int64 poolAfter = HonorPool(team);
-    uint8 result = SuiHero::HandleAction(player, action, subjectGuid, poolAfter);
+    ObjectGuid requested(subjectGuid);
+    Player* subject = requested.IsPlayer()
+        ? sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, requested.GetCounter())) : nullptr;
+    uint8 result = SuiTacticalFreeze::IsSessionGameplayFrozen(session) ||
+        (subject && subject->IsSuiTacticallyFrozen())
+        ? uint8(4) : SuiHero::HandleAction(player, action, subjectGuid, poolAfter);
 
     WorldPacket data(SMSG_SUI_RTS_ACTION_RESULT, 18);
     data << action << result;
-    ObjectGuid requested(subjectGuid);
     uint64 normalized = requested.IsPlayer()
         ? ObjectGuid(HIGHGUID_PLAYER, requested.GetCounter()).GetRawValue() : subjectGuid;
     data << normalized << uint64(poolAfter);

@@ -34,6 +34,7 @@
 #include "FollowerReference.h"
 #include "FollowerRefManager.h"
 #include "MotionMaster.h"
+#include <atomic>
 #include <list>
 
 struct FactionTemplateEntry;
@@ -355,6 +356,13 @@ class Unit : public SpellCaster
         void RemoveFromWorld() override;
         void CleanupsBeforeDelete() override;               // used in ~Creature/~Player (or before mass creature delete to remove cross-references to already deleted units)
         void Update(uint32 update_diff, uint32 time) override;
+
+        // SuperUI tactical freeze is reference-counted so overlapping fields are
+        // independent.  It does not root, idle or clear motion: current animation,
+        // spell and movement-generator state remain exactly where they were.
+        bool IsSuiTacticallyFrozen() const { return m_suiTacticalFreezeRefs.load(std::memory_order_acquire) != 0; }
+        void AddSuiTacticalFreeze();
+        void RemoveSuiTacticalFreeze();
 
         /*********************************************************/
         /***                   STAT SYSTEM                     ***/
@@ -1447,6 +1455,8 @@ class Unit : public SpellCaster
         bool m_needUpdateVisibility;
 
     protected:
+        std::atomic<uint32> m_suiTacticalFreezeRefs{0};
+        std::atomic<uint32> m_suiTacticalFreezeStartedMs{0};
         explicit Unit ();     
 };
 

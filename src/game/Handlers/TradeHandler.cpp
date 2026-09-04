@@ -34,6 +34,18 @@
 #include "TradeData.h"
 #include "TransactionLog.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor: the DRIVEN bot trades; ResnapshotControlled refreshes its bags
+#include "SuiTacticalFreeze.h"
+
+namespace
+{
+    bool IsTacticalTradePartnerBlocked(Player* actor)
+    {
+        TradeData* trade = actor ? actor->GetTradeData() : nullptr;
+        Player* trader = trade ? trade->GetTrader() : nullptr;
+        return !trader || trader->IsSuiTacticallyFrozen() ||
+            (trader->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(trader->GetSession()));
+    }
+}
 
 void WorldSession::SendTradeStatus(TradeStatus status)
 {
@@ -279,11 +291,20 @@ static void clearAcceptTradeMode(Item **myItems, Item **hisItems)
 
 void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     TradeData* my_trade = pActor->m_trade;
     if (!my_trade)
         return;
+
+    if (IsTacticalTradePartnerBlocked(pActor))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
 
     double lastModificationTimeInMS = difftime(time(nullptr), my_trade->GetLastModificationTime()) * 1000;
     if (lastModificationTimeInMS < my_trade->GetScamPreventionDelay()) // if we are not outside the delay period since last modification
@@ -292,9 +313,18 @@ void WorldSession::HandleAcceptTradeOpcode(WorldPackets::Trade::AcceptTrade cons
         return;
     }
 
-    my_trade->SetLastModificationTime(time(nullptr)); // Update it
-
     Player* trader = my_trade->GetTrader();
+
+    // Symmetric commit fence: the other participant may have accepted before
+    // being latched or before its owned tactical plan began draining.
+    if (!trader || trader->IsSuiTacticallyFrozen() || (trader->GetSession() &&
+        SuiTacticalFreeze::IsSessionGameplayFrozen(trader->GetSession())))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
+
+    my_trade->SetLastModificationTime(time(nullptr)); // Update it
 
     TradeData* his_trade = trader->m_trade;
     if (!his_trade)
@@ -583,11 +613,20 @@ void WorldSession::HandleUnacceptTradeOpcode(NullClientPacket const& /*packet*/)
     if (!my_trade)
         return;
 
+    if (IsTacticalTradePartnerBlocked(pActor))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
+
     my_trade->SetAccepted(false, true);
 }
 
 void WorldSession::HandleBeginTradeOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     TradeData* my_trade = pActor->m_trade;
@@ -617,6 +656,9 @@ void WorldSession::HandleCancelTradeOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (pActor->m_trade)
@@ -651,6 +693,13 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
     if (!pOther)
     {
         SendTradeStatus(TRADE_STATUS_NO_TARGET);
+        return;
+    }
+
+    if (pOther->IsSuiTacticallyFrozen() ||
+        (pOther->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(pOther->GetSession())))
+    {
+        SendTradeStatus(TRADE_STATUS_BUSY);
         return;
     }
 
@@ -718,11 +767,19 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPackets::Trade::InitiateTrade 
 
 void WorldSession::HandleSetTradeGoldOpcode(WorldPackets::Trade::SetTradeGold const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
+    if (IsTacticalTradePartnerBlocked(pActor))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
     TradeData* his_trade = my_trade->GetTrader()->m_trade;
     if (!his_trade)
         return;
@@ -738,11 +795,19 @@ void WorldSession::HandleSetTradeGoldOpcode(WorldPackets::Trade::SetTradeGold co
 
 void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
+    if (IsTacticalTradePartnerBlocked(pActor))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
     TradeData* his_trade = my_trade->GetTrader()->m_trade;
     if (!his_trade)
         return;
@@ -785,11 +850,19 @@ void WorldSession::HandleSetTradeItemOpcode(WorldPackets::Trade::SetTradeItem co
 
 void WorldSession::HandleClearTradeItemOpcode(WorldPackets::Trade::ClearTradeItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     TradeData* my_trade = pActor->GetTradeData();
     if (!my_trade || !my_trade->GetTrader())
         return;
+    if (IsTacticalTradePartnerBlocked(pActor))
+    {
+        pActor->TradeCancel(true);
+        return;
+    }
     TradeData* his_trade = my_trade->GetTrader()->m_trade;
     if (!his_trade)
         return;

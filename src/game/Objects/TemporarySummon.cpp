@@ -24,6 +24,7 @@
 #include "CreatureAI.h"
 #include "ObjectAccessor.h"
 #include "Map.h"
+#include "SuiTacticalFreeze.h"
 
 TemporarySummon::TemporarySummon(ObjectGuid summoner) :
     Creature(CREATURE_SUBTYPE_TEMPORARY_SUMMON), m_type(TEMPSUMMON_TIMED_OR_CORPSE_DESPAWN), m_timer(0), m_lifetime(0), m_summoner(summoner), m_unSummonInformed(false)
@@ -32,6 +33,9 @@ TemporarySummon::TemporarySummon(ObjectGuid summoner) :
 
 void TemporarySummon::Update(uint32 update_diff,  uint32 diff)
 {
+    if (IsSuiTacticallyFrozen())
+        return;
+
     // Don't despawn charmed mob until charm expires. Fixes Warlock's Infernal.
     if (GetCharmerGuid().IsEmpty() || !HasAuraType(SPELL_AURA_MOD_CHARM))
     {

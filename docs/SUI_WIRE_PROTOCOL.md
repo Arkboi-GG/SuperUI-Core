@@ -63,7 +63,8 @@ Client implementation: MSUIClient `GameLoop/Scene/GameLoop.Control.cs`,
 | `SMSG_SUI_PARTY_QUEST_RESULT` | 857 (0x0359) | S -> C |
 
 858-859 stay RESERVED for the PLAN_20 P4 vendor pair, so a half-deployed server
-can never renumber them out from under a client. `NUM_MSG_TYPES` is 868 (see the Companions section at the end).
+can never renumber them out from under a client. `NUM_MSG_TYPES` is 874 (see
+the tactical-freeze section at the end).
 
 Values 835-843 are the camera, zone-intel, and RTS extensions.
 The portal values are intentionally fixed above that range so those branches
@@ -706,7 +707,7 @@ the stock `CMSG_GAMEOBJ_USE` range and eligibility checks.
 | `CMSG_SUI_COMPANION` | 866 (0x0362) | C → S |
 | `SMSG_SUI_COMPANION` | 867 (0x0363) | S → C |
 
-`NUM_MSG_TYPES` is 870 (see the party-flight section below). Advertised by capability bit 7 (`COMPANIONS_V1`) in the
+`NUM_MSG_TYPES` is 874 (see the tactical-freeze section below). Advertised by capability bit 7 (`COMPANIONS_V1`) in the
 `SUI1` trailer; the client must not send `CMSG_SUI_COMPANION` until it has seen it.
 
 A **companion** is one of the requester's OWN characters (same account, verified
@@ -803,7 +804,7 @@ is out of combat.
 | `CMSG_SUI_PARTY_TAXI` | 868 (0x0364) | C → S |
 | `SMSG_SUI_PARTY_TAXI_RESULT` | 869 (0x0365) | S → C |
 
-`NUM_MSG_TYPES` is 870. Advertised by capability bit 11 (`PARTY_TAXI_V1`) in the
+`NUM_MSG_TYPES` is 874. Advertised by capability bit 11 (`PARTY_TAXI_V1`) in the
 `SUI1` trailer; the client must not send the request until it has seen it.
 Server implementation: `src/game/SuperUiContent/SuiWorld/CRPG/SuiTaxi.{h,cpp}`.
 
@@ -854,3 +855,224 @@ first; a member the stock activation still refuses is reported REFUSED (7).
 | destination | u32 | last node of the chain |
 | count | u8 | |
 | rows | count × { u64 guid, u8 reason } | reason 1 UNKNOWN_NODE · 2 NO_MONEY · 3 TOO_FAR · 4 BUSY · 5 IN_FLIGHT · 6 OTHER_MAP · 7 REFUSED |
+
+## Command View tactical freeze + action queue (v1, 2026-09-03)
+
+| Opcode | Value | Direction |
+|---|---:|---|
+| `CMSG_SUI_TACTICAL_FREEZE` | 870 (0x0366) | C → S |
+| `SMSG_SUI_TACTICAL_FREEZE` | 871 (0x0367) | S → C |
+| `CMSG_SUI_TACTICAL_QUEUE` | 872 (0x0368) | C → S |
+| `SMSG_SUI_TACTICAL_QUEUE` | 873 (0x0369) | S → C |
+
+`NUM_MSG_TYPES` is 874. Capability bit 12 (`TACTICAL_FREEZE_V1`) advertises
+this feature. All four packet bodies begin with `u8 version = 1`; there is no
+implicit version derived from the capability bit, and every CMSG is rejected
+unless its byte length exactly matches the layout/counts below.
+
+The lock owner is always the **real socketed requester**. Its fixed center is
+sampled once from `WorldSession::GetSuiActor()` — the body currently driven by
+that socket — never from the free-camera eye or blindly from the parked main.
+Those identities can differ: `ownerGuid` remains the authorization identity,
+while member flag bit 3 marks the driven anchor body. The field is map/instance
+scoped, has a fixed 100-yard **full 3-D** radius, and latches every alive Unit
+that enters until release. Overlapping locks are reference counted; releasing
+one never thaws a Unit still held by another.
+
+The exact registered SUI freecam-eye helper is the sole non-gameplay exclusion:
+it must continue following `CMSG_SUI_CAM` to stream visibility/grids. The test
+is by registered GUID, never creature entry, so ordinary World Trigger Units
+remain eligible. The `u16` member count is the only size ceiling; acquisition
+fails before freezing anything if the initial set cannot be represented, and
+an active lock thaws as a whole rather than silently leaving a partial field.
+
+### CMSG_SUI_TACTICAL_FREEZE (exactly 14 bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version | u8 | exactly 1 |
+| requestId | u32 | nonzero client correlation id; zero is reserved for unsolicited SMSGs |
+| desiredActive | u8 | 1 acquire · 0 release |
+| lockId | u64 | 0 on acquire; exact authoritative id on release |
+
+Acquire is legal only for a real, in-world player with Command View/free view
+up and a live, controlled, same-map driven body. One active lock per owner.
+Only its owner may release it. A player frozen by somebody else's field may
+not acquire or release a lock.
+
+### SMSG_SUI_TACTICAL_FREEZE (exactly 45 + 9·memberCount bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version | u8 | 1 |
+| requestId | u32 | request correlation; 0 for unsolicited snapshots |
+| result | u8 | enum below |
+| active | u8 | 0/1 |
+| revision | u32 | monotonic per lock; nonzero for a real lock/tombstone |
+| lockId | u64 | authoritative lock id |
+| ownerGuid | u64 | real socket owner, not necessarily the anchor |
+| centerX, centerY, centerZ | f32 × 3 | fixed acquisition center; zero in tombstone |
+| radius | f32 | 100 while active; zero in tombstone |
+| memberCount | u16 | 0..65535; this natural wire ceiling is the only field-size limit |
+| members | count × { u64 guid, u8 flags } | authoritative latched set |
+
+Member flags: bit 0 frozen/member; bit 1 commandable **by this packet's
+recipient**; bit 2 a real human character/session; bit 3 initiating/driven
+anchor body. Nonowner recipients always see bit 1 clear. Active snapshots and
+release tombstones are sent to every SUI-capable real session on the same
+map/instance, including observers outside the radius; a newly arrived observer
+gets the current snapshot even when membership did not change. Only receipt of
+an SMSG mutates client state; sending a request is never optimistic.
+
+Freeze results: 0 OK · 1 DENIED_SESSION · 2 DENIED_COMMAND_VIEW ·
+3 DENIED_STATE · 4 ALREADY_ACTIVE · 5 FROZEN_BY_OTHER · 6 NOT_OWNER ·
+7 NOT_FOUND · 8 BAD_PACKET · 9 RELEASED_VIEW · 10 RELEASED_LOGOUT ·
+11 RELEASED_MAP_CHANGE · 12 RELEASED_DEATH. Values 15+ are reserved.
+Pre-creation SESSION/VIEW/STATE/BAD_PACKET denials contain zero lock fields.
+NOT_FOUND echoes the requested lock id but has owner/revision/members zero.
+ALREADY_ACTIVE, FROZEN_BY_OTHER and NOT_OWNER return the relevant active
+snapshot. A release tombstone keeps nonzero lockId/ownerGuid/revision but has
+zero center/radius/members.
+
+Command View exit, owner/anchor logout, any near/far teleport or map change, and
+owner/anchor death force a server-authored release. Possession/control handoff
+and ordinary `CMSG_SUI_ORDER` are rejected while frozen, so the anchor cannot
+change and the typed queue is the only gameplay authoring path.
+
+### CMSG_SUI_TACTICAL_QUEUE (exactly 15 + 37·recordCount bytes)
+
+| Field | Type | Notes |
+|---|---|---|
+| version | u8 | 1 |
+| lockId | u64 | active lock owned by requester |
+| requestId | u32 | nonzero correlation id; zero is reserved for unsolicited SMSGs |
+| operation | u8 | 0 ENQUEUE · 1 CANCEL · 2 CLEAR |
+| recordCount | u8 | 1..40; actor GUIDs unique in one request |
+| records | count × 37 bytes | layout below |
+
+Each record is `u64 actorGuid, u32 actionId, u8 actionKind, u64 targetGuid,
+f32 x, f32 y, f32 z, u32 spellId`. ENQUEUE requires actionId 0 and kind 1
+MOVE, 2 ATTACK, or 3 CAST. MOVE uses finite/valid XYZ and requires targetGuid
+and spellId zero. ATTACK requires a full unit target GUID and all XYZ/spellId
+zero. CAST requires a known active nonpassive, non-auto-repeat spell; a unit
+target uses zero XYZ, while a ground cast uses targetGuid zero and valid XYZ.
+CANCEL requires actorGuid + nonzero actionId and every other action field zero.
+CLEAR requires actorGuid and every action field/actionId zero.
+
+Authority is checked both when enqueued and again when executed: actor must be
+a latched same-map Player, self or same-group party/raid member, and pass
+`SuiCompanion::MayCommand`. Another real human's character is frozen read-only
+and is never commandable. Each actor has an authoritative FIFO of at most five
+pending actions; a raid selection therefore uses up to 40 records in one
+request but still adds only one action to each selected actor.
+
+### SMSG_SUI_TACTICAL_QUEUE
+
+Exact size is `31 + Σ(9 + 29·queueCount)` bytes:
+
+| Field | Type | Notes |
+|---|---|---|
+| version | u8 | 1 |
+| lockId | u64 | authoritative lock id |
+| revision | u32 | queue revision |
+| requestId | u32 | correlation id; 0 for execution updates |
+| result | u8 | enum below |
+| resultActorGuid | u64 | actor associated with result, else 0 |
+| resultActionId | u32 | action associated with result, else 0 |
+| actorCount | u8 | number of queue blocks |
+| actors | repeated | `u64 actorGuid, u8 queueCount`, then actions |
+
+Each action row is `u32 actionId, u8 actionKind, u64 targetGuid, f32 x, f32 y,
+f32 z, u32 spellId` (29 bytes). Queue snapshots are private to the owner; other
+frozen humans and map observers receive only freeze snapshots. Results:
+0 OK · 1 BAD_PACKET · 2 LOCK_NOT_FOUND · 3 NOT_OWNER · 4 LOCK_NOT_ACTIVE ·
+5 ACTOR_NOT_MEMBER · 6 ACTOR_NOT_COMMANDABLE · 7 ACTOR_UNAVAILABLE · 8 FULL ·
+9 ACTION_INVALID · 10 ACTION_NOT_FOUND · 11 ACTION_STARTED ·
+12 ACTION_COMPLETED · 13 ACTION_SKIPPED_INVALID · 14 DRAINED.
+BAD_PACKET/LOCK_NOT_FOUND are the only stateless revision-0 queue denials;
+NOT_OWNER for an existing lock echoes its nonzero current revision without
+disclosing actor queues.
+
+Thaw starts each actor's FIFO in order. Move reuses the AiBot validated RTS
+move path and waits for arrival; Attack establishes the validated target and
+then advances; Cast uses a real typed spell cast and waits until the non-melee
+cast ends. Autonomous AI is held for the drain and its prior manual flag is
+restored afterward. Its prior RTS-hold discipline is saved and restored with
+the manual flag, so a tactical Move/Attack/Cast never leaves an autonomous bot
+permanently idle after `DRAINED`. Authority/availability is revalidated for every action;
+an invalid action is popped with result 13 and the next action continues.
+The owner may acquire a later freeze while an older plan drains. Queues for a
+shared actor serialize by increasing lock id and then FIFO action id; queues
+for unrelated actors may progress concurrently. A later active field naturally
+pauses an older plan through the same overlap refcount. Live gameplay/control
+mutations remain fenced while any owned plan drains, and manual AI hold is
+reasserted every map tick until the last queued action completes.
+
+The fence is also target-local. A session outside another owner's field cannot
+possess or issue an ordinary SUI order to a frozen bot, dismiss or mutate a
+frozen companion, board it on party taxi, alter it through party quest/item/lead
+or RTS operations, or change a frozen pet/charmed Unit's action, spell, stance,
+autocast, attack or ownership state. Multi-subject ordinary orders reject
+atomically if any named subject is frozen; they never seed post-thaw live AI
+intent behind the authoritative queue. Ordinary melee, spell, item-use and pet
+commands also reject a frozen explicit target at ingress; only an explicit
+delayed hit launched before membership was latched may enter the deferral path.
+
+Physical interaction targets are sealed as well as actors. An unfrozen session
+cannot open or mutate gossip, vendor, banker, auctioneer, flight-master,
+trainer/talent-reset, tabard, stable, quest, spirit-healer, binder, repair,
+loot or trade services through a frozen Unit (or a frozen player's corpse).
+Follow-up packets revalidate stored banker, loot-source and trade-partner
+identity; a newly frozen stored loot/trade source is closed/canceled instead of
+being mutated. Loot master assignment/give and party/raid membership, role and
+target-icon changes reject frozen named members, because those identities feed
+commandability. Duel, summon and resurrection accepts likewise reject a frozen
+counterparty. Pure status/template/name/roster queries and decline, cancel,
+release or close cleanup remain live; ordinary guild/social metadata remains
+outside this physical-gameplay boundary. Text emote chat still broadcasts, but
+neither a frozen source nor a frozen creature target receives the scripted
+`ReceiveEmote` gameplay callback.
+
+World-participation intent is fenced with the same rule: battleground and
+meeting-stone queue join/leave/port operations, spirit-healer enrollment,
+instance reset, PvP/at-war toggles and player-level dot commands do not execute
+while the requester is frozen or owns a draining plan. Group queue joins
+preflight every online member before changing any queue state. Battlemaster and
+area-healer physical targets are target-fenced; status/list/position queries
+stay live. Dot commands are rechecked after their asynchronous world-thread
+handoff so a command parsed just before latching cannot race the lock.
+
+### Clock and effect boundary semantics
+
+The map, sessions, visibility, chat, and packet pump never pause. A latched
+Unit's actor update (including AI, motion generators/spline time, attacks,
+auras, events, summon/pet/totem lifetimes, regen and quest timers) does not
+advance. Current motion/animation/cast state is not cleared or replaced.
+Absolute GCD, spell/category cooldown and school-lockout deadlines are shifted
+by the first-freeze-to-final-thaw duration. Movement/cast/attack/item/pet input
+is ignored while the session's real/currently-driven body is frozen or an
+owned plan is draining. The same central fence covers server selection and
+pre-open mutation panels (loot, gossip/quest, vendor/trainer/bank, stable,
+mail, auction and trade), while cleanup closes and genuinely read-only
+facts/roster/state/chat/camera traffic remain live. Freeze acquire/release and
+the typed tactical queue are deliberately outside this fence.
+An already-open trade is canceled when either participant is first latched;
+the accept/commit path also checks the counterparty fence, so an acceptance
+sent before freeze can never commit inventory or money afterward.
+Map packet ordering is movement → tactical entrant latch → spells/general
+gameplay, so crossing the fixed sphere and casting cannot occur in one ingress
+window before the server notices membership. Synchronous spline/MotionMaster
+movement is also checked immediately after the position step; a newly latched
+Player/Creature returns before derived AI or later actor clocks run in that
+same tick. Threaded continent motion skips Units latched after scheduling, and
+the existing post-cell map scan latches entries made by the async step before
+the next player/actor update opportunity.
+
+The v1 sealed boundary suppresses new immediate/proc/area damage, healing,
+energize and aura-hit work whenever source or target is frozen. Persistent
+dynamic objects retain their own duration/pulse clocks while their Unit owner
+is frozen and skip frozen targets. An already-launched explicit delayed unit
+hit is retained in its Spell target record and retried every 50 ms after thaw.
+Arbitrary immediate/proc Spell objects are **not** retained and replayed: those
+effects are suppressed. This is actor/effect suspension, not a claim that the
+entire projectile/world simulation is paused.

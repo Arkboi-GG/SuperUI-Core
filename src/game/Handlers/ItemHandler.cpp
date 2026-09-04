@@ -32,9 +32,13 @@
 #include "Conditions.h"
 #include "Anticheat.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled for possessed-bot bag edits
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleSplitItemOpcode(WorldPackets::Item::SplitItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     uint16 src = ((packet.srcbag << 8) | packet.srcslot);
     uint16 dst = ((packet.dstbag << 8) | packet.dstslot);
 
@@ -67,6 +71,9 @@ void WorldSession::HandleSplitItemOpcode(WorldPackets::Item::SplitItem const& pa
 
 void WorldSession::HandleSwapInvItemOpcode(WorldPackets::Item::SwapInvItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] Act on the possessed bot's bags when driving one; errors go to the commander (_player).
     Player* pActor = GetSuiActor();
     bool suiActing = pActor != _player;
@@ -104,6 +111,9 @@ void WorldSession::HandleSwapInvItemOpcode(WorldPackets::Item::SwapInvItem const
 
 void WorldSession::HandleAutoEquipItemSlotOpcode(WorldPackets::Item::AutoEquipItemSlot const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // cheating attempt, client should never send opcode in that case
     if (!Player::IsEquipmentPos(INVENTORY_SLOT_BAG_0, packet.dstslot))
         return;
@@ -119,6 +129,9 @@ void WorldSession::HandleAutoEquipItemSlotOpcode(WorldPackets::Item::AutoEquipIt
 
 void WorldSession::HandleSwapItem(WorldPackets::Item::SwapItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] Act on the possessed bot's bags when driving one; errors go to the commander (_player).
     Player* pActor = GetSuiActor();
     bool suiActing = pActor != _player;
@@ -156,6 +169,9 @@ void WorldSession::HandleSwapItem(WorldPackets::Item::SwapItem const& packet)
 
 void WorldSession::HandleAutoEquipItemOpcode(WorldPackets::Item::AutoEquipItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] Equip/unequip on the possessed bot when driving one; errors + open-container feedback
     // go to the commander (_player). Static Player:: calls and item-locals stay as-is.
     Player* pActor = GetSuiActor();
@@ -255,6 +271,9 @@ void WorldSession::HandleAutoEquipItemOpcode(WorldPackets::Item::AutoEquipItem c
 
 void WorldSession::HandleDestroyItemOpcode(WorldPackets::Item::DestroyItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* pActor = GetSuiActor();
     bool suiActing = pActor != _player;
 
@@ -484,6 +503,12 @@ void WorldSession::HandlePageQuerySkippedOpcode(WorldPacket& recv_data)
 
 void WorldSession::HandleSellItemOpcode(WorldPackets::Item::SellItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.vendorGuid))
+        return;
+
     // [SUI] P4b: sell from the DRIVEN bot's bags into its buyback + purse. Item ops
     // act on GetSuiActor(); the error toasts stay on _player so the commander sees
     // them directly; a re-snapshot after the sale refreshes the bot's bags and coin.
@@ -661,6 +686,12 @@ void WorldSession::HandleSellItemOpcode(WorldPackets::Item::SellItem const& pack
 
 void WorldSession::HandleBuybackItem(WorldPackets::Item::BuybackItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.vendorGuid))
+        return;
+
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_7_1
     uint32 slot = packet.slot;
 #else
@@ -718,6 +749,12 @@ void WorldSession::HandleBuybackItem(WorldPackets::Item::BuybackItem const& pack
 
 void WorldSession::HandleBuyItemInSlotOpcode(WorldPackets::Item::BuyItemInSlot const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.vendorGuid))
+        return;
+
     Player* pActor = GetSuiActor();   // [SUI] P4b: the driven bot buys into its own bags
     uint8 bag = NULL_BAG;                                   // init for case invalid bagGUID
 
@@ -750,6 +787,12 @@ void WorldSession::HandleBuyItemInSlotOpcode(WorldPackets::Item::BuyItemInSlot c
 
 void WorldSession::HandleBuyItemOpcode(WorldPackets::Item::BuyItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.vendorGuid))
+        return;
+
     Player* pActor = GetSuiActor();   // [SUI] P4b: the driven bot buys
     pActor->BuyItemFromVendor(packet.vendorGuid, packet.item, packet.count, NULL_BAG, NULL_SLOT);
     if (pActor != _player)
@@ -758,6 +801,12 @@ void WorldSession::HandleBuyItemOpcode(WorldPackets::Item::BuyItem const& packet
 
 void WorldSession::HandleListInventoryOpcode(WorldPackets::Item::ListInventory const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     if (!GetSuiActor()->IsAlive())   // [SUI] P4b: the driven bot must be alive
         return;
 
@@ -766,6 +815,9 @@ void WorldSession::HandleListInventoryOpcode(WorldPackets::Item::ListInventory c
 
 void WorldSession::SendListInventory(ObjectGuid vendorguid, uint8 menu_type)
 {
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, vendorguid))
+        return;
+
     // [SUI] P4b: show the DRIVEN bot's vendor view (its faction discount, its
     // class/race-legal wares). Built on GetSuiActor(); the packet sends on `this`
     // — the commander's socket when this ran from the vendor frame, or the bot's
@@ -888,6 +940,9 @@ void WorldSession::SendListInventory(ObjectGuid vendorguid, uint8 menu_type)
 
 void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBagItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
     Player* pActor = GetSuiActor();
 
@@ -951,6 +1006,9 @@ void WorldSession::HandleAutoStoreBagItemOpcode(WorldPackets::Item::AutoStoreBag
 
 bool WorldSession::CheckBanker(ObjectGuid guid)
 {
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, guid))
+        return false;
+
     // [SUI] The banker must be reachable from the DRIVEN body; the GM ".bank" waiver
     // stays keyed to the session's own security.
     Player* pActor = GetSuiActor();
@@ -979,6 +1037,9 @@ bool WorldSession::CheckBanker(ObjectGuid guid)
 
 void WorldSession::HandleBuyBankSlotOpcode(WorldPackets::Item::BuyBankSlot const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot buys ITS bank slot with ITS coin
     Player* pActor = GetSuiActor();
 
@@ -1024,6 +1085,9 @@ void WorldSession::HandleBuyBankSlotOpcode(WorldPackets::Item::BuyBankSlot const
 
 void WorldSession::HandleAutoBankItemOpcode(WorldPackets::Item::AutoBankItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
     Player* pActor = GetSuiActor();
 
@@ -1063,6 +1127,9 @@ void WorldSession::HandleAutoBankItemOpcode(WorldPackets::Item::AutoBankItem con
 
 void WorldSession::HandleAutoStoreBankItemOpcode(WorldPackets::Item::AutoStoreBankItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] act on the driven bot's bags/bank; error toasts stay on _player (the commander)
     Player* pActor = GetSuiActor();
 
@@ -1112,6 +1179,9 @@ void WorldSession::HandleAutoStoreBankItemOpcode(WorldPackets::Item::AutoStoreBa
 
 void WorldSession::HandleSetAmmoOpcode(WorldPackets::Item::SetAmmo const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (!GetPlayer()->IsAlive())
     {
         GetPlayer()->SendEquipError(EQUIP_ERR_YOU_ARE_DEAD, nullptr, nullptr);
@@ -1175,6 +1245,9 @@ void WorldSession::HandleItemNameQueryOpcode(WorldPackets::Query::ItemNameQuery 
 
 void WorldSession::HandleWrapItemOpcode(WorldPackets::Item::WrapItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Item *gift = _player->GetItemByPos(packet.giftBag, packet.giftSlot);
     if (!gift)
     {

@@ -894,5 +894,11 @@ enum OpcodesList
     // board. See SuiTaxi.h.
     CMSG_SUI_PARTY_TAXI                    = 868,      // 0x0364
     SMSG_SUI_PARTY_TAXI_RESULT             = 869,      // 0x0365
-    NUM_MSG_TYPES                          = 870
+    // Command View tactical freeze + its authoritative per-actor action FIFO.
+    // Every body begins with u8 version=1; see docs/SUI_WIRE_PROTOCOL.md.
+    CMSG_SUI_TACTICAL_FREEZE               = 870,      // 0x0366
+    SMSG_SUI_TACTICAL_FREEZE               = 871,      // 0x0367
+    CMSG_SUI_TACTICAL_QUEUE                = 872,      // 0x0368
+    SMSG_SUI_TACTICAL_QUEUE                = 873,      // 0x0369
+    NUM_MSG_TYPES                          = 874
 };
