@@ -45,9 +45,13 @@
 #include "Anticheat.h"
 #include "MasterPlayer.h"
 #include "SuiHero.h"
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleRepopRequestOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // recv_data.read_skip<uint8>(); client crash
 
     if (_player->IsAlive() || _player->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_GHOST))
@@ -370,6 +374,9 @@ void WorldSession::HandleLogoutCancelOpcode(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleTogglePvP(WorldPackets::Misc::TogglePvP const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // this opcode can be used in two ways: Either set explicit new status or toggle old status
     if (packet.targetState.has_value())
         GetPlayer()->ApplyModFlag(PLAYER_FLAGS, PLAYER_FLAGS_PVP_DESIRED, *packet.targetState);
@@ -400,6 +407,9 @@ void WorldSession::HandleZoneUpdateOpcode(WorldPackets::Misc::ZoneUpdate const& 
 
 void WorldSession::HandleSetSelectionOpcode(WorldPackets::Misc::SetSelection const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // SUI possession: selection drives the possessed bot's UNIT_FIELD_TARGET
     // (its melee/assist logic keys off it); reputation stays the session's.
     Player* pActor = GetSuiActor();
@@ -437,6 +447,10 @@ void WorldSession::HandleSetSelectionOpcode(WorldPackets::Misc::SetSelection con
 
 void WorldSession::HandleStandStateChangeOpcode(WorldPackets::Misc::StandStateChange const& packet)
 {
+    // Tactical freeze preserves the sampled body pose as well as its clocks.
+    if (_player->IsSuiTacticallyFrozen())
+        return;
+
     switch (packet.animState)
     {
         case UNIT_STAND_STATE_STAND:
@@ -573,6 +587,9 @@ void WorldSession::HandleBugOpcode(WorldPackets::Misc::Bug const& packet)
 
 void WorldSession::HandleReclaimCorpseOpcode(WorldPackets::Misc::ReclaimCorpse const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (GetPlayer()->IsAlive())
         return;
 
@@ -616,6 +633,10 @@ void WorldSession::HandleResurrectResponseOpcode(WorldPackets::Misc::ResurrectRe
         return;
     }
 
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.resurrectorGuid))
+        return;
+
     if (!GetPlayer()->IsRessurectRequestedBy(packet.resurrectorGuid))
         return;
 
@@ -624,6 +645,9 @@ void WorldSession::HandleResurrectResponseOpcode(WorldPackets::Misc::ResurrectRe
 
 void WorldSession::HandleAreaTriggerOpcode(WorldPackets::Misc::AreaTrigger const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] The trigger the client reports is the one the DRIVEN body crossed (owner
     // 2026-09-03: the Stormwind mage-tower portal did nothing for a possessed bot — the
     // range check ran against the parked main). Same-map teleport triggers keep the
@@ -1183,6 +1207,9 @@ void WorldSession::HandleFarSightOpcode(WorldPackets::Misc::FarSight const& pack
 
 void WorldSession::HandleResetInstancesOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (Group* pGroup = _player->GetGroup())
     {
         if (pGroup->IsLeader(_player->GetObjectGuid()))

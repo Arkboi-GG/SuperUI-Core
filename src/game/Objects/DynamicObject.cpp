@@ -26,6 +26,7 @@
 #include "CellImpl.h"
 #include "GridNotifiersImpl.h"
 #include "SpellMgr.h"
+#include "SuiTacticalFreeze.h"
 
 DynamicObject::DynamicObject() : WorldObject(), m_spellId(0), m_effIndex(EFFECT_INDEX_0), m_aliveDuration(0), m_radius(0), m_positive(false), m_channeled(false)
 {
@@ -178,6 +179,11 @@ void DynamicObject::Update(uint32 update_diff, uint32 p_time)
         Delete();
         return;
     }
+
+    // Preserve both lifetime and pulse clocks while the owning Unit is frozen.
+    if (Unit* unitCaster = GetUnitCaster())
+        if (unitCaster->IsSuiTacticallyFrozen())
+            return;
 
     if (m_deleted)
         return;

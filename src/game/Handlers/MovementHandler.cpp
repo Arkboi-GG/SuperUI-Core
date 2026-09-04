@@ -37,6 +37,7 @@
 #include "MovementPacketSender.h"
 #include "MoveSpline.h"
 #include "Geometry.h"
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleMoveWorldportAckOpcode(NullClientPacket const& /*packet*/)
 {
@@ -287,6 +288,9 @@ void Player::ExecuteTeleportNear()
 
 void WorldSession::HandleMovementOpcodes(WorldPackets::Movement::MovementPacket const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     uint32 opcode = packet.GetOpcode();
 
     // Do not accept packets sent before this time.
@@ -976,6 +980,9 @@ void WorldSession::HandleMoveNotActiveMoverOpcode(WorldPackets::Movement::MoveNo
 
 void WorldSession::HandleMountSpecialAnimOpcode(NullClientPacket const& /*packet*/)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     WorldPacket data(SMSG_MOUNTSPECIAL_ANIM, 8);
     data << GetPlayer()->GetObjectGuid();
 
@@ -984,6 +991,10 @@ void WorldSession::HandleMountSpecialAnimOpcode(NullClientPacket const& /*packet
 
 void WorldSession::HandleSummonResponseOpcode(WorldPackets::Misc::SummonResponse const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.summonerGuid))
+        return;
+
     if (!_player->IsAlive() || _player->IsInCombat())
         return;
 
@@ -1066,6 +1077,14 @@ bool WorldSession::VerifyMovementInfo(MovementInfo const& movementInfo) const
 void WorldSession::HandleMoverRelocation(Unit* pMover, MovementInfo& movementInfo)
 {
     Player* const pPlayerMover = pMover->ToPlayer();
+
+    // ACK families also carry client coordinates. Consume their protocol
+    // bookkeeping, but never apply those coordinates to a frozen body. A
+    // server-authorized teleport ACK is the sole exception so teardown cannot
+    // strand the session mid-transfer.
+    if (pMover->IsSuiTacticallyFrozen() &&
+        (!pPlayerMover || !pPlayerMover->IsBeingTeleported()))
+        return;
 
     movementInfo.sourceSessionGuid = GetGUID();
     movementInfo.CorrectData();
@@ -1168,4 +1187,3 @@ void WorldSession::HandleMoverRelocation(Unit* pMover, MovementInfo& movementInf
         pMover->GetMap()->CreatureRelocation((Creature*)pMover, pMover->m_movementInfo.GetPos().x, pMover->m_movementInfo.GetPos().y, pMover->m_movementInfo.GetPos().z, pMover->m_movementInfo.GetPos().o);
     }
 }
-

@@ -42,6 +42,7 @@
 #include "TransactionLog.h"
 #include "Database/DatabaseImpl.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor: the DRIVEN bot reads and works ITS mailbox; ResnapshotControlled refreshes its bags/purse
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::SendMailResult(uint32 mailId, MailResponseType mailAction, MailResponseResult mailError, uint32 equipError, uint32 item_guid, uint32 item_count)
 {
@@ -135,6 +136,9 @@ public:
  */
 void WorldSession::HandleSendMail(WorldPackets::Mail::SendMail const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -450,6 +454,9 @@ void WorldSession::HandleSendMailCallback(WorldSession::AsyncMailSendRequest* re
  */
 void WorldSession::HandleMailMarkAsRead(WorldPackets::Mail::MailMarkAsRead const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -486,6 +493,9 @@ void WorldSession::HandleMailMarkAsRead(WorldPackets::Mail::MailMarkAsRead const
  */
 void WorldSession::HandleMailDelete(WorldPackets::Mail::MailDelete const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -519,6 +529,9 @@ void WorldSession::HandleMailDelete(WorldPackets::Mail::MailDelete const& packet
  */
 void WorldSession::HandleMailReturnToSender(WorldPackets::Mail::MailReturnToSender const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -574,6 +587,9 @@ void WorldSession::HandleMailReturnToSender(WorldPackets::Mail::MailReturnToSend
  */
 void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -704,6 +720,9 @@ void WorldSession::HandleMailTakeItem(WorldPackets::Mail::MailTakeItem const& pa
  */
 void WorldSession::HandleMailTakeMoney(WorldPackets::Mail::MailTakeMoney const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -750,6 +769,9 @@ void WorldSession::HandleMailTakeMoney(WorldPackets::Mail::MailTakeMoney const& 
  */
 void WorldSession::HandleGetMailList(WorldPackets::Mail::GetMailList const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))
@@ -887,6 +909,9 @@ void WorldSession::HandleItemTextQuery(WorldPackets::Misc::ItemTextQuery const& 
  */
 void WorldSession::HandleMailCreateTextItem(WorldPackets::Mail::MailCreateTextItem const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] acts as the DRIVEN bot while possessing one, else the session player.
     Player* pActor = GetSuiActor();
     if (!CheckMailBox(packet.mailboxGuid))

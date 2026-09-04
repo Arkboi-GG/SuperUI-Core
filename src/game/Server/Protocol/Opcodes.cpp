@@ -970,6 +970,10 @@ Handlers BuildOpcodeList()
     INVALID_PACKET(SMSG_SUI_COMPANION,                UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PARTY_TAXI,               STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiPartyTaxiOpcode);
     INVALID_PACKET(SMSG_SUI_PARTY_TAXI_RESULT,        UnhandleReason::SendByServer);
+    DEFINE_HANDLER(CMSG_SUI_TACTICAL_FREEZE,          STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiTacticalFreezeOpcode);
+    INVALID_PACKET(SMSG_SUI_TACTICAL_FREEZE,          UnhandleReason::SendByServer);
+    DEFINE_HANDLER(CMSG_SUI_TACTICAL_QUEUE,           STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiTacticalQueueOpcode);
+    INVALID_PACKET(SMSG_SUI_TACTICAL_QUEUE,           UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_PREPARE,            STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalPrepareOpcode);
     INVALID_PACKET(SMSG_SUI_PORTAL_DESCRIPTOR,         UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_READY,              STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalReadyOpcode);

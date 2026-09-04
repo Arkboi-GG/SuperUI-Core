@@ -38,6 +38,7 @@
 #include "MapManager.h"
 #include "CreatureAI.h"
 #include "CreatureAISelector.h"
+#include "SuiTacticalFreeze.h"
 #include "MovementGenerator.h"
 #include "MapPersistentStateMgr.h"
 #include "BattleGroundMgr.h"
@@ -719,6 +720,9 @@ uint32 Creature::ChooseDisplayId(CreatureInfo const* cinfo, CreatureData const* 
 
 void Creature::Update(uint32 update_diff, uint32 diff)
 {
+    if (IsSuiTacticallyFrozen())
+        return;
+
     update_diff *= sWorld.GetTimeRate();
     diff *= sWorld.GetTimeRate();
 
@@ -887,6 +891,11 @@ void Creature::Update(uint32 update_diff, uint32 diff)
             }
 
             Unit::Update(update_diff, diff);
+
+            // Unit motion may have entered a tactical field this tick. Do not
+            // continue into leash, AI, combat assistance or regeneration.
+            if (IsSuiTacticallyFrozen())
+                return;
 
             // creature can be dead after Unit::Update call
             // CORPSE/DEAD state will processed at next tick (in other case death timer will be updated unexpectedly)

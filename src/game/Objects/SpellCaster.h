@@ -159,6 +159,16 @@ class CooldownData
         uint32 GetSpellId() const { return m_spellId; }
         uint32 GetCategory() const { return m_category; }
 
+        void Delay(std::chrono::milliseconds duration)
+        {
+            if (m_typePermanent)
+                return;
+            if (m_expireTime != TimePoint())
+                m_expireTime += duration;
+            if (m_catExpireTime != TimePoint())
+                m_catExpireTime += duration;
+        }
+
     private:
         uint32            m_spellId;
         uint32            m_category;
@@ -274,6 +284,12 @@ class CooldownContainer
         }
 
         void clear() { m_spellIdMap.clear(); m_categoryMap.clear(); }
+
+        void Delay(std::chrono::milliseconds duration)
+        {
+            for (auto& pair : m_spellIdMap)
+                pair.second->Delay(duration);
+        }
 
         ConstIterator begin() const { return m_spellIdMap.begin(); }
         ConstIterator end() const { return m_spellIdMap.end(); }
@@ -424,6 +440,9 @@ public:
     void PrintCooldownList(ChatHandler& chat) const;
     bool CheckLockout(SpellSchoolMask schoolMask) const;
     void UpdateCooldowns(TimePoint const& now);
+    // Shift wall-clock cooldown deadlines by a localized tactical freeze.  Relative
+    // actor timers are already preserved by not advancing Unit::Update.
+    void DelayCooldowns(uint32 durationMs);
 
     // Event handler
     EventProcessor m_Events;

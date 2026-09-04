@@ -756,6 +756,9 @@ float SpellCaster::SpellCriticalHealingBonus(SpellEntry const* spellProto, uint3
 int32 SpellCaster::DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellProto, bool critical)
 {
     Unit* pUnit = ToUnit();
+    if (!pVictim || pVictim->IsSuiTacticallyFrozen() ||
+        (pUnit && pUnit->IsSuiTacticallyFrozen()))
+        return 0;
 
     // Script Event HealedBy
     if (pVictim->AI() && pUnit)
@@ -791,6 +794,10 @@ void SpellCaster::SendHealSpellLog(Unit const* pVictim, uint32 SpellID, uint32 D
 
 void SpellCaster::EnergizeBySpell(Unit* pVictim, uint32 SpellID, uint32 Damage, Powers powertype)
 {
+    Unit* pUnit = ToUnit();
+    if (!pVictim || pVictim->IsSuiTacticallyFrozen() ||
+        (pUnit && pUnit->IsSuiTacticallyFrozen()))
+        return;
     SendEnergizeSpellLog(pVictim, SpellID, Damage, powertype);
     // needs to be called after sending spell log
     pVictim->ModifyPower(powertype, Damage);
@@ -2182,6 +2189,18 @@ void SpellCaster::UpdateCooldowns(TimePoint const& now)
         else
             ++lockoutCDItr;
     }
+}
+
+void SpellCaster::DelayCooldowns(uint32 durationMs)
+{
+    if (!durationMs)
+        return;
+    std::chrono::milliseconds const duration(durationMs);
+    for (auto& pair : m_GCDCatMap)
+        pair.second += duration;
+    m_cooldownMap.Delay(duration);
+    for (auto& pair : m_lockoutMap)
+        pair.second += duration;
 }
 
 bool SpellCaster::CheckLockout(SpellSchoolMask schoolMask) const

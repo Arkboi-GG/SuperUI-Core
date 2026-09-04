@@ -375,6 +375,94 @@ namespace WorldPackets
             }
         };
 
+        // Command View tactical freeze v1.  Unlike older opportunistic SUI
+        // packets, every tactical body carries an explicit leading version and
+        // is accepted only at its exact fixed/count-derived length.
+        class TacticalFreeze final : public ClientPacket
+        {
+        public:
+            static constexpr size_t WIRE_SIZE = 14;
+
+            uint8 version = 0;
+            uint32 requestId = 0;
+            uint8 desiredActive = 0;
+            uint64 lockId = 0;
+            bool exactSize = false;
+
+            explicit TacticalFreeze() : ClientPacket(CMSG_SUI_TACTICAL_FREEZE) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                size_t const size = recv_data.size();
+                if (size >= 1)
+                    recv_data >> version;
+                if (size >= 5)
+                    recv_data >> requestId;
+                if (size != WIRE_SIZE)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                recv_data >> desiredActive >> lockId;
+                exactSize = true;
+            }
+        };
+
+        class TacticalQueue final : public ClientPacket
+        {
+        public:
+            struct Record
+            {
+                ObjectGuid actorGuid;
+                uint32 actionId = 0;
+                uint8 actionKind = 0;
+                ObjectGuid targetGuid;
+                float x = 0.0f;
+                float y = 0.0f;
+                float z = 0.0f;
+                uint32 spellId = 0;
+            };
+
+            static constexpr size_t HEADER_SIZE = 15;
+            static constexpr size_t RECORD_SIZE = 37;
+            static constexpr uint8 MAX_RECORDS = 40;
+
+            uint8 version = 0;
+            uint64 lockId = 0;
+            uint32 requestId = 0;
+            uint8 operation = 0;
+            std::vector<Record> records;
+            bool exactSize = false;
+
+            explicit TacticalQueue() : ClientPacket(CMSG_SUI_TACTICAL_QUEUE) {}
+            void ReadFromWorldPacket(WorldPacket& recv_data) override
+            {
+                size_t const size = recv_data.size();
+                if (size >= 1)
+                    recv_data >> version;
+                if (size >= 9)
+                    recv_data >> lockId;
+                if (size >= 13)
+                    recv_data >> requestId;
+                if (size < HEADER_SIZE)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                uint8 count = 0;
+                recv_data >> operation >> count;
+                if (!count || count > MAX_RECORDS || size != HEADER_SIZE + RECORD_SIZE * count)
+                {
+                    recv_data.rfinish();
+                    return;
+                }
+                records.resize(count);
+                for (Record& row : records)
+                    recv_data >> row.actorGuid >> row.actionId >> row.actionKind >> row.targetGuid
+                              >> row.x >> row.y >> row.z >> row.spellId;
+                exactSize = true;
+            }
+        };
+
         class ForceRoster final : public ClientPacket
         {
         public:

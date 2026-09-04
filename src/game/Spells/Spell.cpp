@@ -47,6 +47,7 @@
 #include "TradeData.h"
 #include "Geometry.h"
 #include "Anticheat.h"
+#include "SuiTacticalFreeze.h"
 
 using namespace Spells;
 
@@ -1093,6 +1094,26 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
 
     ASSERT(m_caster);
 
+    Unit* unit = m_caster->GetObjectGuid() == target->targetGUID
+        ? m_casterUnit : ObjectAccessor::GetUnit(*m_caster, target->targetGUID);
+    Unit* boundarySource = GetAffectiveCaster();
+    if (!boundarySource)
+        boundarySource = m_casterUnit;
+    if (unit && SuiTacticalFreeze::BlocksEffect(boundarySource, unit))
+    {
+        // Delayed explicit unit targets remain unprocessed; handle_delayed
+        // schedules another check. Immediate/proc targets are deliberately
+        // suppressed rather than retaining arbitrary live Spell pointers.
+        if (!m_delayed)
+        {
+            target->processed = true;
+            DEBUG_FILTER_LOG(LOG_FILTER_SPELL_CAST,
+                "[SUI-FREEZE] suppressed immediate spell %u across frozen boundary",
+                m_spellInfo->Id);
+        }
+        return;
+    }
+
     target->processed = true;                               // Target checked in apply effects procedure
 
     // Get mask of effects for target
@@ -1110,7 +1131,6 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
             return;
     }
 
-    Unit* unit = m_caster->GetObjectGuid() == target->targetGUID ? m_casterUnit : ObjectAccessor::GetUnit(*m_caster, target->targetGUID);
     if (!unit)
         return;
 
@@ -1530,6 +1550,12 @@ void Spell::DoAllEffectOnTarget(TargetInfo *target)
 void Spell::DoSpellHitOnUnit(Unit* unit, uint32 effectMask)
 {
     if (!unit)
+        return;
+
+    Unit* boundarySource = GetAffectiveCaster();
+    if (!boundarySource)
+        boundarySource = m_casterUnit;
+    if (SuiTacticalFreeze::BlocksEffect(boundarySource, unit))
         return;
 
     SpellCaster* pRealCaster = GetAffectiveCasterObject();
@@ -3847,6 +3873,19 @@ uint64 Spell::handle_delayed(uint64 t_offset)
         {
             if (ihit.timeDelay <= t_offset)
             {
+                Unit* delayedTarget = m_caster->GetObjectGuid() == ihit.targetGUID
+                    ? m_casterUnit : ObjectAccessor::GetUnit(*m_caster, ihit.targetGUID);
+                Unit* boundarySource = GetAffectiveCaster();
+                if (!boundarySource)
+                    boundarySource = m_casterUnit;
+                if (delayedTarget &&
+                    SuiTacticalFreeze::BlocksEffect(boundarySource, delayedTarget))
+                {
+                    uint64 const retry = t_offset + 50;
+                    if (next_time == 0 || retry < next_time)
+                        next_time = retry;
+                    continue;
+                }
                 ++m_targetNum;
                 CheckAtDelay(&ihit);
                 DoAllEffectOnTarget(&ihit);

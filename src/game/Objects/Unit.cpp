@@ -25,6 +25,7 @@
 #include "Player.h"
 #include "SuiRts.h"
 #include "SuiPossess.h"
+#include "SuiTacticalFreeze.h"
 #include "Log.h"
 #include "Opcodes.h"
 #include "WorldPacket.h"
@@ -205,9 +206,38 @@ Unit::~Unit()
     MANGOS_ASSERT(!m_needUpdateVisibility);
 }
 
+void Unit::AddSuiTacticalFreeze()
+{
+    uint32 const previous = m_suiTacticalFreezeRefs.fetch_add(1, std::memory_order_acq_rel);
+    if (previous == 0)
+        m_suiTacticalFreezeStartedMs.store(World::GetCurrentMSTime(), std::memory_order_release);
+}
+
+void Unit::RemoveSuiTacticalFreeze()
+{
+    uint32 current = m_suiTacticalFreezeRefs.load(std::memory_order_acquire);
+    while (current)
+    {
+        if (!m_suiTacticalFreezeRefs.compare_exchange_weak(current, current - 1,
+                std::memory_order_acq_rel, std::memory_order_acquire))
+            continue;
+        if (current == 1)
+        {
+            uint32 const started = m_suiTacticalFreezeStartedMs.exchange(0, std::memory_order_acq_rel);
+            DelayCooldowns(uint32(World::GetCurrentMSTime() - started));
+        }
+        return;
+    }
+    sLog.Out(LOG_BASIC, LOG_LVL_ERROR,
+        "[SUI-FREEZE] attempted to thaw unit %s with no active field", GetGuidStr().c_str());
+}
+
 void Unit::Update(uint32 update_diff, uint32 p_time)
 {
     if (!IsInWorld())
+        return;
+
+    if (IsSuiTacticallyFrozen())
         return;
 
     // Buffer spell system update time to save on performance when players are updated twice per
@@ -328,6 +358,11 @@ void Unit::Update(uint32 update_diff, uint32 p_time)
         else
             GetMotionMaster()->UpdateMotionAsync(p_time);
     }
+    // Spline and non-threaded MotionMaster work above can cross a fixed field
+    // boundary in this call stack. Latch before returning to Player/Creature
+    // update code so no post-motion AI or gameplay work runs from inside it.
+    if (SuiTacticalFreeze::LatchEntrant(this))
+        return;
     WorldObject::Update(update_diff, p_time);
     if (m_delayedActions & OBJECT_DELAYED_ADD_TO_RELOCATED_LIST)
     {
@@ -363,6 +398,9 @@ bool Unit::UsesPvPCombatTimer() const
 
 AutoAttackCheckResult Unit::CanAutoAttackTarget(Unit const* pVictim) const
 {
+    if (!pVictim || IsSuiTacticallyFrozen() || pVictim->IsSuiTacticallyFrozen())
+        return ATTACK_RESULT_CANT_ATTACK;
+
     if (HasUnitState(UNIT_STATE_CAN_NOT_REACT) || HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PACIFIED))
         return ATTACK_RESULT_CANT_ATTACK;
 
@@ -641,6 +679,12 @@ void Unit::DoKillUnit(Unit* pVictim)
 
 uint32 Unit::DealDamage(Unit* pVictim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellProto, bool durabilityLoss, Spell* spell, bool reflected)
 {
+    // The v1 sealed boundary suppresses new immediate/proc damage in either
+    // direction.  Explicit delayed Spell targets are retained by Spell itself
+    // and retried after thaw; arbitrary proc objects are intentionally not kept.
+    if (!pVictim || IsSuiTacticallyFrozen() || pVictim->IsSuiTacticallyFrozen())
+        return 0;
+
     // World of Warcraft Client Patch 1.7.0 (2005-09-13)
     // - Fixed bug where self-inflicted damage, like Poisonous Blood, wouldn't
     //   break stealth.
@@ -8486,6 +8530,8 @@ void Unit::AddToWorld()
 
 void Unit::RemoveFromWorld()
 {
+    if (IsInWorld())
+        SuiTacticalFreeze::OnUnitRemoved(this);
     // cleanup
     if (IsInWorld())
     {

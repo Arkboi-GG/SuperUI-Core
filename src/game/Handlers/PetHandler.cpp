@@ -32,6 +32,7 @@
 #include "Pet.h"
 #include "Group.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor + ResnapshotControlled: the driven bot commands its pet
+#include "SuiTacticalFreeze.h"
 
 // [SUI] Pet routing: every verb below acts as GetSuiActor() (the possessed bot while
 // driving one, else _player), so a hunter/warlock companion's pet obeys the commander
@@ -41,6 +42,9 @@
 
 void WorldSession::HandlePetAction(WorldPackets::Pet::PetAction const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     // [SUI] the driven bot owns/charms the unit being commanded
     Player* actor = GetSuiActor();
 
@@ -54,6 +58,8 @@ void WorldSession::HandlePetAction(WorldPackets::Pet::PetAction const& packet)
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetAction: %s not exist.", packet.petGuid.GetString().c_str());
         return;
     }
+    if (pCharmedUnit->IsSuiTacticallyFrozen())
+        return;
 
     if (actor->GetObjectGuid() != pCharmedUnit->GetCharmerOrOwnerGuid())
     {
@@ -91,6 +97,8 @@ void WorldSession::HandlePetAction(WorldPackets::Pet::PetAction const& packet)
         case ACT_COMMAND:                                   // 0x07
         {
             Unit* pTarget = packet.targetGuid.IsEmpty() ? nullptr : actor->GetMap()->GetUnit(packet.targetGuid);
+            if (pTarget && pTarget->IsSuiTacticallyFrozen())
+                return;
             pCharmedUnit->HandlePetCommand((CommandStates)spellid, pTarget);
             break;
         }
@@ -114,6 +122,8 @@ void WorldSession::HandlePetAction(WorldPackets::Pet::PetAction const& packet)
             Unit* pUnitTarget = nullptr;
             if (packet.targetGuid)
                 pUnitTarget = actor->GetMap()->GetUnit(packet.targetGuid);
+            if (pUnitTarget && pUnitTarget->IsSuiTacticallyFrozen())
+                return;
 
             // do not cast unknown spells
             SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(spellid);
@@ -215,6 +225,9 @@ void WorldSession::SendPetNameQuery(ObjectGuid petGuid, uint32 petNumber)
 
 void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Creature* pet = actor->GetMap()->GetAnyTypeCreature(packet.petGuid);
@@ -224,6 +237,8 @@ void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction const& pac
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetSetAction: Unknown pet or pet owner.");
         return;
     }
+    if (pet->IsSuiTacticallyFrozen())
+        return;
 
     // pet can have action bar disabled
     if (pet->IsPet() && !((Pet*)pet)->IsEnabled())
@@ -316,6 +331,9 @@ void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction const& pac
 
 void WorldSession::HandlePetRename(WorldPackets::Pet::PetRename const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Pet* pet = actor->GetMap()->GetPet(packet.petGuid);
@@ -323,6 +341,8 @@ void WorldSession::HandlePetRename(WorldPackets::Pet::PetRename const& packet)
     if (!pet || pet->GetPetType() != HUNTER_PET ||
             !pet->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_PET_RENAME) ||
             pet->GetOwnerGuid() != actor->GetObjectGuid() || !pet->GetCharmInfo())
+        return;
+    if (pet->IsSuiTacticallyFrozen())
         return;
 
     // World of Warcraft Client Patch 1.7.0 (2005-09-13)
@@ -363,6 +383,9 @@ void WorldSession::HandlePetRename(WorldPackets::Pet::PetRename const& packet)
 
 void WorldSession::HandlePetAbandon(WorldPackets::Pet::PetAbandon const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     if (!actor->IsInWorld())
@@ -371,6 +394,8 @@ void WorldSession::HandlePetAbandon(WorldPackets::Pet::PetAbandon const& packet)
     // pet/charmed
     if (Unit* petUnit = actor->GetMap()->GetUnit(packet.guid))
     {
+        if (petUnit->IsSuiTacticallyFrozen())
+            return;
         if (petUnit->GetOwnerGuid() != actor->GetObjectGuid() || !petUnit->GetCharmInfo())
             return;
 
@@ -396,6 +421,9 @@ void WorldSession::HandlePetAbandon(WorldPackets::Pet::PetAbandon const& packet)
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_6_1
 void WorldSession::HandlePetStopAttack(WorldPackets::Pet::PetStopAttack const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Unit* pet = actor->GetMap()->GetUnit(packet.petGuid); // pet or controlled creature/player
@@ -404,6 +432,8 @@ void WorldSession::HandlePetStopAttack(WorldPackets::Pet::PetStopAttack const& p
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetStopAttack: %s doesn't exist.", packet.petGuid.GetString().c_str());
         return;
     }
+    if (pet->IsSuiTacticallyFrozen())
+        return;
 
     if (actor->GetObjectGuid() != pet->GetCharmerOrOwnerGuid())
     {
@@ -419,6 +449,9 @@ void WorldSession::HandlePetStopAttack(WorldPackets::Pet::PetStopAttack const& p
 
 void WorldSession::HandlePetUnlearnOpcode(WorldPackets::Pet::PetUnlearn const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Pet* pet = actor->GetPet();
@@ -428,6 +461,8 @@ void WorldSession::HandlePetUnlearnOpcode(WorldPackets::Pet::PetUnlearn const& p
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetUnlearnOpcode. %s isn't pet of %s .", packet.guid.GetString().c_str(), actor->GetGuidStr().c_str());
         return;
     }
+    if (pet->IsSuiTacticallyFrozen())
+        return;
 
     if (pet->GetPetType() != HUNTER_PET || pet->m_petSpells.size() <= 1)
         return;
@@ -477,6 +512,9 @@ void WorldSession::HandlePetUnlearnOpcode(WorldPackets::Pet::PetUnlearn const& p
 
 void WorldSession::HandlePetSpellAutocastOpcode(WorldPackets::Pet::PetSpellAutocast const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Creature* pet = actor->GetMap()->GetAnyTypeCreature(packet.guid);
@@ -485,6 +523,8 @@ void WorldSession::HandlePetSpellAutocastOpcode(WorldPackets::Pet::PetSpellAutoc
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetSpellAutocastOpcode. %s isn't pet of %s .", packet.guid.GetString().c_str(), actor->GetGuidStr().c_str());
         return;
     }
+    if (pet->IsSuiTacticallyFrozen())
+        return;
 
     // do not add not learned spells / passive spells
     if (!pet->HasSpell(packet.spellId) || !Spells::IsAutocastable(packet.spellId))
@@ -510,6 +550,9 @@ void WorldSession::HandlePetSpellAutocastOpcode(WorldPackets::Pet::PetSpellAutoc
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_8_4
 void WorldSession::HandlePetCastSpellOpcode(WorldPackets::Pet::PetCastSpell const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* actor = GetSuiActor();
 
     Creature* pet = actor->GetMap()->GetAnyTypeCreature(packet.petGuid);
@@ -519,6 +562,8 @@ void WorldSession::HandlePetCastSpellOpcode(WorldPackets::Pet::PetCastSpell cons
         sLog.Out(LOG_BASIC, LOG_LVL_ERROR, "HandlePetCastSpellOpcode: %s isn't pet of %s .", packet.petGuid.GetString().c_str(), actor->GetGuidStr().c_str());
         return;
     }
+    if (pet->IsSuiTacticallyFrozen())
+        return;
 
     SpellEntry const* spellInfo = sSpellMgr.GetSpellEntry(packet.spellId);
     if (!spellInfo)
@@ -535,6 +580,9 @@ void WorldSession::HandlePetCastSpellOpcode(WorldPackets::Pet::PetCastSpell cons
         return;
 
     const_cast<SpellCastTargets&>(packet.targets).PrepareForSpellSystem(pet);
+    if (Unit* target = packet.targets.getUnitTarget())
+        if (target->IsSuiTacticallyFrozen())
+            return;
 
     pet->ClearUnitState(UNIT_STATE_MOVING);
 

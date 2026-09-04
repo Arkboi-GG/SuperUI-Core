@@ -43,6 +43,7 @@
 #include "PlayerBotMgr.h"
 #include "MapManager.h"
 #include "AccountMgr.h"
+#include "SuiTacticalFreeze.h"
 
 class LoginQueryHolder : public SqlQueryHolder
 {
@@ -746,6 +747,9 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder *holder)
 
 void WorldSession::HandleSetFactionAtWarOpcode(WorldPackets::Misc::SetFactionAtWar const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     Player* pPlayer = GetPlayer();
 
     if (pPlayer->IsInCombat())

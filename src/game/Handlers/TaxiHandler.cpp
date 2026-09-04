@@ -30,6 +30,7 @@
 #include "Path.h"
 #include "WaypointMovementGenerator.h"
 #include "SuiPossess.h"      // [SUI] GetSuiActor: the driven bot takes the flight, the human rides along
+#include "SuiTacticalFreeze.h"
 
 // [SUI] Taxi routing (owner 2026-09-03: "if I'm driving the bot, I follow the bot on
 // taxi — I stay in control"). The node queries, the map and both activations act as
@@ -74,6 +75,12 @@ void WorldSession::SendTaxiStatus(ObjectGuid guid)
 
 void WorldSession::HandleTaxiQueryAvailableNodes(WorldPackets::Taxi::TaxiQueryAvailableNodes const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     // [SUI] the driven bot must reach the flight master
     Player* actor = GetSuiActor();
 
@@ -165,6 +172,12 @@ bool WorldSession::SendLearnNewTaxiNode(Creature* unit)
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_9_4
 void WorldSession::HandleActivateTaxiExpressOpcode(WorldPackets::Taxi::ActivateTaxiExpress const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.flightmasterGuid))
+        return;
+
     // [SUI] the driven bot flies; the commander rides along
     Player* actor = GetSuiActor();
 
@@ -184,6 +197,12 @@ void WorldSession::HandleActivateTaxiExpressOpcode(WorldPackets::Taxi::ActivateT
 
 void WorldSession::HandleActivateTaxiOpcode(WorldPackets::Taxi::ActivateTaxi const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.flightmasterGuid))
+        return;
+
     // [SUI] the driven bot flies; the commander rides along
     Player* actor = GetSuiActor();
 

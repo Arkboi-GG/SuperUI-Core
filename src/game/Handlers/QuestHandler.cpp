@@ -32,6 +32,7 @@
 #include "ObjectAccessor.h"
 #include "ScriptMgr.h"
 #include "Group.h"
+#include "SuiTacticalFreeze.h"
 
 void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPackets::Quest::QuestgiverStatusQuery const& packet)
 {
@@ -83,6 +84,12 @@ void WorldSession::HandleQuestgiverStatusQueryOpcode(WorldPackets::Quest::Questg
 
 void WorldSession::HandleQuestgiverHelloOpcode(WorldPackets::Quest::QuestgiverHello const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b: act as the driven bot, else _player
     Creature* pCreature = actor->GetNPCIfCanInteractWith(packet.guid, UNIT_NPC_FLAG_NONE);
 
@@ -112,6 +119,12 @@ void WorldSession::HandleQuestgiverHelloOpcode(WorldPackets::Quest::QuestgiverHe
 
 void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::QuestgiverAcceptQuest const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b: accept for the driven bot, else _player
     Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_PLAYER_OR_ITEM);
 
@@ -185,7 +198,7 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::Questg
                     {
                         Player* pPlayer = itr->getSource();
 
-                        if (!pPlayer || pPlayer == actor || !pPlayer->IsInMap(actor))     // not self and in same map
+                        if (!pPlayer || pPlayer == actor || !pPlayer->IsInMap(actor) || pPlayer->IsSuiTacticallyFrozen())     // not self and in same map
                             continue;
 
                         if (pPlayer->CanTakeQuest(qInfo, true))
@@ -219,6 +232,12 @@ void WorldSession::HandleQuestgiverAcceptQuestOpcode(WorldPackets::Quest::Questg
 
 void WorldSession::HandleQuestgiverQueryQuestOpcode(WorldPackets::Quest::QuestgiverQueryQuest const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b
     // Verify that the guid is valid and is a questgiver or involved in the requested quest
     Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_GAMEOBJECT_OR_ITEM);
@@ -414,6 +433,12 @@ void WorldSession::HandleQuestQueryOpcode(WorldPackets::Quest::QueryQuest const&
 
 void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPackets::Quest::QuestgiverChooseReward const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b: reward the driven bot
     ObjectGuid guid = packet.guid;
 
@@ -462,6 +487,12 @@ void WorldSession::HandleQuestgiverChooseRewardOpcode(WorldPackets::Quest::Quest
 
 void WorldSession::HandleQuestgiverRequestRewardOpcode(WorldPackets::Quest::QuestgiverRequestReward const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b
     Object* pObject = actor->GetObjectByTypeMask(packet.guid, TYPEMASK_CREATURE_OR_GAMEOBJECT);
     if (!pObject || !pObject->HasInvolvedQuest(packet.quest))
@@ -496,6 +527,9 @@ void WorldSession::HandleQuestgiverCancel(NullClientPacket const& /*packet*/)
 
 void WorldSession::HandleQuestLogSwapQuest(WorldPackets::Quest::QuestLogSwapQuest const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (packet.slot1 == packet.slot2 || packet.slot1 >= MAX_QUEST_LOG_SIZE || packet.slot2 >= MAX_QUEST_LOG_SIZE)
         return;
 
@@ -504,11 +538,17 @@ void WorldSession::HandleQuestLogSwapQuest(WorldPackets::Quest::QuestLogSwapQues
 
 void WorldSession::HandleQuestLogRemoveQuest(WorldPackets::Quest::QuestLogRemoveQuest const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     _player->RemoveQuestAtSlot(packet.slot);
 }
 
 void WorldSession::HandleQuestConfirmAccept(WorldPackets::Quest::QuestConfirmAccept const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.questId))
     {
         if (!pQuest->HasQuestFlag(QUEST_FLAGS_PARTY_ACCEPT))
@@ -527,6 +567,9 @@ void WorldSession::HandleQuestConfirmAccept(WorldPackets::Quest::QuestConfirmAcc
             _player->ClearQuestShareInfo();
             return;
         }
+
+        if (pOriginalPlayer->IsSuiTacticallyFrozen())
+            return;
 
         if (pQuest->IsAllowedInRaid())
         {
@@ -560,6 +603,12 @@ void WorldSession::HandleQuestConfirmAccept(WorldPackets::Quest::QuestConfirmAcc
 
 void WorldSession::HandleQuestgiverCompleteQuest(WorldPackets::Quest::QuestgiverCompleteQuest const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
+    if (SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Player* actor = GetSuiActor();   // [SUI] P4b
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.quest))
     {
@@ -581,6 +630,9 @@ void WorldSession::HandleQuestgiverQuestAutoLaunch(NullClientPacket const& /*pac
 
 void WorldSession::HandlePushQuestToParty(WorldPackets::Quest::PushQuestToParty const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     if (Quest const* pQuest = sObjectMgr.GetQuestTemplate(packet.questId))
     {
         if (Group* pGroup = _player->GetGroup())
@@ -589,7 +641,7 @@ void WorldSession::HandlePushQuestToParty(WorldPackets::Quest::PushQuestToParty 
             {
                 Player* pPlayer = itr->getSource();
 
-                if (!pPlayer || pPlayer == _player)         // skip self
+                if (!pPlayer || pPlayer == _player || pPlayer->IsSuiTacticallyFrozen())         // skip self/frozen targets
                     continue;
 
                 _player->SendPushToPartyResponse(pPlayer, QUEST_PARTY_MSG_SHARING_QUEST);
@@ -639,6 +691,9 @@ void WorldSession::HandlePushQuestToParty(WorldPackets::Quest::PushQuestToParty 
 
 void WorldSession::HandleQuestPushResult(WorldPackets::Quest::QuestPushResult const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     auto const& questShareInfo = _player->GetQuestShareInfo();
     if (!questShareInfo)
         return;

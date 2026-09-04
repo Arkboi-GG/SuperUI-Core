@@ -59,6 +59,8 @@ namespace SuiPortal
     // The Command View flies the whole commanded party from a flight master; the
     // client must not send the opcode until this bit is observed.
     constexpr uint32 CAPABILITY_PARTY_TAXI_V1 = 1u << 11;
+    // Localized server-authoritative Command View freeze and five-action FIFO.
+    constexpr uint32 CAPABILITY_TACTICAL_FREEZE_V1 = 1u << 12;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm

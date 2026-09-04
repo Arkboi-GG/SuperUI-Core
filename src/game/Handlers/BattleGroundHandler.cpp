@@ -37,9 +37,23 @@
 #include "World.h"
 #include "Anticheat.h"
 #include "SuiHero.h"
+#include "SuiTacticalFreeze.h"
+
+namespace
+{
+    bool IsTacticalQueueMemberBlocked(Player* player)
+    {
+        return player && (player->IsSuiTacticallyFrozen() ||
+            (player->GetSession() && SuiTacticalFreeze::IsSessionGameplayFrozen(player->GetSession())));
+    }
+}
 
 void WorldSession::HandleBattlemasterHelloOpcode(WorldPackets::Battleground::BattlemasterHello const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     Creature* pCreature = GetPlayer()->GetMap()->GetCreature(packet.guid);
 
     if (!pCreature)
@@ -78,18 +92,29 @@ void WorldSession::SendBattleGroundList(ObjectGuid guid, BattleGroundTypeId bgTy
 
 void WorldSession::HandleBattlefieldJoinOpcode(WorldPackets::Battleground::BattlefieldJoin const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     RequestBgJoinQueue(ObjectGuid{}, 0, packet.mapId, false);
 }
 
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_6_1
 void WorldSession::HandleBattlemasterJoinOpcode(WorldPackets::Battleground::BattlemasterJoin const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     RequestBgJoinQueue(packet.guid, packet.instanceId, packet.mapId, packet.joinAsGroup);
 }
 #endif
 
 void WorldSession::RequestBgJoinQueue(ObjectGuid battlemaster, uint32 instanceId, uint32 mapId, bool joinAsGroup)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        (!battlemaster.IsEmpty() && SuiTacticalFreeze::IsInteractionTargetFrozen(this, battlemaster)))
+        return;
+
     bool queuedAtBGPortal = false;
     bool isPremade = false;
     Group* grp;
@@ -211,6 +236,12 @@ void WorldSession::RequestBgJoinQueue(ObjectGuid battlemaster, uint32 instanceId
         // no group found, error
         if (!grp)
             return;
+
+        // Queue enrollment mutates every online member.  Preflight the whole
+        // set so a frozen/draining member cannot be partially enrolled.
+        for (GroupReference* itr = grp->GetFirstMember(); itr != nullptr; itr = itr->next())
+            if (IsTacticalQueueMemberBlocked(itr->getSource()))
+                return;
 
         std::vector<uint32> excludedMembers;
         uint32 err = grp->CanJoinBattleGroundQueue(bgTypeId, bgQueueTypeId, 0, bg->GetMaxPlayersPerTeam(), _player, &excludedMembers);
@@ -366,6 +397,9 @@ void WorldSession::HandleBattlefieldListOpcode(WorldPackets::Battleground::Battl
 
 void WorldSession::HandleBattleFieldPortOpcode(WorldPackets::Battleground::BattleFieldPort const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
     uint8 action = packet.action; // enter battle 0x1, leave queue 0x0
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_8_4
     uint32 mapId = packet.mapId;
@@ -517,6 +551,9 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPackets::Battleground::Battl
 
 void WorldSession::HandleLeaveBattlefieldOpcode(WorldPackets::Battleground::LeaveBattlefield const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
+        return;
+
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_8_4
     if (_player->GetMapId() != packet.mapId)
         return;
@@ -604,6 +641,10 @@ void WorldSession::HandleAreaSpiritHealerQueryOpcode(WorldPackets::Battleground:
 
 void WorldSession::HandleAreaSpiritHealerQueueOpcode(WorldPackets::Battleground::AreaSpiritHealerQueue const& packet)
 {
+    if (SuiTacticalFreeze::IsSessionGameplayFrozen(this) ||
+        SuiTacticalFreeze::IsInteractionTargetFrozen(this, packet.guid))
+        return;
+
     BattleGround *bg = _player->GetBattleGround();
     if (!bg)
         return;

@@ -29,6 +29,7 @@
 #include "SuiHero.h"
 #include "SuiHonor.h"
 #include "SuiPossess.h"
+#include "SuiTacticalFreeze.h"
 #include "SuiRts.h"
 #include "Database/DatabaseEnv.h"
 #include "Log.h"
@@ -1119,11 +1120,21 @@ void Player::Update(uint32 update_diff, uint32 p_time)
     if (!IsInWorld())
         return;
 
+    if (IsSuiTacticallyFrozen())
+        return;
+
     UpdateMirrorTimers(update_diff);
 
     //used to implement delayed far teleports
     SetCanDelayTeleport(true);
     Unit::Update(update_diff, p_time);
+    // Unit motion may have entered a tactical field in this update. Restore the
+    // teleport guard, then stop before bot AI and all remaining player clocks.
+    if (IsSuiTacticallyFrozen())
+    {
+        SetCanDelayTeleport(false);
+        return;
+    }
     if (m_AI)
         m_AI->UpdateAI(p_time);
     SetCanDelayTeleport(false);
@@ -2485,7 +2496,7 @@ bool Player::CanUseBank(ObjectGuid bankerGUID) const
     if (!isUsingBankCommand)
     {
         Creature* creature = GetNPCIfCanInteractWith(bankerGUID, UNIT_NPC_FLAG_BANKER);
-        if (!creature)
+        if (!creature || creature->IsSuiTacticallyFrozen())
             return false;
     }
 
