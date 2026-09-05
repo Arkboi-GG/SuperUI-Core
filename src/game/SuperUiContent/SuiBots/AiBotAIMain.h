@@ -94,6 +94,7 @@
 #define AIBOT_POINT_OVERPULL_FLEE   105  // retreat hop away from a too-dense pull
 #define AIBOT_POINT_PULL_RETREAT    106  // proactive pull: drag a freshly-tagged mob back to open ground
 #define AIBOT_POINT_INTERACT_NPC    107  // bridge-owned NPC approach; never aliases a task arrival
+#define AIBOT_POINT_REMESH          108  // [REMESH] short straight step back onto the navmesh from an off-mesh start
 #define AIBOT_MOVE_POINT_REFUSED_INTERVAL 10000 // ms; autonomous NOPATH telemetry is rate-limited per bot
 #define AIBOT_COMBAT_RESET_HOLD_MS 5000  // ms; keep task autonomy parked while ACK + fresh OOC STATE ship
 #define AIBOT_COMBAT_RESET_MIN_STILL_SEC 120 // must match the C# fresh-STATE physical-still proof window
@@ -109,6 +110,8 @@
 #define AIBOT_OFFMESH_EPSILON  2.0f      // bot within this of a navmesh poly = ON mesh; beyond = off-mesh ALARM → re-tare
 #define AIBOT_BOUNDARY_SCOPE  60.0f      // a recorded seam helps escape from anywhere within this of its inner point
 #define AIBOT_NAVMESH_SNAP_SEARCH 40.0f  // how far out to look for a navmesh poly to snap an off-mesh bot onto
+#define AIBOT_REMESH_STEP_MAX      8.0f  // [REMESH] walk (never port) back onto the mesh if it is within this; beyond = refuse + log
+#define AIBOT_REMESH_STEP_COOLDOWN_MS 3000 // [REMESH] one step per window so a refused hop cannot spam splines
 
 //Organic movement
 #define AIBOT_FILLET_VALIDATE_SEARCH_YARDS 5.0f
@@ -872,6 +875,12 @@ public:
     // inflated-spline fallback (~52yd/s glide + the model floating off slopes). The two travel
     // splines pin this already; every OTHER mover routes through here so none can forget.
     bool MovePointRun(uint32 pointId, float x, float y, float z, bool emitAutonomousRefusal = true);
+    // [REMESH] "I am off the mesh" vs "the dest is unreachable": when the START has no polygon under it,
+    // every calculate() is NOPATH regardless of dest. Walk a short straight step back onto the nearest
+    // navmesh point instead of refusing (the refusal is what pinned bots in crevices for a day). Returns
+    // true when a step was issued (caller retries its real hop next tick), false when the start is on
+    // mesh (dest really is the problem) or the mesh is too far to walk to.
+    bool TryRemeshStep(const char* why);
     // Navmesh-seam crossing (cave entry/exit). RecordNavBoundary stores the seam the
     // first time we teleport across inbound; FindNavBoundaryNear lets the outbound
     // leg find the recorded outside anchor to escape back to the connected mesh.
@@ -1008,6 +1017,7 @@ public:
     // StopMoving releases it only after the synchronous MotionMaster::Clear finalizer returns.
     bool m_suppressTaskDestInform = false;
     uint32 m_lastMovePointRefusedMs = 0;
+    uint32 m_lastRemeshStepMs = 0;   // [REMESH] rate limit for TryRemeshStep
 
     // INTERACT_NPC owns a distinct point id and outcome correlation. It may temporarily interrupt
     // an autonomous task, but its arrival can never masquerade as that task's TASK_COMPLETE.

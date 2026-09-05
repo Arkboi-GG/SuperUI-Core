@@ -1563,6 +1563,67 @@ void AiBotAI::UpdateMovementTrace(uint32 diff)
 // hops, the interact approach. They all route here now. Clamp matches the travel pin: >9
 // (>~1.3x run) is not legit for these bots.
 // ============================================================
+// ============================================================
+// [REMESH] TryRemeshStep — the walking half of the off-mesh recovery (2026-09-05).
+//
+// Daelbrook, Darkshore (6248.7,-64.3): mid-leg on a SAFE path it aggroed a moonkin, the core
+// chase pushed it into a dip ~3yd below the mesh, and from there PathInfo can't find a START
+// polygon (5yd box) so EVERY hop — stalemate nudge, flee, wander, patrol — came back NOPATH and
+// the wall-clip guard refused all of them for 21 hours. Fleet-wide ~80% of "start ISOLATED"
+// episodes begin the same way (NOPATH → nudge failed → ring scan found no valid point). The
+// MOVE_TO re-tare in MoveToDestination already handles this for out-of-combat commands, but by
+// PORTING; the autonomous hops never got any recovery at all. This one WALKS: a short straight
+// spline (no pathfinding — there is no path from off-mesh, that is the point) to the nearest
+// navmesh point when it is within AIBOT_REMESH_STEP_MAX. Farther than that is not a crevice,
+// it is a void, and the existing refusal / strand handling keeps owning it.
+// ============================================================
+bool AiBotAI::TryRemeshStep(const char* why)
+{
+    uint32 const now = WorldTimer::getMSTime();
+    if (m_lastRemeshStepMs != 0 && WorldTimer::getMSTimeDiff(m_lastRemeshStepMs, now) < AIBOT_REMESH_STEP_COOLDOWN_MS)
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: remesh step cooling down");
+        return false;
+    }
+
+    float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    if (!FindNearestNavmeshPoint(sx, sy, sz, AIBOT_NAVMESH_SNAP_SEARCH))
+    {
+        CB_HIT(me->GetGUIDLow(), "cpp-path: remesh step, no navmesh in search box");
+        return false;
+    }
+
+    float const dx = sx - me->GetPositionX(), dy = sy - me->GetPositionY(), dz = sz - me->GetPositionZ();
+    float const off = sqrtf(dx * dx + dy * dy + dz * dz);   // 3D on purpose: a crevice is BELOW the mesh, 2D reads "on mesh"
+    if (off <= AIBOT_OFFMESH_EPSILON)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: start on mesh, dest is the problem", off);
+        return false;
+    }
+    if (off > AIBOT_REMESH_STEP_MAX)
+    {
+        CB_HITV(me->GetGUIDLow(), "cpp-path: remesh step too far to walk, refusing", off);
+        sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+            "[AIBOT-PATH] %s: off-mesh by %.1fyd (nearest navmesh (%.1f, %.1f, %.1f)) — too far to walk back (%s, cap %.0f)",
+            me->GetName(), off, sx, sy, sz, why, AIBOT_REMESH_STEP_MAX);
+        return false;
+    }
+
+    m_lastRemeshStepMs = now;
+    CB_HITV(me->GetGUIDLow(), "cpp-path: off-mesh start, walking back onto navmesh", off);
+    sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
+        "[AIBOT-PATH] %s: OFF-MESH by %.1fyd @ (%.1f, %.1f, %.1f) — walking back onto navmesh (%.1f, %.1f, %.1f) [%s]",
+        me->GetName(), off, me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(), sx, sy, sz, why);
+
+    float useSpeed = me->GetSpeed(MOVE_RUN);
+    if (useSpeed > 9.0f)
+        useSpeed = 7.0f;
+    // MOVE_NONE: a straight spline. MOVE_PATHFINDING would run the same start-poly lookup that
+    // just failed and BuildShortcut() the same line anyway — here the shortcut IS the intent.
+    me->GetMotionMaster()->MovePoint(AIBOT_POINT_REMESH, sx, sy, sz, MOVE_NONE, useSpeed);
+    return true;
+}
+
 bool AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z, bool emitAutonomousRefusal)
 {
     // [WALL-CLIP GUARD] (FINDING_011) MOVE_PATHFINDING is NOT a guarantee of a walkable route:
@@ -1577,6 +1638,12 @@ bool AiBotAI::MovePointRun(uint32 pointId, float x, float y, float z, bool emitA
     path.calculate(x, y, z);
     if (path.getPathType() & PATHFIND_NOPATH)
     {
+        // [REMESH] Off-mesh START is not a wall: walk back onto the mesh and let the caller retry.
+        if (TryRemeshStep("move-point"))
+        {
+            CB_HITV(me->GetGUIDLow(), "cpp-path: MovePointRun NOPATH resolved by remesh step", pointId);
+            return true;
+        }
         CB_HITV(me->GetGUIDLow(), "cpp-path: MovePointRun NOPATH, refusing shortcut, staying put", pointId);
         sLog.Out(LOG_BASIC, LOG_LVL_MINIMAL,
             "[AIBOT-PATH] %s: MovePointRun NOPATH to (%.1f, %.1f, %.1f) — refusing straight-line shortcut (wall-clip guard, point %u)",
