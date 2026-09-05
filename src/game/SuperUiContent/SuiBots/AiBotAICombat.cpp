@@ -877,6 +877,13 @@ bool AiBotAI::CheckForUnreachableTarget()
                     return true;
                 }
 
+                // [REMESH] If WE are the unreachable one (off the mesh), walk back on before any cheat.
+                if (!me->IsMoving() && TryRemeshStep("unreachable-target"))
+                {
+                    CB_HIT(me->GetGUIDLow(), "cpp-combat: unreachable target, bot was off-mesh, remesh step issued");
+                    return true;
+                }
+
                 if (pTarget->IsCreature() && !me->IsMoving())
                 {   // cb:fold hot per-update detail
                     CB_HIT(me->GetGUIDLow(), "cpp-combat: unreachable target, teleporting onto mob");
