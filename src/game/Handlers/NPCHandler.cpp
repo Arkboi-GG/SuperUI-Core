@@ -587,7 +587,7 @@ void WorldSession::SendBindPoint(Creature* npc)
         return;
 
     // send spell for bind 3286 bind magic
-    npc->CastSpell(_player, 3286, true);                    // Bind
+    npc->CastSpell(pActor, 3286, true);                    // Bind
 
     pActor->PlayerTalkClass->CloseGossip();
 }

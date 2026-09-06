@@ -1385,6 +1385,7 @@ class Player final: public Unit
 
         void AddSpellMod(SpellModifier* mod, bool apply);
         void SendSpellMod(SpellModifier const* mod) const;
+        void SendAllSpellMods() const;
         bool HasInstantCastingSpellMod(SpellEntry const* spellInfo) const;
         bool IsAffectedBySpellmod(SpellEntry const* spellInfo, SpellModifier const* mod, Spell const* spell = nullptr) const;
         template <class T> T ApplySpellMod(uint32 spellId, SpellModOp op, T &basevalue, Spell* spell = nullptr, bool dropCharge = true);

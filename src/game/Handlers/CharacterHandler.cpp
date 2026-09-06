@@ -750,7 +750,7 @@ void WorldSession::HandleSetFactionAtWarOpcode(WorldPackets::Misc::SetFactionAtW
     if (SuiTacticalFreeze::IsSessionGameplayFrozen(this))
         return;
 
-    Player* pPlayer = GetPlayer();
+    Player* pPlayer = GetSuiActor();
 
     if (pPlayer->IsInCombat())
         return;
@@ -786,12 +786,12 @@ void WorldSession::HandleTutorialResetOpcode(NullClientPacket const& /*packet*/)
 #if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_9_4
 void WorldSession::HandleSetWatchedFactionOpcode(WorldPackets::Misc::SetWatchedFaction const& packet)
 {
-    GetPlayer()->SetInt32Value(PLAYER_FIELD_WATCHED_FACTION_INDEX, packet.repId);
+    GetSuiActor()->SetInt32Value(PLAYER_FIELD_WATCHED_FACTION_INDEX, packet.repId);
 }
 
 void WorldSession::HandleSetFactionInactiveOpcode(WorldPackets::Misc::SetFactionInactive const& packet)
 {
-    _player->GetReputationMgr().SetInactive(packet.replistid, packet.inactive);
+    GetSuiActor()->GetReputationMgr().SetInactive(packet.replistid, packet.inactive);
 }
 #endif
 

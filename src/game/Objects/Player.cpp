@@ -3568,6 +3568,7 @@ void Player::SendInitialSpells() const
     data.put<uint16>(cdCountPos, cdCount);
 
     GetSession()->SendPacket(&data);
+    SendAllSpellMods();
 
     sLog.Out(LOG_BASIC, LOG_LVL_DETAIL, "CHARACTER: Sent Initial Spells");
 }
@@ -18078,6 +18079,34 @@ void Player::AddSpellMod(SpellModifier* mod, bool apply)
 
     if (!apply)
         delete mod;
+}
+
+void Player::SendAllSpellMods() const
+{
+    // Initial spells is the companion table reset; replay each nonzero aggregate once.
+    // Mid-session initial-spell resends must carry the same snapshot as a new grant.
+    for (uint8 op = 0; op < MAX_SPELLMOD; ++op)
+    {
+        int32 values[2][64] = {};
+        for (SpellModifier const* mod : m_spellMods[op])
+        {
+            if (mod->type != SPELLMOD_FLAT && mod->type != SPELLMOD_PCT)
+                continue;
+            uint8 type = mod->type == SPELLMOD_PCT ? 1 : 0;
+            for (uint8 bit = 0; bit < 64; ++bit)
+                if (mod->mask & (uint64(1) << bit))
+                    values[type][bit] += mod->value;
+        }
+        for (uint8 type = 0; type < 2; ++type)
+            for (uint8 bit = 0; bit < 64; ++bit)
+            {
+                if (!values[type][bit])
+                    continue;
+                WorldPacket data(type ? SMSG_SET_PCT_SPELL_MODIFIER : SMSG_SET_FLAT_SPELL_MODIFIER, 6);
+                data << bit << op << values[type][bit];
+                SendDirectMessage(&data);
+            }
+    }
 }
 
 void Player::SendSpellMod(SpellModifier const* mod) const

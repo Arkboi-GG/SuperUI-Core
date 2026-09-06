@@ -31,6 +31,9 @@
 #include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 #include "SuiWorldState.h"
 #include "World.h"
+#include "Maps/Map.h"
+#include "Weather.h"
+#include "ReputationMgr.h"
 
 namespace SuiPossess
 {
@@ -403,6 +406,16 @@ static void RemoveFreecamEye(Player* player)
     s_freecamEyes.erase(it);
 }
 
+// A camera/mover handoff need not change either body's physical zone. Refresh
+// after the control ack through the body's own session so the owner mirror tags it.
+static void SendBodyWeather(Player* body)
+{
+    if (!body || !body->IsInWorld() || !sWorld.getConfig(CONFIG_BOOL_WEATHER))
+        return;
+    Weather* weather = body->GetMap()->GetWeatherSystem()->FindOrCreateWeather(body->GetZoneId());
+    weather->SendWeatherUpdateToPlayer(body);
+}
+
 static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitiated)
 {
     ObjectGuid botGuid = session->GetSuiControlledGuid();
@@ -455,7 +468,10 @@ static bool DoRelease(WorldSession* session, AckResult reason, bool serverInitia
     // The client resets its pet bar on the release ack; hand the own character's
     // pet bar back after it (no pet → nothing sent, bar stays empty).
     if (possessor && possessor->IsInWorld())
+    {
         possessor->PetSpellInitialize();
+        SendBodyWeather(possessor);
+    }
     if (possessor && possessor->GetGroup())
         BroadcastRoster(possessor->GetGroup());
     return true;
@@ -479,13 +495,17 @@ void HandleRequest(WorldSession* session, ObjectGuid targetGuid)
         // SMSG_SUI_PROXY with the right source guid. Mid-session re-sends of
         // both packets are proven safe in this fork (SpecCommands .testbars).
         bot->SendInitialSpells();
+        bot->SendProficiency(ITEM_CLASS_WEAPON, bot->GetWeaponProficiency());
+        bot->SendProficiency(ITEM_CLASS_ARMOR, bot->GetArmorProficiency());
         if (MasterPlayer* master = bot->GetSession()->GetMasterPlayer())
             master->SendInitialActionButtons();
         SendSnapshot(session, bot);
+        bot->GetReputationMgr().SendInitialReputations();
         // The driven body's pet bar (hunter/warlock companions): SMSG_PET_SPELLS on
         // the bot's session mirrors through the proxy. No pet → nothing is sent and
         // the client's control-change reset leaves the bar empty.
         bot->PetSpellInitialize();
+        SendBodyWeather(bot);
         if (Group* group = session->GetPlayer()->GetGroup())
             BroadcastRoster(group);
     }
@@ -2488,8 +2508,24 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
     // receives; these are the strictly owner-only spell/bar/cooldown packets.
     switch (packet->GetOpcode())
     {
+        // Owner-only replies from the driven bot; client unwraps with source isolation.
+        case SMSG_GOSSIP_POI:
+        case SMSG_ITEM_COOLDOWN:
+        case SMSG_CANCEL_AUTO_REPEAT:
+        case SMSG_CANCEL_COMBAT:
+        case MSG_CHANNEL_START:
+        case MSG_CHANNEL_UPDATE:
+        case SMSG_UPDATE_AURA_DURATION:
+        case SMSG_INVENTORY_CHANGE_FAILURE:
+        case SMSG_START_MIRROR_TIMER:
+        case SMSG_PAUSE_MIRROR_TIMER:
+        case SMSG_STOP_MIRROR_TIMER:
+        case SMSG_FEIGN_DEATH_RESISTED:
+        case SMSG_SET_FORCED_REACTIONS:
         case SMSG_ACTION_BUTTONS:
         case SMSG_INITIAL_SPELLS:
+        case SMSG_SET_FLAT_SPELL_MODIFIER:
+        case SMSG_SET_PCT_SPELL_MODIFIER:
         case SMSG_LEARNED_SPELL:
         case SMSG_SUPERCEDED_SPELL:
         case SMSG_REMOVED_SPELL:
@@ -2513,6 +2549,13 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_QUESTGIVER_REQUEST_ITEMS:
         case SMSG_QUESTGIVER_OFFER_REWARD:
         case SMSG_QUESTGIVER_QUEST_INVALID:
+        case SMSG_QUESTGIVER_QUEST_FAILED:
+        case SMSG_QUESTLOG_FULL:
+        case SMSG_QUESTUPDATE_COMPLETE:
+        case SMSG_QUESTUPDATE_FAILED:
+        case SMSG_QUESTUPDATE_FAILEDTIMER:
+        case SMSG_QUESTUPDATE_ADD_ITEM:
+        case SMSG_QUESTUPDATE_ADD_KILL:
         case SMSG_QUESTGIVER_QUEST_COMPLETE:
         // [SUI] P4b vendor/trainer/repair: the driven bot's shop and trainer reply
         // frames. Reached here only when built on the bot's socket-less session (a
@@ -2552,6 +2595,8 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         // cast-fail frames address the pet OWNER's session — the bot's.
         case SMSG_PET_SPELLS:
         case SMSG_PET_MODE:
+        case SMSG_PET_ACTION_SOUND:
+        case SMSG_PET_UNLEARN_CONFIRM:
         case SMSG_PET_ACTION_FEEDBACK:
         case SMSG_PET_CAST_FAILED:
         // [SUI] taxi: TaxiHandler runs as GetSuiActor(); the activation verdict
@@ -2578,7 +2623,13 @@ void MirrorOwnerPacket(WorldSession* botSession, WorldPacket const* packet)
         case SMSG_SHOW_BANK:
         case MSG_LIST_STABLED_PETS:
         case MSG_TALENT_WIPE_CONFIRM:
+        case SMSG_INITIALIZE_FACTIONS:
+        case SMSG_SET_FACTION_VISIBLE:
+        case SMSG_SET_FACTION_STANDING:
+        case SMSG_SET_FACTION_ATWAR:
+        case SMSG_WEATHER:
         case SMSG_BINDER_CONFIRM:
+        case SMSG_SET_PROFICIENCY:
         case SMSG_PLAYERBOUND:
         case MSG_AUCTION_HELLO:
             break;
