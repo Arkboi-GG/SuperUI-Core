@@ -10,6 +10,7 @@ void AddSC_bg_alterac();
 
 //custom
 void AddSC_zero_scripts();
+void AddSC_sui_karting();   // game lib, SuperUiContent/SuiWorld/Karting
 void AddSC_ubrs_trash();
 //void AddSC_gmisland();
 //void AddSC_boss_arena_hardog(); // EVENT de TORKIN
@@ -254,6 +255,7 @@ void AddScripts()
     AddSC_bg_alterac();
 
     //custom
+    AddSC_sui_karting();
     AddSC_zero_scripts();
     AddSC_ubrs_trash();
     //AddSC_gmisland();

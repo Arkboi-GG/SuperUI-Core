@@ -25,6 +25,7 @@
 #include "PoolManager.h"
 #include "SpellMgr.h"
 #include "Spell.h"
+#include "SuperUiContent/SuiWorld/Bridge/SuiPortal.h"
 #include "Group.h"
 #include "Opcodes.h"
 #include "WorldPacket.h"
@@ -1791,11 +1792,14 @@ void GameObject::Use(Unit* user)
         }
         case GAMEOBJECT_TYPE_SPELLCASTER:                   //22
         {
-            SetUInt32Value(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
-
             GameObjectInfo const* info = GetGOInfo();
             if (!info)
                 return;
+
+            // A placed public pack portal (WoW Karting) serves every traveller; only
+            // the temporary stock spellcasters lock after use.
+            if (!SuiPortal::IsPublicPackPortal(GetEntry(), info))
+                SetUInt32Value(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED);
 
             if (info->spellcaster.partyOnly)
             {

@@ -423,6 +423,22 @@ namespace WorldPackets
             }
         };
 
+        // WoW Karting: CMSG_SUI_KART (MSUIClient Net/KartingWire.cs).
+        class Kart final : public ClientPacket
+        {
+        public:
+            uint8 version = 0, action = 0;
+            uint32 param = 0;
+            bool exactSize = false;
+            explicit Kart() : ClientPacket(CMSG_SUI_KART) {}
+            void ReadFromWorldPacket(WorldPacket& data) override
+            {
+                if (data.size() != 6) { data.rfinish(); return; }
+                data >> version >> action >> param;
+                exactSize = version == 1 && action >= 1 && action <= 5;
+            }
+        };
+
         class CommanderRaid final : public ClientPacket
         {
         public:

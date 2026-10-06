@@ -977,6 +977,8 @@ Handlers BuildOpcodeList()
     INVALID_PACKET(SMSG_SUI_COMMANDER_RAID, UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_THREAT,                   STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiThreatOpcode);
     INVALID_PACKET(SMSG_SUI_THREAT,                   UnhandleReason::SendByServer);
+    DEFINE_HANDLER(CMSG_SUI_KART,                     STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiKartOpcode);
+    INVALID_PACKET(SMSG_SUI_KART,                     UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_TACTICAL_QUEUE,           STATUS_LOGGEDIN,  PACKET_PROCESS_WORLD,         &WorldSession::HandleSuiTacticalQueueOpcode);
     INVALID_PACKET(SMSG_SUI_TACTICAL_QUEUE,           UnhandleReason::SendByServer);
     DEFINE_HANDLER(CMSG_SUI_PORTAL_PREPARE,            STATUS_LOGGEDIN,  PACKET_PROCESS_MAP,           &WorldSession::HandleSuiPortalPrepareOpcode);

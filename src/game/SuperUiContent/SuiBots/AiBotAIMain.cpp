@@ -12,6 +12,7 @@
  *   grind    → AiBotAIGrind.cpp
  */
 
+#include "SuiKarting.h"
 #include "AiBotAIMain.h"
 #include "SuiAutopilot.h"
 #include "SuiRaidTelemetry.h"
@@ -1857,6 +1858,8 @@ void AiBotAI::UpdateAI(uint32 const diff)
     // [SUI] Fix A: drain at most one coalesced RTS move per tick (latest dest wins). Runs ahead of
     // the 1 Hz behaviour gate so an ordered move stays responsive, and before the possess
     // early-returns so a free-view-commanded body still gets its move.
+    // WoW Karting: a racer bot drives the course; the race owns its tick (SuiKartingRace.cpp).
+    if (SuiKarting::TickRacer(this, diff)) return;
     if (SuiCommanderRaid::Tick(this, diff)) return;
     // A commanded pre-pull preparation owns the tick the same way: the body stays put
     // and eats, drinks and buffs until it is raid-ready or interrupted.

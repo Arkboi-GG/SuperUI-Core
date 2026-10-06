@@ -20,6 +20,7 @@
 #include "Util.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "SuiKarting.h"
 
 #include <algorithm>
 #include <array>
@@ -29,7 +30,11 @@
 namespace
 {
     constexpr uint8 PORTAL_PROTOCOL_VERSION = WorldPackets::SuiPortal::SUI_PORTAL_PROTOCOL_VERSION;
-    constexpr float PORTAL_PRELOAD_RADIUS = 150.0f;
+    // The client starts preparing at 150 yd and keeps a tracked portal to 180 (PortalWarmRelevanceLaw); a
+    // fast mover (a kart at 21 yd/s) also reaches the radius on the client before its last movement packet
+    // reaches us. Validate with that hysteresis plus lag, or the first prepare is Denied at 149.8 yd and the
+    // destination loads cold (WoW Karting, 2026-10-04). Using the portal still needs interact distance.
+    constexpr float PORTAL_PRELOAD_RADIUS = 200.0f;
     constexpr float PORTAL_HALF_WIDTH = 3.0f;
     constexpr float PORTAL_HALF_HEIGHT = 4.0f;
     constexpr float PORTAL_BOTTOM_CLEARANCE = 0.10f;
@@ -206,7 +211,8 @@ namespace
 
         GameObjectInfo const* info = portal->GetGOInfo();
         if (!info || portal->GetGoType() != GAMEOBJECT_TYPE_SPELLCASTER ||
-            !IsStockPortalPair(portal->GetEntry(), info->spellcaster.spellId))
+            (!IsStockPortalPair(portal->GetEntry(), info->spellcaster.spellId) &&
+             !SuiPortal::IsPublicPackPortal(portal->GetEntry(), info)))
             return ValidationResult::Unsupported;
 
         SpellTargetPosition const* destination =
@@ -345,7 +351,7 @@ void SuiPortal::WriteCapabilityTrailer(WorldPacket& data)
         CAPABILITY_COMPANIONS_V1 |
         CAPABILITY_PARTY_TAXI_V1 |
         CAPABILITY_TACTICAL_FREEZE_V1 | CAPABILITY_COMMANDER_RAID_V1 |
-        CAPABILITY_THREAT_METER_V1;
+        CAPABILITY_THREAT_METER_V1 | CAPABILITY_KARTING_V1;
     if (catalogComplete)
         capabilities |= CAPABILITY_PORTAL_CAST_PREWARM_V1;
 
@@ -368,6 +374,13 @@ void SuiPortal::WriteCapabilityTrailer(WorldPacket& data)
         data << float(destination.x) << float(destination.y) << float(destination.z);
         data << float(destination.o);
     }
+}
+
+bool SuiPortal::IsPublicPackPortal(uint32 entry, GameObjectInfo const* info)
+{
+    return entry >= PACK_TEMPLATE_FIRST && info && info->type == GAMEOBJECT_TYPE_SPELLCASTER &&
+        !info->spellcaster.partyOnly && SuiKarting::IsPackSpell(info->spellcaster.spellId) &&
+        IsFiniteDestination(sSpellMgr.GetSpellTargetPosition(info->spellcaster.spellId));
 }
 
 void SuiPortal::ConfigureSummonedPortalVisibility(GameObject* portal,

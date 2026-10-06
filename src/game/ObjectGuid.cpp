@@ -112,7 +112,24 @@ void ObjectGuidGenerator<high>::GenerateRange(uint32& first, uint32& last)
 template<HighGuid high>
 void ObjectGuidGenerator<high>::LoadFromDB(char const* fieldName, char const* tableName)
 {
-    std::unique_ptr<QueryResult> result(CharacterDatabase.PQuery("SELECT MAX(`%s`) FROM `%s`", fieldName, tableName));
+    // An item_instance gap can still be owned by an inventory, mail, auction,
+    // gift, loot or petition reference. Reusing it can fail the inventory INSERT
+    // and roll back a whole character save. Reserve references without repairing
+    // or deleting them; other GUID types retain their single-table source.
+    std::string occupiedSource = std::string("`") + tableName + "`";
+    // Item text IDs share HIGHGUID_ITEM but use item_text.id, not item GUIDs.
+    if (high == HIGHGUID_ITEM && std::string(tableName) == "item_instance" && std::string(fieldName) == "guid")
+    {
+        occupiedSource =
+            "(SELECT `guid` FROM `item_instance` "
+            "UNION SELECT `item_guid` AS `guid` FROM `character_inventory` "
+            "UNION SELECT `item_guid` AS `guid` FROM `auction` "
+            "UNION SELECT `item_guid` AS `guid` FROM `character_gifts` "
+            "UNION SELECT `guid` FROM `item_loot` "
+            "UNION SELECT `item_guid` AS `guid` FROM `mail_items` "
+            "UNION SELECT `charter_guid` AS `guid` FROM `petition`) AS occupied_item_guids";
+    }
+    std::unique_ptr<QueryResult> result(CharacterDatabase.PQuery("SELECT MAX(`%s`) FROM %s", fieldName, occupiedSource.c_str()));
     if (!result)
         return;
 
@@ -129,7 +146,7 @@ void ObjectGuidGenerator<high>::LoadFromDB(char const* fieldName, char const* ta
     do
     {
         upperBound = lowerBound - 1 + maxQuerySize;
-        result = CharacterDatabase.PQuery("SELECT `%s` FROM `%s` WHERE `%s` BETWEEN %u AND %u ORDER BY `%s` ASC", fieldName, tableName, fieldName, lowerBound, upperBound, fieldName);
+        result = CharacterDatabase.PQuery("SELECT `%s` FROM %s WHERE `%s` BETWEEN %u AND %u ORDER BY `%s` ASC", fieldName, occupiedSource.c_str(), fieldName, lowerBound, upperBound, fieldName);
         if (!result)
             goto end;
 

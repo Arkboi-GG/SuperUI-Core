@@ -1106,3 +1106,27 @@ Reply, always on the requesting session, never on a bot's socket-less one:
 | row × rows | u64 guid, f32 threat | raw ThreatManager values |
 | hasSelf | u8 | 1 when the driven body (`GetSuiActor`) is on the list but not among the rows |
 | selfRank, selfThreat | u16, f32 | present only when hasSelf = 1; rank is 1-based |
+
+## WoW Karting — CMSG_SUI_KART / SMSG_SUI_KART (v1, owner 2026-10-04)
+
+The kart race (MSUIClient `shared_docs/WOW_KARTING.md`, Core `SuperUiContent/SuiWorld/Karting/SuiKartingRace.cpp`,
+client `Net/KartingWire.cs` + `GameLoop/Hud/GameLoop.Karting.cs`). Opcodes 878 / 879 (0x036E / 0x036F);
+`NUM_MSG_TYPES` is 880. Capability bit 15 (`KARTING_V1`) advertises the pair; the race itself exists only while the
+`wow-karting` World Content Pack is enabled (its course is game_tele rows `kart:<course>:...`).
+
+CMSG_SUI_KART, exactly 6 bytes: `u8 version (1), u8 action, u32 param`. Actions: 1 join, 2 leave, 3 start now (join,
+fill the grid with racer bots, go after ~8 s), 4 query.
+
+SMSG_SUI_KART: `u8 version (1), u8 kind`, then by kind:
+
+| kind | body |
+|---|---|
+| 1 State | `u32 race, u8 phase (0 idle, 1 gathering, 2 countdown, 3 racing, 4 finished), u8 laps, u8 checkpoints, i32 countdownMs, u32 elapsedMs, u8 racers, racers x { u64 guid, u8 lap, u8 nextCheckpoint, u8 rank, u8 flags (1 bot, 2 finished, 4 dnf, 8 self), u32 finishMs }, u8 hasNext, [u32 map, f32 x, f32 y, f32 z, f32 radius]` |
+| 2 Countdown | `u32 race, u8 count` (3, 2, 1, 0 = GO), sent on the beat |
+| 3 Prewarm | `u32 portalEntry, u32 teleportSpell, u32 map, f32 x, f32 y, f32 z, f32 o` - the racer's current leg's Real Portal destination (a placed public pack portal; the client warms it before the kart reaches the 150-yd prepare radius) |
+| 4 Notice | `u8 code (1 joined, 2 left, 3 not on kart, 4 full, 5 no course, 6 lap (param = lap, 0 = final), 7 finished (param = place), 8 dnf), u32 param` |
+
+Server-authoritative: checkpoints and laps are measured from positions on the world thread (bots send no client
+packets); a racer knocked off the kart is remounted after 3 s; a dead racer is out. Racer bots are SuperUI AiBotAI
+characters created once by name and logged in/out per race; their tick is owned by `SuiKarting::TickRacer` (they drive
+the racing line with MovePoint + pathfinding and use the portal gameobjects like a client does).

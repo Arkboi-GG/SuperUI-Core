@@ -906,5 +906,9 @@ enum OpcodesList
     // driven body's own row. 1.12 sends no threat to clients; capability 14.
     CMSG_SUI_THREAT                        = 876,      // 0x036C
     SMSG_SUI_THREAT                        = 877,      // 0x036D
-    NUM_MSG_TYPES                          = 878
+    // WoW Karting (owner 2026-10-04): join/leave/start the kart race; race state, the
+    // 3-2-1-GO beats, the next portal's destination to prewarm; capability 15.
+    CMSG_SUI_KART                          = 878,      // 0x036E
+    SMSG_SUI_KART                          = 879,      // 0x036F
+    NUM_MSG_TYPES                          = 880
 };

@@ -33,6 +33,7 @@
 #include "DBCEnums.h"
 #include "Spell.h"
 #include "SpellMgr.h"
+#include "SuperUiContent/SuiWorld/Karting/SuiKarting.h"
 
 template<class T>
 inline void MaNGOS::VisibleNotifier::Visit(GridRefManager<T>& m)
@@ -59,6 +60,11 @@ inline void CallAIMoveLOS(Creature* c, Unit* moving)
     // Creature AI reaction
     if (!c->HasUnitState(UNIT_STATE_LOST_CONTROL | UNIT_STATE_NO_SEARCH_FOR_OTHERS) && !c->IsInEvadeMode() && c->AI())
     {
+        // WoW Karting: a kart rider is NEUTRAL - a hostile creature does not aggro on sight.
+        // Friendly line-of-sight scripts (greetings, escorts) still see the rider.
+        if (SuiKarting::IsNeutralKartRider(moving) && c->IsHostileTo(moving))
+            return;
+
         bool alert = false;
         if (moving->IsVisibleForOrDetect(c, c, true, false, &alert))
               c->AI()->MoveInLineOfSight(moving);
