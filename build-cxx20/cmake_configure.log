@@ -1,0 +1,66 @@
+-- The C compiler identification is GNU 13.3.0
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+
+-- This script builds the vMaNGOS server.
+  Options that can be used in order to configure the process:
+    PREFIX                    Path where the server should be installed to
+    CMAKE_INSTALL_PREFIX      Path where the server should be installed to
+    USE_PCH                   Use precompiled headers
+    USE_PCH_OLD               Use precompiled headers
+    BUILD_FOR_HOST_CPU        Build specifically for the host CPU via `-march=native` (might not run on different machines)
+    USE_SCRIPTS               Build scripts
+    BUILD_EXTRACTORS          Build extractors
+    BUILD_REALMMERGE          Build helper tool for merging character databases
+    ENABLE_MAILSENDER         Enables support for sending emails via sendgrid.com (requires libcurl)
+    SUPPORTED_CLIENT_BUILD    Client version the core will support
+    ENABLE_CPPTRACE           Enables cpptrace stack tracing; can be disabled if using other tools like GDB
+
+
+  To set an option simply type -D<OPTION>=<VALUE> after 'cmake <srcs>'.
+  Also, you can specify the generator with -G. see 'cmake --help' for more details
+  For example:
+    Build server with default settings:
+    $ mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=../opt/vmangos ..
+
+-- Detected 64-bit platform
+-- Found Git: /usr/bin/git  
+-- Using mysql-config: /usr/bin/mariadb_config
+-- Found MySQL library: /usr/lib/x86_64-linux-gnu/libmariadb.so
+-- Found MySQL headers: /usr/include/mariadb
+-- Found OpenSSL library: /usr/lib/x86_64-linux-gnu/libssl.so
+-- Found OpenSSL headers: /usr/include
+-- Found ZLIB: /usr/lib/x86_64-linux-gnu/libz.so (found version "1.3")  
+-- 
+-- Core revision: 2300e1e8c5b0559883e1 2026-08-12 22:46:22 -0400 
+-- Supported version: CLIENT_BUILD_1_12_1
+-- Install server to: /home/wowvmangos/server
+-- 
+-- Use PCH               : Yes
+-- PGO profile           : Disabled
+-- Detected compiler     : GNU
+-- Build for host CPU    : Yes (default)
+-- Build type            : Release
+-- Build scripts         : Yes (default)
+-- Build extractors      : No (default)
+-- Build realm merge     : No (default)
+-- Mailsender enabled    : No (default)
+-- Cpptrace enabled      : No
+-- Debug symbols         : Disabled
+-- Build flags (RELEASE) : -O3 -DNDEBUG  --no-warnings -fexceptions -fnon-call-exceptions -pipe -march=native
+-- Build flags (DEBUG)   : -g  --no-warnings -fexceptions -fnon-call-exceptions -pipe -march=native
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (12.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/wowvmangos/vmangos/build-cxx20

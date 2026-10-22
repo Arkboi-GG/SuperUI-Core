@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rotating 3D Wireframe Cube</title>
+<style>
+  :root {
+    --size: 220px;
+    --half: 110px;      /* half of --size */
+    --neg: -110px;      /* -1 * --half  */
+    --edge: #46e0ff;
+    --edge-dim: #1b6f86;
+  }
+
+  * { margin: 0; box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    background: radial-gradient(circle at 50% 40%, #16202e 0%, #070a10 70%);
+    overflow: hidden;
+    font-family: system-ui, sans-serif;
+  }
+
+  .scene {
+    display: grid;
+    place-items: center;
+    height: 100vh;
+    width: 100vw;
+    perspective: 900px;
+  }
+
+  .stage {
+    width: var(--size);
+    height: var(--size);
+    position: relative;
+    transform-style: preserve-3d;
+    animation: spin 12s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotateX(-28deg) rotateY(0deg)   rotateZ(0deg); }
+    to   { transform: rotateX(-28deg) rotateY(360deg) rotateZ(360deg); }
+  }
+
+  .cube {
+    position: absolute;
+    inset: 0;
+    transform-style: preserve-3d;
+  }
+
+  /* ---- edges ---------------------------------------------------- */
+  /* A bar is centred on the cube's centre, then pushed to its own
+     edge by translate3d. Anchor point matters: left/top 50% puts the
+     box CORNER at the centre, so the negative margins below are what
+     actually make it a centred box. Without them the cube collapses. */
+
+  .e {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--size);
+    height: 2px;
+    margin-left: calc(-1 * var(--half));
+    margin-top: -1px;
+    background: var(--edge);
+    box-shadow: 0 0 6px 1px var(--edge), 0 0 14px 2px rgba(70, 224, 255, .45);
+    transform-style: preserve-3d;
+  }
+
+  /* edges running along X: rotate nothing, offset in Y/Z */
+  .e-x { transform: translate3d(0, var(--ty), var(--tz)); }
+
+  /* edges running along Y: bar stands upright, offset in X/Z */
+  .e-y {
+    width: 2px;
+    height: var(--size);
+    margin-left: -1px;
+    margin-top: calc(-1 * var(--half));
+    transform: translate3d(var(--tx), 0, var(--tz));
+  }
+
+  /* edges running along Z: same bar as X, spun 90deg about Y,
+     offset in Y/Z (the rotate is applied first, right-to-left) */
+  .e-z { transform: translate3d(0, var(--ty), var(--tz)) rotateY(90deg); }
+
+  /* ---- vertices -------------------------------------------------- */
+  .v {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 9px;
+    height: 9px;
+    margin-left: -4.5px;
+    margin-top: -4.5px;
+    border-radius: 50%;
+    background: #eafcff;
+    box-shadow: 0 0 8px 2px var(--edge);
+    transform-style: preserve-3d;
+    transform: translate3d(var(--tx), var(--ty), var(--tz));
+  }
+
+  .title {
+    position: fixed;
+    bottom: 24px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: #7fd9e8;
+    font-size: 13px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    opacity: .7;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .stage { animation: none; transform: rotateX(-28deg) rotateY(35deg); }
+  }
+</style>
+</head>
+<body>
+  <div class="scene">
+    <div class="stage">
+      <div class="cube">
+
+        <!-- 4 edges along X: span x, fixed y/z -->
+        <div class="e-x" style="--ty: var(--half); --tz: var(--half)"></div>
+        <div class="e-x" style="--ty: var(--half); --tz: var(--neg)"></div>
+        <div class="e-x" style="--ty: var(--neg);  --tz: var(--half)"></div>
+        <div class="e-x" style="--ty: var(--neg);  --tz: var(--neg)"></div>
+
+        <!-- 4 edges along Y: span y, fixed x/z -->
+        <div class="e-y" style="--tx: var(--half); --tz: var(--half)"></div>
+        <div class="e-y" style="--tx: var(--half); --tz: var(--neg)"></div>
+        <div class="e-y" style="--tx: var(--neg);  --tz: var(--half)"></div>
+        <div class="e-y" style="--tx: var(--neg);  --tz: var(--neg)"></div>
+
+        <!-- 4 edges along Z: span z, fixed x/y -->
+        <div class="e-z" style="--tx: var(--half); --ty: var(--half)"></div>
+        <div class="e-z" style="--tx: var(--half); --ty: var(--neg)"></div>
+        <div class="e-z" style="--tx: var(--neg);  --ty: var(--half)"></div>
+        <div class="e-z" style="--tx: var(--neg);  --ty: var(--neg)"></div>
+
+        <!-- 8 corners: all sign combinations of (half, half, half) -->
+        <div class="v" style="--tx: var(--half); --ty: var(--half); --tz: var(--half)"></div>
+        <div class="v" style="--tx: var(--half); --ty: var(--half); --tz: var(--neg)"></div>
+        <div class="v" style="--tx: var(--half); --ty: var(--neg); --tz: var(--half)"></div>
+        <div class="v" style="--tx: var(--half); --ty: var(--neg); --tz: var(--neg)"></div>
+        <div class="v" style="--tx: var(--neg);  --ty: var(--half); --tz: var(--half)"></div>
+        <div class="v" style="--tx: var(--neg);  --ty: var(--half); --tz: var(--neg)"></div>
+        <div class="v" style="--tx: var(--neg);  --ty: var(--neg); --tz: var(--half)"></div>
+        <div class="v" style="--tx: var(--neg);  --ty: var(--neg); --tz: var(--neg)"></div>
+
+      </div>
+    </div>
+  </div>
+
+  <p class="title">Wireframe Cube &mdash; pure CSS 3D</p>
+</body>
+</html>
