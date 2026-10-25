@@ -71,6 +71,7 @@
 #include "PlayerBotMgr.h"
 #include "SuiWorldState.h"
 #include "SuiRts.h"
+#include "SuiKarting.h"
 #include "ZoneScriptMgr.h"
 #include "CharacterDatabaseCache.h"
 #include "CreatureGroups.h"
@@ -2082,6 +2083,7 @@ void World::Update(uint32 diff)
     sGuardMgr.Update(diff);
     sZoneScriptMgr.Update(diff);
     SuiRts::Tick(diff);
+    SuiKarting::Tick(diff);
 
     // Update groups with offline leaders
     if (m_timers[WUPDATE_GROUPS].Passed())

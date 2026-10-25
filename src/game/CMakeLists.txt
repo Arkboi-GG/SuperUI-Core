@@ -221,6 +221,8 @@ set (game_SRCS
     SuperUiContent/SuiWorld/CRPG/SuiPossess.cpp
     SuperUiContent/SuiWorld/CRPG/SuiCompanion.cpp
     SuperUiContent/SuiWorld/CRPG/SuiTaxi.cpp
+    SuperUiContent/SuiWorld/CRPG/SuiAutopilot.cpp
+    SuperUiContent/SuiWorld/CRPG/SuiRaidTelemetry.cpp
     SuperUiContent/SuiWorld/CRPG/SuiCommanderRaid.cpp
     SuperUiContent/SuiWorld/CRPG/SuiRaidPrepare.cpp
     SuperUiContent/SuiWorld/CRPG/SuiRaidSupply.cpp
@@ -231,6 +233,8 @@ set (game_SRCS
     SuperUiContent/SuiWorld/RTS/SuiHero.cpp
     SuperUiContent/SuiWorld/RTS/SuiRts.cpp
     SuperUiContent/SuiWorld/Bridge/SuiPortal.cpp
+    SuperUiContent/SuiWorld/Karting/SuiKarting.cpp
+    SuperUiContent/SuiWorld/Karting/SuiKartingRace.cpp
     PlayerBots/BattleBotWaypoints.cpp
     PlayerBots/PlayerBotAI.cpp
     PlayerBots/PlayerBotMgr.cpp
@@ -494,6 +498,7 @@ set (game_SRCS
     SuperUiContent/SuiWorld/RTS/SuiHero.h
     SuperUiContent/SuiWorld/RTS/SuiRts.h
     SuperUiContent/SuiWorld/Bridge/SuiPortal.h
+    SuperUiContent/SuiWorld/Karting/SuiKarting.h
     SuperUiContent/SuiBots/Movement/AiBotMovementGenerators.h
     SuperUiContent/SuiBots/Movement/AiBotPathSmoothing.h
     PlayerBots/BattleBotWaypoints.h
@@ -618,6 +623,7 @@ include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/Shared
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/CRPG
   ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/RTS
+  ${CMAKE_CURRENT_SOURCE_DIR}/SuperUiContent/SuiWorld/Karting
   ${CMAKE_CURRENT_SOURCE_DIR}/Server
   ${CMAKE_CURRENT_SOURCE_DIR}/Server/Protocol
   ${CMAKE_CURRENT_SOURCE_DIR}/Spells

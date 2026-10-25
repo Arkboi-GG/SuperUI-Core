@@ -10,6 +10,7 @@
 
 class GameObject;
 class WorldPacket;
+struct GameObjectInfo;
 
 namespace SuiPortal
 {
@@ -62,6 +63,10 @@ namespace SuiPortal
     // Localized server-authoritative Command View freeze and five-action FIFO.
     constexpr uint32 CAPABILITY_COMMANDER_RAID_V1 = 1u << 13;
     constexpr uint32 CAPABILITY_TACTICAL_FREEZE_V1 = 1u << 12;
+    // Threat meter v1: CMSG/SMSG_SUI_THREAT. Never sent before this bit is observed.
+    constexpr uint32 CAPABILITY_THREAT_METER_V1 = 1u << 14;
+    // WoW Karting v1: CMSG/SMSG_SUI_KART. The race itself exists only with the wow-karting pack.
+    constexpr uint32 CAPABILITY_KARTING_V1 = 1u << 15;
 
     // Append the backwards-compatible capability trailer and, when all six
     // server-authored destinations are available, the fixed-row cast-prewarm
@@ -72,6 +77,13 @@ namespace SuiPortal
     // continent visibility radius so its per-player 150-yard warm can begin.
     // This changes streaming visibility only; stock interaction range remains.
     void ConfigureSummonedPortalVisibility(GameObject* portal, uint32 summonSpellId);
+
+    // WoW Karting (MSUIClient shared_docs/WOW_KARTING.md): a PLACED World Content Pack portal
+    // anyone may use - a type-22 spellcaster template (entry 7,000,000+) that is not party-only,
+    // casting a pack teleport spell [38000, 40000) with a spell_target_position. It never locks
+    // on use (GameObject::Use) and Real Portals prepares it like a stock Mage portal.
+    constexpr uint32 PACK_TEMPLATE_FIRST = 7000000;
+    bool IsPublicPackPortal(uint32 entry, GameObjectInfo const* info);
 
     enum DescriptorResult : uint8
     {
